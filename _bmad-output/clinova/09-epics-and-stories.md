@@ -57,18 +57,25 @@ As a Business Analyst, I want the baseline's measured state against brief Proble
 ### Epic 1.1: Multi-Parser Extraction & Reconciliation
 **FRs:** FR-1 · **ADRs:** none directly · **Depends on:** Phase 0 · **Files:** new `packages/research-engine/parsing/` (or interim `pipeline/parsing/`), `pipeline/pdf_parser.py` (retained as one input)
 
-#### Story 1.1.1: Stand up GROBID and Docling as local services
+#### Story 1.1.1a: Stand up Docling as a local Python dependency (unblocked, no Docker needed)
 **AC:**
-- **Given** the `data` Compose profile (`08-local-deployment-architecture.md`)
-- **When** `docker compose --profile data up` runs
-- **Then** both services report healthy and expose their extraction APIs
-- **And** a measured resource-cost result (RAM/startup time against this project's actual corpus) is recorded, confirming or revising the desk estimate in `05-data-architecture.md` §2
+- **Given** Docling is a pure pip-installable package
+- **When** it's added to the Phase 1 environment
+- **Then** it runs directly in the Python venv with no container dependency, and a measured resource-cost result is recorded, confirming or revising the desk estimate in `05-data-architecture.md` §2
 
-#### Story 1.1.2: Extract a paper independently with all three parsers
+#### Story 1.1.1b: Stand up GROBID via Gradle (deferred — see `amendments/2026-08-20-environment-constraints.md`)
+**AC:**
+- **Given** this development machine has no Docker access (no admin rights, no WSL2) but does have Java 11 already installed
+- **When** GROBID is picked up
+- **Then** it is built and run via its own Gradle wrapper (`./gradlew run`), not the `data` Compose profile, until Docker access is resolved
+- **And** a measured resource-cost result (RAM/startup time) is recorded, confirming or revising the desk estimate in `05-data-architecture.md` §2
+- **Not required to unblock the rest of Epic 1.1** — Story 1.1.2-1.1.4 proceed with PyMuPDF + Docling as the two-parser interim combination in the meantime
+
+#### Story 1.1.2: Extract a paper independently with each available parser
 **AC:**
 - **Given** a sample paper
 - **When** extraction runs
-- **Then** three independent `ExtractedField` sets exist (`05-data-architecture.md` §3), each correctly tagged by `source`
+- **Then** an independent `ExtractedField` set exists per available parser (`05-data-architecture.md` §3) — PyMuPDF + Docling now, GROBID added once Story 1.1.1b lands — each correctly tagged by `source`, and reconciliation (Story 1.1.3) works correctly with either two or three parser inputs (never assumes exactly three)
 
 #### Story 1.1.3: Reconcile multi-parser output into one canonical paper representation
 **AC:**

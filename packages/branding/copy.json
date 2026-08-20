@@ -1,0 +1,11 @@
+{
+  "$schema": "internal://clinova/branding-copy-v1",
+  "landing": {
+    "hero_headline": "Find the research nobody has done yet.",
+    "hero_supporting": "Transform medical literature into evidence-backed research opportunities through structured discovery, adversarial validation and reproducible AI analysis.",
+    "primary_cta": "Start Research",
+    "secondary_cta": "Open Workspace",
+    "footer_trust_strip": ["Evidence-driven", "Reproducible", "Versioned", "Explainable"]
+  },
+  "notes": "See _bmad-output/clinova/02-ux-specification.md §2 for the rationale behind keeping tagline and hero_headline as two distinct strings."
+}

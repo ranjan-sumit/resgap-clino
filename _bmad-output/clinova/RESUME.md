@@ -49,8 +49,10 @@ created: '2026-08-20'
 - Concrete Search Coverage Score threshold value (0.6 is a starting point, `04-ai-research-architecture.md` §5.2) — tuned in Phase 3.
 - Exact deterministic gap-pattern list for the medical/healthcare-AI domain (`04-ai-research-architecture.md` §4) — needs a Research Methodology Specialist pass at Phase 3 kickoff.
 - Frontend component library choice, Knowledge Graph rendering library — deferred to Phase 5 kickoff (`02-ux-specification.md` §9).
-- GROBID's real local resource cost — a Phase 1 spike (Story 1.1.1), not assumed from the desk evaluation in `05-data-architecture.md` §2.
+- GROBID's real local resource cost — a Phase 1 spike (Story 1.1.1b), not assumed from the desk evaluation in `05-data-architecture.md` §2. **Update 2026-08-20:** this dev machine (company laptop) has no admin rights / Docker access; GROBID is deferred to a Gradle-based (non-Docker) build against the already-installed Java 11 — see `amendments/2026-08-20-environment-constraints.md`. Phase 1 proceeds in the meantime with PyMuPDF + Docling (Docling needs no Docker/JVM).
 - Phase 6 (governance) has no trigger yet — do not build it speculatively.
+- NVIDIA NIM API key: user will add it to a local `.env` (not committed) — needed to unblock Story 0.1.1's real end-to-end baseline report.
+- Sample papers for the seed corpus / Benchmark v1: user is providing specific papers (not yet received as of this note).
 
 ## Next action
 
