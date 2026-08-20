@@ -34,7 +34,9 @@ created: '2026-08-20'
 
 ## Current phase
 
-**Phase 0 — Baseline** (not started). Entry trigger: always true. See `10-phased-implementation-plan.md`'s phase-gate table and `09-epics-and-stories.md`'s Epic 0.1 for the concrete next stories.
+**Phase 0 — Baseline** (in progress). Entry trigger: always true. See `10-phased-implementation-plan.md`'s phase-gate table and `09-epics-and-stories.md`'s Epic 0.1 for the concrete next stories.
+
+**Environment status (2026-08-20):** Python 3.11.9 installed per-user (no admin rights on this machine — see `amendments/2026-08-20-environment-constraints.md`), venv created at repo root `.venv/`, `requirements-dev.txt` (adds `pytest`) installed. **All 155 existing tests pass unmodified** — confirmed baseline before any Phase 1 engine changes. `evals/benchmarks/baseline/generate_baseline_report.py` is written and ready to run. **Blocked on:** the user's `.env` (NVIDIA_API_KEY) and the sample papers they're providing — Story 0.1.1 cannot execute until both arrive.
 
 ## Key decisions already made (don't re-litigate without a new ADR)
 
