@@ -1,0 +1,86 @@
+[
+  {
+    "title": "Longitudinal multimodal imaging to link brain centile trajectories with internalising outcomes in AuDHD",
+    "description": "Current work relies on cross‑sectional structural MRI and lacks functional or longitudinal data, preventing causal insight into how brain development relates to anxiety and depression in co‑occurring autism‑ADHD. A prospective multimodal imaging cohort would fill this gap.",
+    "gap_type": "dataset",
+    "confidence": "high",
+    "evidence": [
+      "Brain-Charting paper (Limitations): \"Findings are based on cross‑sectional structural MRI; longitudinal trajectories and functional modalities were not examined.\"",
+      "Causal Effects paper (Future Work): \"Perform prospective longitudinal imaging studies to corroborate the mediation pathways.\""
+    ],
+    "supporting_papers": [
+      "Brain-Charting Autism and Attention-Deficit/Hyperactivity Disorder Reveals Distinct and Overlapping Neurobiology",
+      "Causal Effects of Brain Structural Features on ADHD and ASD Risk: A Two‑Sample Mendelian Randomization Study"
+    ],
+    "missing_connection": "Longitudinal structural + functional MRI data aligned with internalising symptom trajectories for AuDHD individuals",
+    "why_important": "Enables AI models to capture developmental dynamics, improves causal inference, and supports personalized risk prediction for anxiety and depression in this underserved group."
+  },
+  {
+    "title": "Integrated AI model combining trait‑based scores and neuroimaging centiles to predict anxiety/depression in AuDHD, validated across diverse sites",
+    "description": "Trait‑based logistic regression predicts internalising disorders, while centile neuroimaging scores characterize brain structure, but no study merges these modalities or tests the model in non‑European, multi‑site samples. An integrated predictive framework would address this.",
+    "gap_type": "methodology",
+    "confidence": "medium",
+    "evidence": [
+      "Neurodiversity paper (Methods): \"Binary logistic regression to estimate odds ratios for internalising problem diagnoses from autism and ADHD trait scores.\"",
+      "Brain-Charting paper (Limitations): \"The co‑occurring autism‑ADHD subgroup analysis was exploratory and limited to 203 individuals.\"",
+      "Causal Effects paper (Limitations): \"Analyses were restricted to cohorts of largely European ancestry, limiting generalizability to other ethnic groups.\""
+    ],
+    "supporting_papers": [
+      "Neurodiversity and mental health in adulthood: exploring the unique contributions of autism and ADHD to internalising problems",
+      "Brain-Charting Autism and Attention-Deficit/Hyperactivity Disorder Reveals Distinct and Overlapping Neurobiology",
+      "Causal Effects of Brain Structural Features on ADHD and ASD Risk: A Two‑Sample Mendelian Randomization Study"
+    ],
+    "missing_connection": "Fusion of self‑report trait scores with imaging centile deviations in a machine‑learning pipeline, followed by multi‑site, ethnically diverse validation",
+    "why_important": "Provides a more accurate, biologically informed risk tool for anxiety and depression in AuDHD, supporting clinical decision‑making across health systems."
+  },
+  {
+    "title": "Fairness and bias assessment of normative brain charts for AuDHD across ethnicity and gender",
+    "description": "Normative centile models are built on large samples but have not been evaluated for systematic bias across demographic subgroups, especially given the MR study’s European‑only ancestry. A fairness audit would reveal inequities.",
+    "gap_type": "evaluation",
+    "confidence": "medium",
+    "evidence": [
+      "Causal Effects paper (Limitations): \"Analyses were restricted to cohorts of largely European ancestry, limiting generalizability to other ethnic groups.\"",
+      "Brain-Charting paper (Limitations): \"Data on secondary diagnoses were not available for all datasets and were heterogeneous across sites, potentially leading to missed cases.\""
+    ],
+    "supporting_papers": [
+      "Causal Effects of Brain Structural Features on ADHD and ASD Risk: A Two‑Sample Mendelian Randomization Study",
+      "Brain-Charting Autism and Attention-Deficit/Hyperactivity Disorder Reveals Distinct and Overlapping Neurobiology"
+    ],
+    "missing_connection": "Systematic subgroup performance analysis (e.g., calibration, error rates) of centile scores by ethnicity, sex, and socioeconomic status",
+    "why_important": "Ensures AI‑driven neuroimaging biomarkers do not exacerbate health disparities and are trustworthy for all AuDHD patients."
+  },
+  {
+    "title": "Comprehensive multimodal AuDHD benchmark dataset including traits, genetics, imaging, and longitudinal outcomes from diverse populations",
+    "description": "Existing resources are fragmented: small co‑occurring subgroup (n=203), European‑only genetic summary data, and no unified longitudinal phenotypes. A curated benchmark would enable reproducible AI research.",
+    "gap_type": "dataset",
+    "confidence": "high",
+    "evidence": [
+      "Brain-Charting paper (Limitations): \"The co‑occurring autism‑ADHD subgroup analysis was exploratory and limited to 203 individuals.\"",
+      "Causal Effects paper (Limitations): \"Analyses were restricted to cohorts of largely European ancestry, limiting generalizability to other ethnic groups.\""
+    ],
+    "supporting_papers": [
+      "Brain-Charting Autism and Attention-Deficit/Hyperactivity Disorder Reveals Distinct and Overlapping Neurobiology",
+      "Causal Effects of Brain Structural Features on ADHD and ASD Risk: A Two‑Sample Mendelian Randomization Study"
+    ],
+    "missing_connection": "Integration of self‑report trait data, genome‑wide SNP instruments, high‑resolution structural/functional MRI, and repeated clinical assessments across multiple international sites, including LMIC partners",
+    "why_important": "Provides a shared foundation for developing, testing, and comparing AI models, accelerating translational impact for AuDHD care worldwide."
+  },
+  {
+    "title": "Explainable AI decision‑support system that unifies MR causal estimates, imaging centile deviations, and trait scores for internalising disorder management in AuDHD",
+    "description": "No current work links genetic causal pathways, neuroimaging biomarkers, and behavioral traits into an interpretable clinical tool, nor integrates it with electronic health records. Building such a system would bridge research and practice.",
+    "gap_type": "application",
+    "confidence": "medium",
+    "evidence": [
+      "Neurodiversity paper (Methods): \"Binary logistic regression to estimate odds ratios for internalising problem diagnoses.\"",
+      "Causal Effects paper (Contributions): \"Identified causal association between brain structural features and ADHD/ASD risk via Mendelian Randomization.\"",
+      "Brain-Charting paper (Future Work): \"Assess clinical utility of centile scores for individualized diagnosis and treatment planning.\""
+    ],
+    "supporting_papers": [
+      "Neurodiversity and mental health in adulthood: exploring the unique contributions of autism and ADHD to internalising problems",
+      "Causal Effects of Brain Structural Features on ADHD and ASD Risk: A Two‑Sample Mendelian Randomization Study",
+      "Brain-Charting Autism and Attention-Deficit/Hyperactivity Disorder Reveals Distinct and Overlapping Neurobiology"
+    ],
+    "missing_connection": "An explainable multimodal AI pipeline that combines MR‑derived effect sizes, centile‑based imaging deviations, and trait scores, with transparent feature attribution and EHR integration",
+    "why_important": "Provides clinicians with actionable, interpretable risk insights, facilitating personalized interventions for anxiety and depression in AuDHD while meeting regulatory and safety standards."
+  }
+]

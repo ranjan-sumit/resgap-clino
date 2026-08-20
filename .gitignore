@@ -8,3 +8,5 @@ data/*.db-shm
 .venv/
 venv/
 evals/benchmarks/seed-papers/*.pdf
+Data-17072026/
+*.pdf

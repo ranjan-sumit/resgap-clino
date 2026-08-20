@@ -1,0 +1,49 @@
+{
+  "case_id": "corpus-truncated-doi",
+  "problem": [
+    "A"
+  ],
+  "description": "References with title=Unknown paired with visibly truncated DOI strings -- real extraction data loss.",
+  "fixture_references": [
+    {
+      "title": "Unknown",
+      "year": null,
+      "abstract": "",
+      "doi": "10.3233/jad-",
+      "arxiv_id": "",
+      "authors": [],
+      "citations": 0,
+      "tier": 3,
+      "source": "parsed_only",
+      "found_in_paper": "AuDHD_2.pdf",
+      "raw_reference": ""
+    },
+    {
+      "title": "Unknown",
+      "year": null,
+      "abstract": "",
+      "doi": "10.1016/j",
+      "arxiv_id": "",
+      "authors": [],
+      "citations": 0,
+      "tier": 3,
+      "source": "parsed_only",
+      "found_in_paper": "AuDHD_2.pdf",
+      "raw_reference": ""
+    },
+    {
+      "title": "Unknown",
+      "year": null,
+      "abstract": "",
+      "doi": "10.1186/s13229-",
+      "arxiv_id": "",
+      "authors": [],
+      "citations": 0,
+      "tier": 3,
+      "source": "parsed_only",
+      "found_in_paper": "AuDHD_2.pdf",
+      "raw_reference": ""
+    }
+  ],
+  "expected_behavior": "Either a correctly-recovered DOI (cross-checked against a second parser) or an explicit low-confidence/missing flag under Phase 1 multi-parser reconciliation -- never a silently truncated value presented as resolved data."
+}

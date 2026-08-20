@@ -1,0 +1,13 @@
+{
+  "benchmark_version": "v1",
+  "created": "2026-08-20",
+  "source": "Real pipeline run against Data-17072026/ (3-paper AuDHD corpus), evals/benchmarks/baseline/phase0-report-v1.json",
+  "cases": [
+    "zero-gap-silent-fabrication",
+    "corpus-reference-contamination-espanol",
+    "corpus-reference-duplicate-doi",
+    "corpus-truncated-doi"
+  ],
+  "immutable": true,
+  "note": "All four cases are real, live-reproduced findings from Phase 0 baseline generation -- not synthetic/hypothesized cases. See evals/benchmarks/baseline/phase0-findings.md for full analysis."
+}

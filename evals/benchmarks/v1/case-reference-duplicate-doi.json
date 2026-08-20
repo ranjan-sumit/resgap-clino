@@ -1,0 +1,131 @@
+{
+  "case_id": "corpus-reference-duplicate-doi",
+  "problem": [
+    "B"
+  ],
+  "description": "Multiple references sharing an identical DOI were retained as separate independent entries -- no canonical merging exists in the baseline pipeline at all.",
+  "fixture_duplicate_groups": [
+    [
+      {
+        "title": "Neurodiversity and mental health in adulthood: exploring the unique contributions of autism and ADHD to internalising problems",
+        "year": 2026,
+        "abstract": "<jats:title>Abstract</jats:title>\n                  <jats:p>\n                    Autism and Attention Deficit Hyperactivity Disorder (ADHD) are both linked to internalising problems (e.g., anxiety, depression) but their frequent co-occurrence makes these relationships difficult to disentangle. We, therefore, adopted a trait-based approach to examine the unique associations of autism and ADHD with internalising problem diagnoses in a large general population sample of adults from the United Kingdom and United States (\n                    <jats:italic>N</jats:italic>\n                    \u2009=\u20094996). We then assessed whether these associations would conceptually replicate in a clinical sub-sample (\n                    <jats:italic>n</jats:italic>\n                    \u2009=\u2009292) using a case-control design. We found that, across the whole sample, ADHD traits were an overall stronger predictor of internalising problem diagnoses than autistic traits. The case-control analyses revealed that both autistic adults and adults with ADHD had greater odds of being diagnosed with anxiety, depression and an overall internalising problem (i.e., depression and/or anxiety) than neurotypical adults. Although the clinical groups did not significantly differ from each other in their associations with mental health diagnoses, having and ADHD diagnosis was more closely linked with depression while having an autism diagnosis was more closely linked with anxiety. We discuss potential psychological mechanisms",
+        "doi": "10.1038/s41598-026-35440-6",
+        "arxiv_id": "",
+        "authors": [
+          "Luca D. Hargitai",
+          "Lucy H. Waldren",
+          "Lucy A. Livingston",
+          "Florence Y. N. Leung",
+          "Punit Shah"
+        ],
+        "venue": "Scientific Reports",
+        "citations": 0,
+        "ss_paper_id": "",
+        "url": "https://doi.org/10.1038/s41598-026-35440-6",
+        "open_access_url": null,
+        "tier": 2,
+        "source": "crossref",
+        "found_in_paper": "AuDHD_1.pdf",
+        "raw_reference": ""
+      },
+      {
+        "title": "Neurodiversity and mental health in adulthood: exploring the unique contributions of autism and ADHD to internalising problems",
+        "year": 2026,
+        "abstract": "Autism and Attention Deficit Hyperactivity Disorder (ADHD) are both linked to internalising problems (e.g., anxiety, depression) but their frequent co-occurrence makes these relationships difficult to disentangle. We, therefore, adopted a trait-based approach to examine the unique associations of autism and ADHD with internalising problem diagnoses in a large general population sample of adults from the United Kingdom and United States (N = 4996). We then assessed whether these associations would conceptually replicate in a clinical sub-sample (n = 292) using a case-control design. We found that, across the whole sample, ADHD traits were an overall stronger predictor of internalising problem diagnoses than autistic traits. The case-control analyses revealed that both autistic adults and adults with ADHD had greater odds of being diagnosed with anxiety, depression and an overall internalising problem (i.e., depression and/or anxiety) than neurotypical adults. Although the clinical groups did not significantly differ from each other in their associations with mental health diagnoses, having and ADHD diagnosis was more closely linked with depression while having an autism diagnosis was more closely linked with anxiety. We discuss potential psychological mechanisms underlying these findings and the implications for research and clinical practice concerning neurodevelopmental conditions.",
+        "doi": "10.1038/s41598-026-35440-6",
+        "arxiv_id": "",
+        "authors": [],
+        "venue": "",
+        "citations": 0,
+        "ss_paper_id": "",
+        "url": "https://doi.org/10.1038/s41598-026-35440-6",
+        "open_access_url": null,
+        "tier": 2,
+        "source": "openalex",
+        "found_in_paper": "AuDHD_1.pdf",
+        "raw_reference": "Leung, F. Y., Livingston, L. A., Mason, D. & Shah, P. Quantifying the contribution of specific autistic traits to quality of life in autistic adults. Neurodiversity 2, 27546330241261937 (2024)."
+      }
+    ],
+    [
+      {
+        "title": "Autism spectrum disorder",
+        "year": 2020,
+        "abstract": "",
+        "doi": "10.1038/s41572-019-0138-4",
+        "arxiv_id": "",
+        "authors": [],
+        "venue": "",
+        "citations": 0,
+        "ss_paper_id": "",
+        "url": "https://doi.org/10.1038/s41572-019-0138-4",
+        "open_access_url": null,
+        "tier": 2,
+        "source": "openalex",
+        "found_in_paper": "AuDHD_1.pdf",
+        "raw_reference": "den Houting, J. & Neurodiversity An insider\u2019s perspective. Autism 23, 271\u2013273 (2019)."
+      },
+      {
+        "title": "Autism spectrum disorder",
+        "year": 2020,
+        "abstract": "",
+        "doi": "10.1038/s41572-019-0138-4",
+        "arxiv_id": "",
+        "authors": [
+          "Catherine Lord",
+          "Traolach S. Brugha",
+          "Tony Charman",
+          "James Cusack",
+          "Guillaume Dumas",
+          "Thomas Frazier"
+        ],
+        "venue": "Nature Reviews Disease Primers",
+        "citations": 1572,
+        "ss_paper_id": "",
+        "url": "https://doi.org/10.1038/s41572-019-0138-4",
+        "open_access_url": null,
+        "tier": 2,
+        "source": "crossref",
+        "found_in_paper": "AuDHD_2.pdf",
+        "raw_reference": ""
+      }
+    ],
+    [
+      {
+        "title": "Global, regional, and national prevalence of overweight and obesity in children and adults during 1980\u20132013: a systematic analysis for the Global Burden of Disease Study 2013",
+        "year": 2014,
+        "abstract": "",
+        "doi": "10.1016/s0140-6736(14)60460-8",
+        "arxiv_id": "",
+        "authors": [],
+        "venue": "",
+        "citations": 0,
+        "ss_paper_id": "",
+        "url": "https://doi.org/10.1016/s0140-6736(14)60460-8",
+        "open_access_url": null,
+        "tier": 2,
+        "source": "openalex",
+        "found_in_paper": "AuDHD_1.pdf",
+        "raw_reference": "Sonuga-Barke, E. & Thapar, A. The neurodiversity concept: is it helpful for clinicians and scientists? Lancet Psychiatry. 8, 559\u2013561 (2021)."
+      },
+      {
+        "title": "Global, regional, and national prevalence of overweight and obesity in children and adults during 1980\u20132013: a systematic analysis for the Global Burden of Disease Study 2013",
+        "year": 2014,
+        "abstract": "",
+        "doi": "10.1016/s0140-6736(14)60460-8",
+        "arxiv_id": "",
+        "authors": [],
+        "venue": "",
+        "citations": 0,
+        "ss_paper_id": "",
+        "url": "https://doi.org/10.1016/s0140-6736(14)60460-8",
+        "open_access_url": null,
+        "tier": 2,
+        "source": "openalex",
+        "found_in_paper": "AuDHD_1.pdf",
+        "raw_reference": "Hollocks, M. J., Lerh, J. W., Magiati, I., Meiser-Stedman, R. & Brugha, T. S. Anxiety and depression in adults with autism spectrum disorder: a systematic review and meta-analysis. Psychol. Med. 49, 559\u2013572 (2019)."
+      }
+    ]
+  ],
+  "expected_behavior": "One canonical reference per DOI under Phase 1 identity resolution; provider/source-paper metadata preserved separately, not duplicated as independent entries."
+}

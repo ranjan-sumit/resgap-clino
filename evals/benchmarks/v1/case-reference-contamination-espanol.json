@@ -1,0 +1,67 @@
+{
+  "case_id": "corpus-reference-contamination-espanol",
+  "problem": [
+    "B"
+  ],
+  "description": "A Spanish-language textbook citation entered the trusted AuDHD-neuroimaging reference corpus, unrelated to the domain -- a real contamination instance, not hypothesized.",
+  "fixture_references": [
+    {
+      "title": "Espa\u00f1ol Santillana by Paloma Lapuerta etal., and: Espa\u00f1ol Santillana by Paloma Lapuerta etal.",
+      "year": 2017,
+      "abstract": "",
+      "doi": "10.1353/hpn.2017.0025",
+      "arxiv_id": "",
+      "authors": [
+        "Consuelo Sig\u00fcenza-Ortiz"
+      ],
+      "venue": "Hispania",
+      "citations": 0,
+      "ss_paper_id": "",
+      "url": "https://doi.org/10.1353/hpn.2017.0025",
+      "open_access_url": null,
+      "tier": 2,
+      "source": "crossref_search",
+      "found_in_paper": "AuDHD_3.pdf",
+      "raw_reference": "Hammill C, Lerch JP, Taylor MJ, Ameis SH, Chakravarty MM, etryinautismspectrumdisorder.MolPsychiatry25:614\u2013628. SzatmariP,etal.(2021):Quantitativeandqualitativesexmodulations"
+    },
+    {
+      "title": "Espa\u00f1ol Santillana by Paloma Lapuerta etal., and: Espa\u00f1ol Santillana by Paloma Lapuerta etal.",
+      "year": 2017,
+      "abstract": "",
+      "doi": "10.1353/hpn.2017.0025",
+      "arxiv_id": "",
+      "authors": [
+        "Consuelo Sig\u00fcenza-Ortiz"
+      ],
+      "venue": "Hispania",
+      "citations": 0,
+      "ss_paper_id": "",
+      "url": "https://doi.org/10.1353/hpn.2017.0025",
+      "open_access_url": null,
+      "tier": 2,
+      "source": "crossref_search",
+      "found_in_paper": "AuDHD_3.pdf",
+      "raw_reference": "ZabihiM,OldehinkelM,WolfersT,FrouinV,GoyardD,LothE,etal."
+    },
+    {
+      "title": "Espa\u00f1ol Santillana by Paloma Lapuerta etal., and: Espa\u00f1ol Santillana by Paloma Lapuerta etal.",
+      "year": 2017,
+      "abstract": "",
+      "doi": "10.1353/hpn.2017.0025",
+      "arxiv_id": "",
+      "authors": [
+        "Consuelo Sig\u00fcenza-Ortiz"
+      ],
+      "venue": "Hispania",
+      "citations": 0,
+      "ss_paper_id": "",
+      "url": "https://doi.org/10.1353/hpn.2017.0025",
+      "open_access_url": null,
+      "tier": 2,
+      "source": "crossref_search",
+      "found_in_paper": "AuDHD_3.pdf",
+      "raw_reference": "HazlettHC,GuH,MunsellBC,KimSH,StynerM,WolffJJ,etal."
+    }
+  ],
+  "expected_behavior": "REJECTED or QUARANTINED status under Phase 1 canonical resolution + relevance filtering -- never silently included in the trusted corpus."
+}

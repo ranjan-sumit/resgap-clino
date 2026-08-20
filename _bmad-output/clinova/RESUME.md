@@ -34,9 +34,11 @@ created: '2026-08-20'
 
 ## Current phase
 
-**Phase 0 — Baseline** (in progress). Entry trigger: always true. See `10-phased-implementation-plan.md`'s phase-gate table and `09-epics-and-stories.md`'s Epic 0.1 for the concrete next stories.
+**Phase 0 — Baseline: COMPLETE.** Epic 0.1 (Stories 0.1.1-0.1.3) done 2026-08-20. Phase 1 is now unblocked — see `10-phased-implementation-plan.md`'s phase-gate table and `09-epics-and-stories.md`'s Epic 1.1-1.4 for the next stories.
 
-**Environment status (2026-08-20):** Python 3.11.9 installed per-user (no admin rights on this machine — see `amendments/2026-08-20-environment-constraints.md`), venv created at repo root `.venv/`, `requirements-dev.txt` (adds `pytest`) installed. **All 155 existing tests pass unmodified** — confirmed baseline before any Phase 1 engine changes. `evals/benchmarks/baseline/generate_baseline_report.py` is written and ready to run. **Blocked on:** the user's `.env` (NVIDIA_API_KEY) and the sample papers they're providing — Story 0.1.1 cannot execute until both arrive.
+**Environment status:** Python 3.11.9 installed per-user (no admin rights on this machine — see `amendments/2026-08-20-environment-constraints.md`), venv at repo root `.venv/`, `requirements-dev.txt` installed. All 155 existing tests pass unmodified.
+
+**Phase 0 results — read `evals/benchmarks/baseline/phase0-findings.md` before starting Phase 1.** The real baseline run against a 3-paper AuDHD (co-occurring Autism/ADHD) corpus surfaced a **severe live bug, not a hypothetical one**: `detect_gaps` returned 0 gaps (likely nondeterminism — an immediate re-run with identical input returned 5 well-grounded gaps), and `generate_proposals` has no guard against an empty gap list — it called the LLM anyway and fabricated 4 plausible-sounding, completely ungrounded proposals. This is now Benchmark v1's highest-priority case (`evals/benchmarks/v1/case-zero-gap-silent-fabrication.json`). Three more real cases were found and fixtured: a Spanish-textbook citation contaminating the AuDHD reference corpus (Problem B, live — `case-reference-contamination-espanol.json`), three exact-DOI reference duplicates the baseline never merges (`case-reference-duplicate-doi.json`), and truncated-DOI/"Unknown"-title extraction loss (Problem A, live — `case-truncated-doi.json`). All four supersede the two hypothesized cases originally planned in Story 0.1.2.
 
 ## Key decisions already made (don't re-litigate without a new ADR)
 
@@ -53,8 +55,7 @@ created: '2026-08-20'
 - Frontend component library choice, Knowledge Graph rendering library — deferred to Phase 5 kickoff (`02-ux-specification.md` §9).
 - GROBID's real local resource cost — a Phase 1 spike (Story 1.1.1b), not assumed from the desk evaluation in `05-data-architecture.md` §2. **Update 2026-08-20:** this dev machine (company laptop) has no admin rights / Docker access; GROBID is deferred to a Gradle-based (non-Docker) build against the already-installed Java 11 — see `amendments/2026-08-20-environment-constraints.md`. Phase 1 proceeds in the meantime with PyMuPDF + Docling (Docling needs no Docker/JVM).
 - Phase 6 (governance) has no trigger yet — do not build it speculatively.
-- NVIDIA NIM API key: user will add it to a local `.env` (not committed) — needed to unblock Story 0.1.1's real end-to-end baseline report.
-- Sample papers for the seed corpus / Benchmark v1: user is providing specific papers (not yet received as of this note).
+- **New from Phase 0:** whether the zero-gap fabrication bug (`phase0-findings.md`) warrants a narrow, isolated hotfix to `pipeline/proposal_generator.py` *now* (guard against empty `gaps`) versus waiting for Phase 3's Gap Challenger to subsume it properly — currently scoped to Phase 3 (see `09-epics-and-stories.md` Story 3.4 note) on the reasoning that Phase 0 forbids engine changes and a narrow patch might mask the deeper nondeterminism question; revisit if this bug is judged too severe to leave live through Phase 1-2.
 
 ## Next action
 
