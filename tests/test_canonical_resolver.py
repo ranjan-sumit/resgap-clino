@@ -29,14 +29,21 @@ class PriorityChainTests(unittest.TestCase):
         self.assertEqual(result["identity_level"], "doi")
 
     def test_pmid_used_when_no_doi_but_pubmed_source(self):
-        ref = {"doi": "", "source_api": "pubmed", "url": "https://pubmed.ncbi.nlm.nih.gov/12345678/"}
+        # "source" (not "source_api") is the real field name on an enriched
+        # reference dict -- pipeline/reference_extractor.py's
+        # enrich_reference() final result sets `"source": meta.get(
+        # "source_api", ...)`. An earlier version of both this fixture and
+        # the implementation used "source_api", which never appears on a
+        # real ref dict -- confirmed against real Data-17072026/ output
+        # (evals/benchmarks/baseline/phase0-report-v1.json's ref_papers).
+        ref = {"doi": "", "source": "pubmed", "url": "https://pubmed.ncbi.nlm.nih.gov/12345678/"}
         result = resolve_canonical_identity(ref)
         self.assertEqual(result["identity_level"], "pmid")
 
     def test_pmid_not_used_for_non_pubmed_source(self):
         # A URL that happens to look like a pubmed link but isn't the
         # actual enrichment source must not be trusted as a PMID signal.
-        ref = {"doi": "", "source_api": "crossref", "url": "https://pubmed.ncbi.nlm.nih.gov/12345678/",
+        ref = {"doi": "", "source": "crossref", "url": "https://pubmed.ncbi.nlm.nih.gov/12345678/",
                "title": "X", "year": 2020, "authors": ["Doe J"]}
         result = resolve_canonical_identity(ref)
         self.assertNotEqual(result["identity_level"], "pmid")
@@ -45,6 +52,15 @@ class PriorityChainTests(unittest.TestCase):
         ref = {"doi": "", "ss_paper_id": "abc123"}
         result = resolve_canonical_identity(ref)
         self.assertEqual(result["identity_level"], "ss_paper_id")
+
+    def test_openalex_id_used_when_no_higher_priority_id(self):
+        # pipeline/reference_extractor.py's _openalex_by_title() now
+        # requests and returns the OpenAlex work `id` field (Clinova B20
+        # fix) -- previously not captured at all, so this level could never
+        # match. Bare-ID form (prefix already stripped by the extractor).
+        ref = {"doi": "", "ss_paper_id": "", "openalex_id": "W1234567890"}
+        result = resolve_canonical_identity(ref)
+        self.assertEqual(result["identity_level"], "openalex_id")
 
     def test_arxiv_id_used_when_no_higher_priority_id(self):
         ref = {"doi": "", "ss_paper_id": "", "arxiv_id": "2301.12345"}
@@ -110,11 +126,11 @@ class MergeCanonicalReferencesTests(unittest.TestCase):
 
     def test_provider_specific_metadata_preserved_separately(self):
         refs = [
-            {"doi": "10.1/a", "title": "Title from provider 1", "source_api": "crossref"},
-            {"doi": "10.1/a", "title": "Title from provider 2", "source_api": "openalex"},
+            {"doi": "10.1/a", "title": "Title from provider 1", "source": "crossref"},
+            {"doi": "10.1/a", "title": "Title from provider 2", "source": "openalex"},
         ]
         canonical = merge_canonical_references(refs)
-        sources = {r["source_api"] for r in canonical[0]["provider_records"]}
+        sources = {r["source"] for r in canonical[0]["provider_records"]}
         self.assertEqual(sources, {"crossref", "openalex"})
 
 
@@ -165,6 +181,47 @@ class BenchmarkV1RegressionTests(unittest.TestCase):
         # are known-malformed (that's Story 1.1.3/1.1.4's problem to fix
         # upstream, not this module's).
         self.assertEqual(len(canonical), len(refs))
+
+
+class RealCorpusFieldShapeTests(unittest.TestCase):
+    """Runs resolve_canonical_identity() against every reference record in
+    the real Phase 0 baseline run (not a hand-written fixture) -- guards
+    against exactly the class of bug this module already shipped once
+    (checking a field name, `source_api`, that only exists on internal
+    provider-function dicts and never on the real enriched ref dict a
+    caller actually sees, per pipeline/reference_extractor.py's
+    enrich_reference()). If a future refactor renames a field this module
+    depends on, this test notices without needing hand-maintained
+    fixtures to happen to use the right name."""
+
+    def test_resolves_every_real_reference_without_crashing_or_returning_none_level_for_dois(self):
+        path = (Path(__file__).resolve().parent.parent / "evals" / "benchmarks" /
+                "baseline" / "phase0-report-v1.json")
+        if not path.exists():
+            self.skipTest("phase0-report-v1.json not present in this checkout")
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+        refs = data["ref_papers"]
+        self.assertGreater(len(refs), 0)
+
+        level_counts = {}
+        for ref in refs:
+            result = resolve_canonical_identity(ref)
+            level_counts[result["identity_level"]] = level_counts.get(result["identity_level"], 0) + 1
+            # Every reference that has a real doi field must resolve at the
+            # "doi" level -- if this ever silently degrades to a lower
+            # level (or "none"), something upstream renamed/broke the doi
+            # field this module reads.
+            if ref.get("doi"):
+                self.assertEqual(result["identity_level"], "doi")
+
+        # At least some real references in this corpus were enriched via
+        # PubMed -- if pmid_count stays 0 here, the "source" field check
+        # (or PubMed enrichment itself) has silently broken again.
+        pubmed_refs = [r for r in refs if r.get("source") == "pubmed" and not r.get("doi")]
+        if pubmed_refs:
+            pmid_levels = [resolve_canonical_identity(r)["identity_level"] for r in pubmed_refs]
+            self.assertTrue(any(level == "pmid" for level in pmid_levels))
 
 
 if __name__ == "__main__":

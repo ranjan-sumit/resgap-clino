@@ -52,7 +52,16 @@ _STATUS_BY_LEVEL = {
 
 
 def _extract_pmid(ref: dict) -> str | None:
-    if ref.get("source_api") != "pubmed":
+    # Clinova B21 fix: the actual enriched-reference field is `source`
+    # (pipeline/reference_extractor.py's enrich_reference() final result
+    # dict: `"source": meta.get("source_api", ...)`) -- an earlier version
+    # of this function checked `source_api`, a key that only exists on each
+    # provider function's own internal dict (e.g. _pubmed_search's return
+    # value), never on the final ref dict any real caller actually sees.
+    # PMID resolution would have silently never matched on real data; only
+    # caught because the unit tests used the same wrong field name as the
+    # implementation, rather than the real shape.
+    if ref.get("source") != "pubmed":
         return None
     m = _PMID_URL_PATTERN.search(ref.get("url", "") or "")
     return m.group(1) if m else None

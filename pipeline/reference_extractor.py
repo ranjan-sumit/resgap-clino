@@ -386,7 +386,13 @@ def _openalex_by_title(title: str) -> Optional[dict]:
     try:
         params = {
             "search":  title[:150],
-            "select":  "title,publication_year,abstract_inverted_index,doi",
+            # Clinova B20 fix: request `id` (the OpenAlex work ID, e.g.
+            # "https://openalex.org/W1234567890") so canonical reference
+            # resolution (pipeline/canonical_resolver.py, ADR-007's
+            # DOI->PMID->OpenAlex ID->... priority chain) has something real
+            # to resolve against for this provider -- previously not
+            # requested at all, so that priority level could never match.
+            "select":  "id,title,publication_year,abstract_inverted_index,doi",
             "per-page": 1,
         }
         r = requests.get(OPENALEX, params=params, headers=_HEADERS, timeout=_TIMEOUT)
@@ -406,6 +412,7 @@ def _openalex_by_title(title: str) -> Optional[dict]:
                     "year":     item.get("publication_year"),
                     "abstract": abstract,
                     "doi":      (item.get("doi") or "").replace("https://doi.org/", ""),
+                    "openalex_id": (item.get("id") or "").replace("https://openalex.org/", ""),
                     "venue":    "",
                     "authors":  [],
                     "citations": 0,
@@ -507,6 +514,7 @@ def enrich_reference(ref: dict, delay: float = 0.3) -> dict:
             "venue":       meta.get("venue", ""),
             "citations":   meta.get("citationCount", meta.get("citations", 0)),
             "ss_paper_id": meta.get("paperId", ""),
+            "openalex_id": meta.get("openalex_id", ""),
             "url":         meta.get("url") or (f"https://doi.org/{resolved_doi}" if resolved_doi else ""),
             "open_access_url": open_access_url or meta.get("open_access_url"),
             "tier":        2,
