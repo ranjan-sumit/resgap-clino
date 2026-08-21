@@ -527,6 +527,7 @@ from pipeline.page_index import build_tree, tree_to_summary
 from pipeline.wiki_compiler import build_wiki
 from pipeline.graph_builder import build_knowledge_graph
 from pipeline.gap_detector import detect_gaps
+from pipeline.deterministic_gap_patterns import detect_deterministic_gaps
 from pipeline.academic_search import validate_gaps
 from pipeline.proposal_generator import generate_proposals
 from pipeline.param_extractor import (
@@ -1049,10 +1050,22 @@ if run_btn and uploaded_files:
             # Stage 4+5: Gaps + Validation
             upd("Stage 4 — Detecting research gaps…", 50)
             gaps = detect_gaps(wiki, graph, context, client, domain_config=domain_cfg)
+            # Clinova Phase 3, Epic 3.2 (Hybrid Gap Engine): the deterministic
+            # pattern library is a second, independent candidate-gap source,
+            # evaluated directly against this run's real Evidence Objects
+            # (Stage 2C) -- no LLM call, and additive to the existing
+            # LLM-only detect_gaps() above, not a replacement for it. Every
+            # gap from either source now carries a `source` tag (semantic vs
+            # deterministic) per 04-ai-research-architecture.md §4's
+            # provenance requirement. No-op outside Healthcare AI today (the
+            # pattern library is domain-specific, per its own module docstring).
+            det_gaps = detect_deterministic_gaps(evidence_objects, context.get("domain", ""))
+            gaps = gaps + det_gaps
             upd("Stage 5 — Validating gaps (Semantic Scholar + arXiv)…", 58)
             validated_gaps = validate_gaps(gaps, client, domain_config=domain_cfg, ss_api_key=ss_api_key.strip())
             _add_trace("Stage 4-5 — Gaps",
-                       "Wiki + graph + domain context",
+                       "Wiki + graph + domain context"
+                       + (f" + {len(det_gaps)} deterministic-pattern candidates" if det_gaps else ""),
                        f"{len(validated_gaps)} gaps: "
                        f"{sum(1 for g in validated_gaps if g.get('validation_status')=='open')} open")
             prog.progress(66)

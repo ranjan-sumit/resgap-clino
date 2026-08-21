@@ -177,9 +177,16 @@ Prioritize gaps aligned with the researcher's domain: {context.get('domain', 'Ge
                 raw_response_preview=preview,
             )
 
-    # Attach validation placeholder
+    # Attach validation placeholder. `source`/`pattern_id` mirror the shape
+    # pipeline/deterministic_gap_patterns.py's output uses (Clinova Phase 3,
+    # Epic 3.2's Hybrid Gap Engine) so every gap -- LLM- or rule-produced --
+    # is tagged with its contributing source, per 04-ai-research-
+    # architecture.md §4 ("every candidate gap emitted carries which of the
+    # three sources contributed to it").
     for g in gaps:
         g["validation_status"] = "pending"
         g["existing_papers"] = []
+        g.setdefault("source", "semantic")
+        g.setdefault("pattern_id", None)
 
     return gaps
