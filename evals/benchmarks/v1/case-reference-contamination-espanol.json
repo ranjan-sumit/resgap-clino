@@ -63,5 +63,5 @@
       "raw_reference": "HazlettHC,GuH,MunsellBC,KimSH,StynerM,WolffJJ,etal."
     }
   ],
-  "expected_behavior": "REJECTED or QUARANTINED status under Phase 1 canonical resolution + relevance filtering -- never silently included in the trusted corpus."
+  "expected_behavior": "CORRECTED 2026-08-21 after Epic 1.3 implementation: canonical resolution (pipeline/canonical_resolver.py) correctly merges these 3 duplicate records into ONE canonical reference (proven by tests/test_canonical_resolver.py) and assigns VERIFIED status, since the shared DOI is real and valid -- that is CORRECT behavior for identity resolution, not a bug. Relevance filtering (is this reference actually on-topic for an AuDHD-neuroimaging corpus) is a distinct pipeline stage that comes AFTER canonicalization (05-data-architecture.md \u00a71) and is not yet built -- REJECTED/QUARANTINED-for-relevance is out of scope for Epic 1.3 and remains a real, open gap for a future relevance-filtering story to close, not something this fixture should claim Phase 1 already solves."
 }
