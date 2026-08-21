@@ -17,7 +17,12 @@ from pathlib import Path
 
 from utils.database import get_cached_docling_extraction, save_cached_docling_extraction
 
-DOCLING_STAGE_VERSION = 1
+# Clinova Phase 2, Story 2.1.1: bumped 1 -> 2. The cached result shape gained
+# `text_segments` (page-tagged body text, sourced from doc.texts) -- a v1
+# cache row lacks that field entirely, so old entries must not be served as
+# if they had it (AD-3's stage_logic_version convention, unchanged from
+# Phase 1's use of it).
+DOCLING_STAGE_VERSION = 2
 
 
 def _content_hash(pdf_path: str) -> str:
@@ -35,6 +40,15 @@ def extract_with_docling(pdf_path: str, filename: str) -> dict:
           "full_text": str,        # markdown export
           "char_count": int,
           "tables": [{"page": int|None, "content": str, "rows": int, "cols": int}],
+          "text_segments": [{"text": str, "page": int|None, "label": str}],
+            # Real per-segment page numbers from Docling's own document
+            # model (doc.texts[i].prov[0].page_no) -- not inferred, not a
+            # best guess. This is what gives pipeline/evidence_extractor.py
+            # (Phase 2, Epic 2.1) genuine page-level provenance instead of
+            # section-only. `label` is Docling's own semantic tag
+            # (e.g. "text", "section_header", "page_header") -- callers can
+            # filter out headers/footers rather than treating every segment
+            # as body prose.
           "from_cache": bool,
         }
     """
@@ -72,12 +86,28 @@ def extract_with_docling(pdf_path: str, filename: str) -> dict:
                 page = None
         tables.append({"page": page, "content": content, "rows": rows, "cols": cols, "index": i})
 
+    text_segments = []
+    for item in getattr(doc, "texts", []):
+        text = (getattr(item, "text", "") or "").strip()
+        if not text:
+            continue
+        page = None
+        prov = getattr(item, "prov", None)
+        if prov:
+            try:
+                page = prov[0].page_no
+            except Exception:
+                page = None
+        label = str(getattr(item, "label", "") or "")
+        text_segments.append({"text": text, "page": page, "label": label})
+
     result = {
         "filename": filename,
         "source": "docling",
         "full_text": full_text,
         "char_count": len(full_text),
         "tables": tables,
+        "text_segments": text_segments,
         "from_cache": False,
     }
 

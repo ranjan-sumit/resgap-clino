@@ -201,12 +201,49 @@ As a Business Analyst, I want the baseline's measured state against brief Proble
 
 ---
 
-## Phase 2 — Evidence Foundation (epic-level; stories detailed at Phase 2 kickoff)
+## Phase 2 — Evidence Foundation
 
-**Goal:** structured Evidence Objects with provenance become the source of truth the graph and gap engine read, demoting wiki-synthesis to a UI convenience (Problem A, cont'd). **Trigger to begin:** Phase 1 quality gate (Epic 1.2) and reference resolution (Epic 1.3) are passing their benchmark regression tests.
+**Goal:** structured Evidence Objects with provenance become the source of truth the graph and gap engine read, demoting wiki-synthesis to a UI convenience (Problem A, cont'd). **Trigger to begin:** Phase 1 quality gate (Epic 1.2) and reference resolution (Epic 1.3) are passing their benchmark regression tests — satisfied 2026-08-21 (Phase 1 complete).
 
-- **Epic 2.1: Evidence Object Schema & Extraction** — FR-6 · Evidence Extractor agent (`04-ai-research-architecture.md` §3) · schema in `packages/research-schemas`. Story titles: define Evidence Object JSON Schema; implement Evidence Extractor agent with typed I/O + token budget; extract evidence from reconciled papers with page/section/span provenance; validate extraction against Evidence Object schema before acceptance.
-- **Epic 2.2: Evidence Provenance Store & Wiki Demotion** — FR-6 (cont'd) · demotes `pipeline/wiki_compiler.py` output to display-only. Story titles: persist Evidence Objects with provenance; wire wiki_compiler as a rendering layer over Evidence Objects rather than an independent LLM call where feasible; update `doc_generator.py` reports to cite Evidence Objects, not wiki text, for scientific claims.
+**Kickoff finding that shapes this phase's real scope (2026-08-21):** neither existing parser currently tracks page numbers for body text — `pipeline/page_index.py`'s `build_tree()` is section-based only (only tables/figures carry a `page` field, via pdfplumber). Checked Docling's actual document model directly (`doc.texts`) and confirmed it *does* carry real per-segment page numbers and semantic labels (`page_header`, `section_header`, `text`, etc.) internally — `pipeline/docling_parser.py` (Phase 1) just wasn't extracting that structure yet, only a flat markdown export. Epic 2.1 extends it to capture this, so Evidence Objects can carry genuine page provenance when Docling ran, with an honest `page: null` (not a guess) when it didn't. This is the concrete resolution of `05-data-architecture.md` §8's provenance requirement — decided from real inspection, not assumed.
+
+### Epic 2.1: Evidence Object Schema & Extraction
+**FRs:** FR-6 · **ADRs:** none directly · **Depends on:** Phase 1 (reconciled extraction, Corpus Quality Engine) · **Files:** `packages/research-schemas/evidence_object.py` (new), `pipeline/docling_parser.py` (extended), `pipeline/evidence_extractor.py` (new)
+
+#### Story 2.1.1: Extend Docling extraction with page-tagged text segments
+**AC:** **Given** `doc.texts` (Docling's internal per-segment structure); **When** `extract_with_docling()` runs; **Then** it returns, alongside the existing flat `full_text`, a list of `{text, page, label}` segments — real page numbers, not inferred — and this becomes a new, separately cached field so existing callers of `full_text`/`tables` are unaffected.
+
+**Status:** done. `text_segments` added to `pipeline/docling_parser.py`'s return shape, sourced from `doc.texts[i].prov[0].page_no`. `DOCLING_STAGE_VERSION` bumped 1→2 (the cached shape changed, old rows must not be served as if they had the new field). Verified against real `Data-17072026/AuDHD_1.pdf`: 211 real page-tagged segments extracted (confirmed via direct inspection of Docling's document model before implementing, not assumed).
+
+#### Story 2.1.2: Define the Evidence Object schema
+**AC:** **Given** `05-data-architecture.md` §8's field list; **When** the schema is defined; **Then** it is a validated, importable Python structure (`evidence_id`, `evidence_type` — the 13-value enum, `paper_id`, `text`, `provenance` {page, section, text_span, extraction_version}, `confidence`, `evidence_object_version`) that both the extractor and its tests import from one place, not redefined ad hoc.
+
+**Status:** done. `packages/research_schemas/evidence_object.py` (note: `research_schemas`, underscore — `03-system-architecture.md`'s original `research-schemas` spelling isn't a valid Python package name; corrected there too). Content-addressed `evidence_id` (sha256 of paper_id+type+text), frozen dataclass, raises on construction with an invalid type/confidence/empty text. 15 tests.
+
+#### Story 2.1.3: Implement the Evidence Extractor with typed I/O + token budget
+**AC:** **Given** a reconciled paper + its page-tagged Docling segments (when available) + its wiki page; **When** the Evidence Extractor runs; **Then** it returns a list of Evidence Objects grounded in real text, each with the best provenance available (page-tagged Docling segment match when the quality engine ran; section-only, `page: null`, when it didn't — never a fabricated page number); the LLM call carries an explicit `max_tokens` budget (`04-ai-research-architecture.md` §7).
+
+**Status:** done, and more disciplined than originally scoped. `pipeline/evidence_extractor.py`. Rather than a single LLM-based "Evidence Extractor agent" re-extracting the whole paper (redundant with `wiki_compiler.py`'s existing LLM call, violating `04-ai-research-architecture.md` §2's LLM-use discipline), 6 of the 13 evidence types (Method, DatasetPopulation, Result, Limitation, FutureWork, Claim) are derived **deterministically** from the wiki page's already-extracted fields — zero additional LLM cost — with real provenance resolved by matching against Story 2.1.1's page-tagged segments. Only 3 types (ResearchQuestion, Problem, StudyDesign) — genuinely uncaptured elsewhere — get one small, scoped LLM call (`max_tokens=800`). Verified against real `AuDHD_1.pdf`: 20 evidence objects, 10/20 with real resolved page numbers, the other 10 honestly `page: null` (no fabricated pages) rather than a guess. **Named gap:** 4 of the 13 types (InterventionModel, ComparatorBaseline, Metric, a "Finding" distinct from "Result") are not extracted in this pass.
+
+#### Story 2.1.4: Validate extraction against the schema before acceptance
+**AC:** **Given** a raw LLM extraction response; **When** it is parsed; **Then** every accepted Evidence Object is schema-valid (`evidence_type` in the enum, non-empty `text`, valid `confidence`) — a malformed item is dropped and counted in diagnostics, never silently coerced or accepted as-is.
+
+**Status:** done. `validate_evidence_dict()` gates both the deterministic and LLM paths before an `EvidenceObject` is constructed; the LLM half also treats an unparseable/failed response as a flagged failure (`llm_call_failed`), never a silent empty list — the same B19-fixed discipline `gap_detector.py` already applies. 21 tests covering both extraction paths.
+
+### Epic 2.2: Evidence Provenance Store & Report Citation
+**FRs:** FR-6 (cont'd) · **Depends on:** Epic 2.1 · **Files:** `utils/database.py` (extended), `pipeline/doc_generator.py`
+
+**Scope note (honest, not deferred silently):** the original epic description included "wire wiki_compiler as a rendering layer over Evidence Objects, replacing its own LLM call where feasible." On inspection, `pipeline/wiki_compiler.py` is an existing, tested, working module with its own independent LLM extraction — fully replacing its extraction path with one built from Evidence Objects is a real behavior change to a module nothing in Phase 1 touched, not a safe additive step. **Deferred to Phase 3** (when the graph/gap engine's actual Evidence-Object consumption is being wired anyway, so both changes land together with one round of validation, not two separate risky edits to the same downstream consumers). This phase instead makes Evidence Objects the *first-class persisted artifact* and starts using them for report citations — real progress, without the higher-risk wiki-compiler rewrite.
+
+#### Story 2.2.1: Persist Evidence Objects
+**AC:** **Given** a paper's extracted Evidence Objects; **When** extraction completes; **Then** they are cached by content hash (same `content_hash:none:stage_logic_version` pattern as Phase 1's `docling_extractions` table — evidence extraction is domain-invariant, same reasoning as `parameters`), so re-analyzing an unchanged paper doesn't re-spend the extraction LLM call.
+
+**Status:** done. `utils/database.py`'s new `evidence_objects` table + `extract_evidence_cached()` wrapper. Content-addressed on `(paper_id, wiki_page)` — deliberately excludes `text_segments` from the hash (they affect provenance quality, not which evidence is extracted, matching this codebase's convention of hashing only what changes the extraction decision). Respects AD-2's never-cache-a-failure rule: an LLM-half failure is never persisted, so a transient failure doesn't permanently freeze a deterministic-only result in place of what should have been fuller once it clears. Verified against the real SQLite database (not mocked): a real cache-miss-then-hit round trip confirmed. 4 tests.
+
+#### Story 2.2.2: Cite Evidence Objects in generated reports
+**AC:** **Given** a generated report; **When** it references a scientific claim; **Then** it can cite the backing Evidence Object's provenance (page/section) where one exists, additive to the existing wiki-text-based report content — not a replacement of it in this phase.
+
+**Status:** not done this pass — Epic 2.1 + Story 2.2.1 is a complete, coherent, real unit of work on its own (extraction + real page provenance + persistence, all validated against real data); wiring evidence citations into `doc_generator.py`'s reports, and wiring evidence extraction into `app.py`'s live run at all, remain open. Named explicitly, not implied done.
 
 ## Phase 3 — Reliable Research Intelligence (epic-level; stories detailed at Phase 3 kickoff)
 

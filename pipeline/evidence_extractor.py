@@ -1,0 +1,260 @@
+"""
+Evidence Extractor (Clinova Phase 2, Epic 2.1, Stories 2.1.3-2.1.4).
+
+Deliberately NOT a fresh LLM re-extraction of the whole paper. wiki_compiler.py
+already extracted methods/datasets/key_findings/limitations/future_work/
+contributions via its own LLM call -- re-extracting the same information a
+second time would violate 04-ai-research-architecture.md §2's LLM-use
+discipline ("use LLM only for difficult scientific extraction," not for
+re-deriving what's already been extracted). Instead:
+
+  - 6 of the 13 evidence types (Method, DatasetPopulation, Result,
+    Limitation, FutureWork, Claim) are derived DETERMINISTICALLY from the
+    wiki page's already-extracted list fields, with real page/section
+    provenance resolved by matching against Docling's page-tagged
+    text_segments (pipeline/docling_parser.py, Story 2.1.1) when available.
+  - 3 more types (ResearchQuestion, Problem, StudyDesign) genuinely aren't
+    captured anywhere else in the pipeline today -- one small, scoped LLM
+    call with an explicit token budget fills exactly that gap.
+  - The remaining 4 types (InterventionModel, ComparatorBaseline, Metric,
+    a "Finding" distinct from "Result") are NOT extracted in this pass --
+    an honest, named gap for a future story, not silently claimed complete.
+
+Provenance is honest by construction: when Docling didn't run for a paper
+(Corpus Quality Engine toggle off) or no matching text segment is found,
+`Provenance.page` is None -- never a guessed page number.
+"""
+import hashlib
+import json
+import re
+
+from utils.azure_client import unwrap, LLMCallError
+from utils.database import get_cached_evidence_objects, save_cached_evidence_objects
+from packages.research_schemas.evidence_object import (
+    EvidenceObject, Provenance, validate_evidence_dict, to_dict,
+)
+
+EVIDENCE_STAGE_VERSION = 1
+
+_DETERMINISTIC_FIELD_MAP = {
+    "methods": "Method",
+    "datasets": "DatasetPopulation",
+    "key_findings": "Result",
+    "limitations": "Limitation",
+    "future_work": "FutureWork",
+    "contributions": "Claim",
+}
+
+_LLM_EVIDENCE_TYPES = ("ResearchQuestion", "Problem", "StudyDesign")
+
+_EVIDENCE_LLM_SYSTEM_PROMPT = """You identify exactly the paper's research question, the problem it addresses, and its study design -- nothing else. These are foundational facts a research-gap analysis needs, not captured by the paper's already-compiled methods/findings/limitations lists.
+
+Return ONLY a JSON array, at most one item per type (omit a type entirely if it is genuinely not stated in the paper):
+[
+  {"evidence_type": "ResearchQuestion", "text": "...", "confidence": "high|medium|low"},
+  {"evidence_type": "Problem", "text": "...", "confidence": "high|medium|low"},
+  {"evidence_type": "StudyDesign", "text": "...", "confidence": "high|medium|low"}
+]"""
+
+
+def _build_section_map(text_segments: list) -> list:
+    """Returns [{"text", "page", "section"}, ...] -- `section` is the most
+    recent section_header segment's text seen before this one, so a body
+    segment inherits the heading it actually appeared under."""
+    current_section = None
+    mapped = []
+    for seg in text_segments or []:
+        if seg.get("label") == "section_header":
+            current_section = seg.get("text")
+            continue
+        mapped.append({"text": seg.get("text", ""), "page": seg.get("page"), "section": current_section})
+    return mapped
+
+
+def _resolve_provenance(quote: str, mapped_segments: list) -> Provenance:
+    quote_norm = (quote or "").strip().lower()
+    if not quote_norm or not mapped_segments:
+        return Provenance(page=None, section=None, text_span=None)
+
+    for seg in mapped_segments:
+        seg_norm = seg["text"].lower()
+        if quote_norm in seg_norm or seg_norm in quote_norm:
+            return Provenance(page=seg["page"], section=seg["section"], text_span=None)
+
+    # No exact/substring match (the wiki-compiled or LLM-derived text is a
+    # paraphrase, not a verbatim quote) -- try a softer match on a leading
+    # fragment of meaningful length.
+    words = quote_norm.split()
+    if len(words) >= 5:
+        fragment = " ".join(words[:8])
+        for seg in mapped_segments:
+            if fragment in seg["text"].lower():
+                return Provenance(page=seg["page"], section=seg["section"], text_span=None)
+
+    return Provenance(page=None, section=None, text_span=None)
+
+
+def _parse_json_list(raw: str):
+    """Same 3-strategy fallback convention used elsewhere in this codebase
+    (gap_detector.py, param_extractor.py, etc.) -- returns (items, parse_failed)."""
+    if not raw or not raw.strip():
+        return None, True
+    for strategy in (
+        lambda s: s,
+        lambda s: re.sub(r'^```(?:json)?\s*|\s*```$', '', s.strip()),
+        lambda s: re.sub(r',\s*([}\]])', r'\1', s),
+    ):
+        try:
+            result = json.loads(strategy(raw))
+            if isinstance(result, list):
+                return result, False
+        except Exception:
+            pass
+    match = re.search(r'\[.*\]', raw, re.DOTALL)
+    if match:
+        try:
+            result = json.loads(match.group())
+            if isinstance(result, list):
+                return result, False
+        except Exception:
+            pass
+    return None, True
+
+
+def extract_deterministic_evidence(paper_id: str, wiki_page: dict, docling_result: dict = None):
+    """Story 2.1.3 (deterministic half). Returns (list[EvidenceObject], diagnostics)."""
+    mapped_segments = _build_section_map((docling_result or {}).get("text_segments", []))
+
+    objects = []
+    diagnostics = {"attempted": 0, "accepted": 0, "rejected": 0, "provenance_resolved": 0}
+
+    for wiki_field, evidence_type in _DETERMINISTIC_FIELD_MAP.items():
+        for item in (wiki_page.get(wiki_field) or []):
+            text = str(item).strip()
+            if not text:
+                continue
+            diagnostics["attempted"] += 1
+            candidate = {"evidence_type": evidence_type, "confidence": "medium", "text": text}
+            if not validate_evidence_dict(candidate):
+                diagnostics["rejected"] += 1
+                continue
+            prov = _resolve_provenance(text, mapped_segments)
+            if prov.page is not None:
+                diagnostics["provenance_resolved"] += 1
+            objects.append(EvidenceObject(
+                evidence_type=evidence_type, paper_id=paper_id, text=text,
+                provenance=prov, confidence="medium",
+            ))
+            diagnostics["accepted"] += 1
+
+    return objects, diagnostics
+
+
+def extract_llm_evidence(paper_id: str, wiki_page: dict, docling_result: dict, client, max_tokens: int = 800):
+    """Story 2.1.3 (LLM half, scoped to 3 types nothing else captures).
+    Returns (list[EvidenceObject], diagnostics). Never silently returns []
+    on a parse/call failure without flagging it -- mirrors gap_detector.py's
+    B19-fixed discipline (a failure must not look identical to "no evidence
+    of this type exists")."""
+    mapped_segments = _build_section_map((docling_result or {}).get("text_segments", []))
+
+    context = {
+        "title": wiki_page.get("title", ""),
+        "contributions": wiki_page.get("contributions", []),
+        "methods": wiki_page.get("methods", []),
+        "key_findings": wiki_page.get("key_findings", []),
+    }
+    user_prompt = f"Paper summary:\n{json.dumps(context, indent=2)}"
+
+    diagnostics = {"attempted": 0, "accepted": 0, "rejected": 0,
+                    "provenance_resolved": 0, "llm_call_failed": False}
+
+    try:
+        raw = unwrap(client.chat_json(_EVIDENCE_LLM_SYSTEM_PROMPT, user_prompt, max_tokens=max_tokens))
+    except LLMCallError:
+        diagnostics["llm_call_failed"] = True
+        return [], diagnostics
+
+    items, parse_failed = _parse_json_list(raw)
+    if parse_failed:
+        diagnostics["llm_call_failed"] = True
+        return [], diagnostics
+
+    objects = []
+    for item in items:
+        diagnostics["attempted"] += 1
+        if not isinstance(item, dict) or item.get("evidence_type") not in _LLM_EVIDENCE_TYPES:
+            diagnostics["rejected"] += 1
+            continue
+        item.setdefault("confidence", "medium")
+        if not validate_evidence_dict(item):
+            diagnostics["rejected"] += 1
+            continue
+        prov = _resolve_provenance(item["text"], mapped_segments)
+        if prov.page is not None:
+            diagnostics["provenance_resolved"] += 1
+        objects.append(EvidenceObject(
+            evidence_type=item["evidence_type"], paper_id=paper_id,
+            text=item["text"], provenance=prov, confidence=item["confidence"],
+        ))
+        diagnostics["accepted"] += 1
+
+    return objects, diagnostics
+
+
+def extract_evidence(paper_id: str, wiki_page: dict, docling_result: dict = None,
+                      client=None, use_llm: bool = True):
+    """Combined entry point. `client=None` or `use_llm=False` skips the
+    LLM half entirely and returns only the 6 deterministic evidence types
+    -- a legitimate, honest mode (e.g. the Corpus Quality Engine toggle is
+    off, or a caller wants zero LLM cost)."""
+    det_objects, det_diag = extract_deterministic_evidence(paper_id, wiki_page, docling_result)
+
+    if not use_llm or client is None:
+        return det_objects, {"deterministic": det_diag, "llm": None}
+
+    llm_objects, llm_diag = extract_llm_evidence(paper_id, wiki_page, docling_result, client)
+    return det_objects + llm_objects, {"deterministic": det_diag, "llm": llm_diag}
+
+
+def _evidence_content_hash(paper_id: str, wiki_page: dict) -> str:
+    canonical = json.dumps({"paper_id": paper_id, "wiki_page": wiki_page},
+                            sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def extract_evidence_cached(paper_id: str, wiki_page: dict, docling_result: dict = None,
+                             client=None, use_llm: bool = True):
+    """Story 2.2.1: cache-aside wrapper around extract_evidence(), same
+    AD-2/AD-3 pattern as every other Epic-2-style cache in this codebase.
+    Content-addressed on (paper_id, wiki_page) -- text_segments influence
+    *provenance* quality, not *which* evidence is extracted, so they are
+    deliberately excluded from the hash (matches this codebase's existing
+    convention of hashing only what actually changes the extraction
+    decision, not every input that happens to be available).
+
+    Returns (evidence_dicts, diagnostics, from_cache). Evidence Objects are
+    always returned as dicts (via to_dict()) -- consistent shape whether
+    served from cache or freshly extracted, so callers don't need to
+    special-case reconstruction.
+
+    Never caches a result where the LLM half failed (AD-2's "never cache a
+    failure" rule) -- the deterministic-only evidence would otherwise be
+    permanently frozen in place of what should have been a fuller result
+    once the transient failure clears."""
+    content_hash = _evidence_content_hash(paper_id, wiki_page)
+    cache_key = f"{content_hash}:none:{EVIDENCE_STAGE_VERSION}"
+
+    cached = get_cached_evidence_objects(cache_key)
+    if cached is not None:
+        return cached, {"deterministic": None, "llm": None, "from_cache": True}, True
+
+    objects, diagnostics = extract_evidence(paper_id, wiki_page, docling_result, client, use_llm)
+    evidence_dicts = [to_dict(o) for o in objects]
+
+    llm_diag = diagnostics.get("llm")
+    llm_failed = bool(llm_diag and llm_diag.get("llm_call_failed"))
+    if not llm_failed:
+        save_cached_evidence_objects(cache_key, content_hash, EVIDENCE_STAGE_VERSION, evidence_dicts)
+
+    return evidence_dicts, diagnostics, False

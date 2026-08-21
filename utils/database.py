@@ -74,6 +74,13 @@ def init_db() -> None:
             extraction_json     TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS evidence_objects (
+            cache_key           TEXT PRIMARY KEY,
+            content_hash        TEXT,
+            stage_logic_version INTEGER,
+            evidence_json       TEXT
+        );
+
         CREATE TABLE IF NOT EXISTS "references" (
             cache_key           TEXT PRIMARY KEY,
             doi_or_title_hash   TEXT,
@@ -249,6 +256,43 @@ def save_cached_docling_extraction(
            (cache_key, content_hash, stage_logic_version, extraction_json)
            VALUES (?,?,?,?)""",
         (cache_key, content_hash, stage_logic_version, json.dumps(extraction_json, default=str)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_cached_evidence_objects(cache_key: str) -> list | None:
+    """Return the cached Evidence Object list for cache_key, or None on a
+    cache miss (including a corrupted/unparseable row, or a row whose JSON
+    parsed but isn't actually a list). Clinova Phase 2, Story 2.2.1."""
+    init_db()
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT evidence_json FROM evidence_objects WHERE cache_key = ?", (cache_key,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    try:
+        parsed = json.loads(row["evidence_json"])
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return parsed if isinstance(parsed, list) else None
+
+
+def save_cached_evidence_objects(
+    cache_key: str, content_hash: str, stage_logic_version: int, evidence_json: list,
+) -> None:
+    """Cache a paper's extracted Evidence Objects. No domain_hash column --
+    evidence extraction is domain-invariant (it reads the paper's own wiki
+    fields, not domain_config), same reasoning as `parameters`."""
+    init_db()
+    conn = _get_conn()
+    conn.execute(
+        """INSERT OR REPLACE INTO evidence_objects
+           (cache_key, content_hash, stage_logic_version, evidence_json)
+           VALUES (?,?,?,?)""",
+        (cache_key, content_hash, stage_logic_version, json.dumps(evidence_json, default=str)),
     )
     conn.commit()
     conn.close()

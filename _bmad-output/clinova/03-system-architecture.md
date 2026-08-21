@@ -96,7 +96,7 @@ Research_Gap_Analyzer_V1/
       reporting/                # doc_generator.py evolution — Phase 1, enriched per phase
     contracts/                 # port interfaces (typed) — introduced per AD-2's table
     branding/                  # AD-3 — created Phase 1 (used by Streamlit interim UI too)
-    research-schemas/          # evidence/graph/gap JSON schemas — Phase 2
+    research_schemas/          # evidence/graph/gap JSON schemas — Phase 2
   infra/
     docker/compose/            # profiles mapped to phases — see 08-local-deployment-architecture.md
     helm/                      # Phase 8
@@ -119,7 +119,7 @@ Research_Gap_Analyzer_V1/
 |---|---|
 | Naming | Product-facing name never appears in code (AD-3). Internal engine codename: `resgap-core`. Port interfaces named exactly as listed in AD-2's table — no synonyms. |
 | Versioning | Every artifact type versioned per `06-versioning-lineage-architecture.md`; SemVer for packages, integer `stage_logic_version` for pipeline-stage cache invalidation (inherited convention from the existing `wiki_pages`/`parameters`/`references`/`gap_validations` cache tables). |
-| Data & formats | JSON Schema for all evidence/graph/gap object shapes (`packages/research-schemas`). SHA-256 content hashing throughout (inherited from the existing `content_hash:domain_hash:stage_logic_version` cache-key convention). |
+| Data & formats | JSON Schema for all evidence/graph/gap object shapes (`packages/research_schemas`). SHA-256 content hashing throughout (inherited from the existing `content_hash:domain_hash:stage_logic_version` cache-key convention). |
 | Error handling | The existing `Result[str, ErrorInfo]` / `LLMCallError` pattern at the LLM boundary (`utils/azure_client.py`) is retained and becomes the reference implementation behind `LLMProvider`. |
 | State & cross-cutting | Cache-aside writes only on genuine success (never cache a failure/fallback) — inherited AD-2 rule from the existing architecture spine, carried forward unchanged. |
 
