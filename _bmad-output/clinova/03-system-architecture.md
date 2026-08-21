@@ -5,7 +5,7 @@ purpose: build-substrate
 altitude: enterprise
 paradigm: 'hexagonal ports-and-adapters, wrapping an existing pipes-and-filters research pipeline'
 scope: 'End-to-end technical architecture for Clinova: repository structure, service boundaries, hexagonal interfaces introduced phase-by-phase, branding independence, dependency rules, and the local-first-to-cloud-portable stack.'
-status: draft-for-review
+status: accepted
 created: '2026-08-20'
 binds: ['00-analysis-and-architecture-options.md (Option C, ADR-000)']
 sources: ['00-analysis-and-architecture-options.md', '01-prd.md', 'existing Research_Gap_Analyzer ARCHITECTURE-SPINE.md (inherited pipes-and-filters paradigm)']

@@ -13,12 +13,15 @@ re-deriving what's already been extracted). Instead:
     wiki page's already-extracted list fields, with real page/section
     provenance resolved by matching against Docling's page-tagged
     text_segments (pipeline/docling_parser.py, Story 2.1.1) when available.
-  - 3 more types (ResearchQuestion, Problem, StudyDesign) genuinely aren't
-    captured anywhere else in the pipeline today -- one small, scoped LLM
-    call with an explicit token budget fills exactly that gap.
-  - The remaining 4 types (InterventionModel, ComparatorBaseline, Metric,
-    a "Finding" distinct from "Result") are NOT extracted in this pass --
-    an honest, named gap for a future story, not silently claimed complete.
+  - The remaining 7 types (ResearchQuestion, Problem, StudyDesign,
+    InterventionModel, ComparatorBaseline, Metric, Finding) genuinely
+    aren't captured anywhere else in the pipeline today -- ONE small,
+    scoped LLM call (still just one call per paper, not one per type)
+    with an explicit token budget fills all 7 (2026-08-21: originally
+    scoped to 3 of the 7, expanded to all 7 in the same call rather than
+    adding a second call).
+
+All 13 evidence types are covered as of 2026-08-21.
 
 Provenance is honest by construction: when Docling didn't run for a paper
 (Corpus Quality Engine toggle off) or no matching text segment is found,
@@ -34,7 +37,13 @@ from packages.research_schemas.evidence_object import (
     EvidenceObject, Provenance, validate_evidence_dict, to_dict,
 )
 
-EVIDENCE_STAGE_VERSION = 1
+# Bumped 1 -> 2, 2026-08-21: LLM-scoped type coverage expanded from 3 types
+# to all 7 remaining types (was ResearchQuestion/Problem/StudyDesign only;
+# now also InterventionModel/ComparatorBaseline/Metric/Finding), closing
+# the "4 of 13 evidence types unextracted" gap. Cached evidence lists from
+# before this change are missing these types entirely -- must not be
+# served as if they were extracted (AD-3's stage_logic_version convention).
+EVIDENCE_STAGE_VERSION = 2
 
 _DETERMINISTIC_FIELD_MAP = {
     "methods": "Method",
@@ -45,16 +54,29 @@ _DETERMINISTIC_FIELD_MAP = {
     "contributions": "Claim",
 }
 
-_LLM_EVIDENCE_TYPES = ("ResearchQuestion", "Problem", "StudyDesign")
+_LLM_EVIDENCE_TYPES = (
+    "ResearchQuestion", "Problem", "StudyDesign",
+    "InterventionModel", "ComparatorBaseline", "Metric", "Finding",
+)
 
-_EVIDENCE_LLM_SYSTEM_PROMPT = """You identify exactly the paper's research question, the problem it addresses, and its study design -- nothing else. These are foundational facts a research-gap analysis needs, not captured by the paper's already-compiled methods/findings/limitations lists.
+_EVIDENCE_LLM_SYSTEM_PROMPT = """You identify the paper's research question, the problem it addresses, its study design, the intervention/model it studies, what it's compared against, the metrics it reports, and its qualitative findings. These are facts a research-gap analysis needs that are not already captured by the paper's compiled methods/datasets/results/limitations lists.
 
-Return ONLY a JSON array, at most one item per type (omit a type entirely if it is genuinely not stated in the paper):
+Return ONLY a JSON array:
 [
   {"evidence_type": "ResearchQuestion", "text": "...", "confidence": "high|medium|low"},
   {"evidence_type": "Problem", "text": "...", "confidence": "high|medium|low"},
-  {"evidence_type": "StudyDesign", "text": "...", "confidence": "high|medium|low"}
-]"""
+  {"evidence_type": "StudyDesign", "text": "...", "confidence": "high|medium|low"},
+  {"evidence_type": "InterventionModel", "text": "...", "confidence": "high|medium|low"},
+  {"evidence_type": "ComparatorBaseline", "text": "...", "confidence": "high|medium|low"},
+  {"evidence_type": "Metric", "text": "...", "confidence": "high|medium|low"},
+  {"evidence_type": "Finding", "text": "...", "confidence": "high|medium|low"}
+]
+
+Rules:
+- ResearchQuestion, Problem, and StudyDesign: at most ONE item each (a paper has one of each).
+- InterventionModel, ComparatorBaseline, Metric, Finding: up to THREE items each if the paper reports multiple -- do not force a count that isn't there.
+- A "Finding" is a qualitative or interpretive statement (e.g. "X was more strongly associated with Y than Z was"); it is DISTINCT from a quantitative "Result" (numeric results are already captured elsewhere -- do not duplicate them here).
+- Omit a type entirely if it is genuinely not stated in the paper. Never invent a value to fill every type."""
 
 
 def _build_section_map(text_segments: list) -> list:
@@ -150,12 +172,15 @@ def extract_deterministic_evidence(paper_id: str, wiki_page: dict, docling_resul
     return objects, diagnostics
 
 
-def extract_llm_evidence(paper_id: str, wiki_page: dict, docling_result: dict, client, max_tokens: int = 800):
-    """Story 2.1.3 (LLM half, scoped to 3 types nothing else captures).
+def extract_llm_evidence(paper_id: str, wiki_page: dict, docling_result: dict, client, max_tokens: int = 1500):
+    """Story 2.1.3 (LLM half, scoped to the 7 types nothing else captures).
     Returns (list[EvidenceObject], diagnostics). Never silently returns []
     on a parse/call failure without flagging it -- mirrors gap_detector.py's
     B19-fixed discipline (a failure must not look identical to "no evidence
-    of this type exists")."""
+    of this type exists"). max_tokens raised 800->1500 (2026-08-21) to fit
+    up to ~15 items (3x each for InterventionModel/ComparatorBaseline/
+    Metric/Finding + 1x each for ResearchQuestion/Problem/StudyDesign)
+    without truncation."""
     mapped_segments = _build_section_map((docling_result or {}).get("text_segments", []))
 
     context = {

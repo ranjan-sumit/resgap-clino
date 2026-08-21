@@ -1,6 +1,6 @@
 # ADR-000: Target architecture — Staged Hybrid (Option C)
 
-**Status:** Accepted (pending user review)
+**Status:** Accepted
 **Date:** 2026-08-20
 **Deciders:** BMAD planning pass (Business Analyst, Enterprise Architect roles)
 **Supersedes:** none

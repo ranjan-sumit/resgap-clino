@@ -1,6 +1,6 @@
 # ADR-002: Graph persistence — Neo4j CE + NetworkX hybrid
 
-**Status:** Accepted (pending user review)
+**Status:** Accepted
 **Date:** 2026-08-20
 **Deciders:** BMAD planning pass (Enterprise Architect, Data Architect roles)
 

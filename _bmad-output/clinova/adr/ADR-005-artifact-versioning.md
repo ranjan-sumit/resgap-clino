@@ -1,6 +1,6 @@
 # ADR-005: Artifact versioning — application-owned registry, MLflow scoped out by default
 
-**Status:** Accepted (pending user review)
+**Status:** Accepted
 **Date:** 2026-08-20
 **Deciders:** BMAD planning pass (Enterprise Architect, Data Architect roles)
 

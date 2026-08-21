@@ -2,7 +2,7 @@
 name: 'Clinova Research Intelligence Platform — Evaluation Architecture'
 type: architecture
 altitude: capability
-status: draft-for-review
+status: accepted
 created: '2026-08-20'
 inputDocuments: ['00-analysis-and-architecture-options.md', '01-prd.md', '04-ai-research-architecture.md']
 companions: ['06-versioning-lineage-architecture.md', '10-phased-implementation-plan.md']

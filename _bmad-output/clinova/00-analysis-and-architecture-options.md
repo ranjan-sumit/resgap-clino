@@ -2,7 +2,7 @@
 name: 'Clinova — Brief Analysis & Target Architecture Options'
 type: analysis
 altitude: strategic
-status: draft-for-review
+status: accepted
 created: '2026-08-20'
 sources:
   - 'Enterprise brief (verbatim, provided 2026-08-20)'

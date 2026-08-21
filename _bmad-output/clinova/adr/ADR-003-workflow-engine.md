@@ -1,6 +1,6 @@
 # ADR-003: Workflow / orchestration engine — defer Temporal
 
-**Status:** Accepted (pending user review)
+**Status:** Accepted
 **Date:** 2026-08-20
 **Deciders:** BMAD planning pass (Enterprise Architect, DevOps/Platform Architect roles)
 

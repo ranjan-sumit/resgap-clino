@@ -1,6 +1,6 @@
 # ADR-004: Model gateway — LLMProvider / EmbeddingProvider / RerankerProvider abstraction
 
-**Status:** Accepted (pending user review)
+**Status:** Accepted
 **Date:** 2026-08-20
 **Deciders:** BMAD planning pass (AI/LLM Architect role)
 

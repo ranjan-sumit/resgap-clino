@@ -1,6 +1,6 @@
 # ADR-008: Gap confidence — Search Coverage Score gates every terminal status
 
-**Status:** Accepted (pending user review)
+**Status:** Accepted
 **Date:** 2026-08-20
 **Deciders:** BMAD planning pass (Research Methodology Specialist, AI/LLM Architect, QA/Evaluation Architect roles)
 

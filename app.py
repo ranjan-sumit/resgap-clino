@@ -915,12 +915,16 @@ if run_btn and uploaded_files:
         # field checklist, and enforces the PASS/DEGRADED/FAIL gate before
         # gap analysis is allowed to run (Story 1.2.3 / PRD FR-3).
         corpus_quality_metrics = None
-        evidence_objects = None
+        wiki_pages = wiki.get("pages", [])
+        # docling_results defaults to all-None (honest: no real page
+        # provenance available) when the Quality Engine toggle is off --
+        # Stage 2C below runs unconditionally and degrades gracefully to
+        # section-only/no provenance in that case, per Story 2.1.3's design.
+        docling_results = [None] * len(all_papers)
         if enable_quality_engine:
             upd("Stage 2B — Corpus Quality Engine (multi-parser cross-check)…", 35)
             paper_scores = []
             docling_results = []
-            wiki_pages = wiki.get("pages", [])
             for i, (paper, tmp_path) in enumerate(zip(all_papers, paper_tmp_paths)):
                 upd(f"Stage 2B — Cross-checking paper {i+1}/{len(all_papers)} with Docling…", 35)
                 wiki_page = wiki_pages[i] if i < len(wiki_pages) else {}
@@ -974,41 +978,51 @@ if run_btn and uploaded_files:
                 f"gate={corpus_quality_metrics['quality_gate']}",
             )
 
-            # Stage 2C: Evidence Extraction (Clinova Phase 2, Epic 2.1/2.2,
-            # same opt-in toggle -- real page provenance depends on Stage
-            # 2B's Docling text_segments having just run). Cheap: 6 of 13
-            # evidence types are deterministic (zero LLM cost), the other 3
-            # cost one small scoped call per paper (max_tokens=800).
-            upd("Stage 2C — Extracting evidence objects…", 35)
-            evidence_objects = {}
-            total_evidence = 0
-            for i, paper in enumerate(all_papers):
-                wiki_page = wiki_pages[i] if i < len(wiki_pages) else {}
-                docling_result = docling_results[i] if i < len(docling_results) else None
-                filename = paper.get("filename", f"paper_{i+1}")
-                try:
-                    evidence_dicts, _, _ = extract_evidence_cached(
-                        filename, wiki_page, docling_result, client=client, use_llm=True,
-                    )
-                except Exception:
-                    # Same never-let-one-paper-kill-the-run philosophy as
-                    # the Docling cross-check above -- evidence extraction
-                    # is additive, not load-bearing for the rest of the run.
-                    evidence_dicts = []
-                evidence_objects[filename] = evidence_dicts
-                total_evidence += len(evidence_dicts)
-
-            _add_trace(
-                "Stage 2C — Evidence Extraction",
-                f"{len(all_papers)} papers",
-                f"{total_evidence} evidence objects extracted",
-            )
-
         for p in paper_tmp_paths:
             try:
                 os.unlink(p)
             except OSError:
                 pass
+
+        # Stage 2C: Evidence Extraction (Clinova Phase 2, Epic 2.1/2.2).
+        # Runs on EVERY run, independent of the Quality Engine toggle
+        # (2026-08-21 fix -- previously tied to it unnecessarily): 6 of 13
+        # evidence types are deterministic (zero LLM/Docling cost, derived
+        # from the wiki page alone), so gating the whole stage behind
+        # Docling's ~90s/paper cost meant users paid nothing to get nothing
+        # unless they also opted into the heavier corpus-quality cross-
+        # check. The other 7 types cost one small scoped LLM call per
+        # paper (max_tokens=1500) -- cheap relative to the wiki/graph/gap
+        # calls already made on every run regardless. Real page-level
+        # provenance still depends on Stage 2B having run (docling_results
+        # is honestly all-None otherwise, per Story 2.1.3's design) --
+        # only the PROVENANCE QUALITY is gated by the toggle, not whether
+        # evidence gets extracted at all.
+        upd("Stage 2C — Extracting evidence objects…", 35)
+        evidence_objects = {}
+        total_evidence = 0
+        for i, paper in enumerate(all_papers):
+            wiki_page = wiki_pages[i] if i < len(wiki_pages) else {}
+            docling_result = docling_results[i] if i < len(docling_results) else None
+            filename = paper.get("filename", f"paper_{i+1}")
+            try:
+                evidence_dicts, _, _ = extract_evidence_cached(
+                    filename, wiki_page, docling_result, client=client, use_llm=True,
+                )
+            except Exception:
+                # Same never-let-one-paper-kill-the-run philosophy as the
+                # Docling cross-check above -- evidence extraction is
+                # additive, not load-bearing for the rest of the run.
+                evidence_dicts = []
+            evidence_objects[filename] = evidence_dicts
+            total_evidence += len(evidence_dicts)
+
+        _add_trace(
+            "Stage 2C — Evidence Extraction",
+            f"{len(all_papers)} papers",
+            f"{total_evidence} evidence objects extracted "
+            f"({'with' if enable_quality_engine else 'without'} Docling page provenance)",
+        )
 
         # Stage 3: Knowledge Graph
         upd("Stage 3 — Building knowledge graph (LazyGraphRAG)…", 36)

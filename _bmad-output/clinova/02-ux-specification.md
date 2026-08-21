@@ -1,7 +1,7 @@
 ---
 name: 'Clinova Research Intelligence Platform — UX/Product Design Specification'
 type: ux-spec
-status: draft-for-review
+status: accepted
 created: '2026-08-20'
 inputDocuments: ['00-analysis-and-architecture-options.md', '01-prd.md']
 companions: ['03-system-architecture.md', '09-epics-and-stories.md']

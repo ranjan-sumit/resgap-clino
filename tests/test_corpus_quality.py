@@ -94,6 +94,21 @@ class PaperCompletenessTests(unittest.TestCase):
         self.assertEqual(result["total_fields"], len(FIELD_CHECKLIST))
         self.assertAlmostEqual(result["completeness_score"], 10 / 16, places=3)
 
+    def test_achievable_completeness_score_gates_against_the_real_ceiling(self):
+        # Design fix, 2026-08-21: 5 of 16 fields (authors, abstract,
+        # introduction, metrics, conclusion) have no extraction path
+        # anywhere in the pipeline today, so no paper could ever score
+        # above 11/16=68.75% under the raw formula regardless of how
+        # completely it was actually extracted. achievable_completeness_score
+        # is scored out of what the pipeline can actually reach (11), not
+        # the full 16 -- this same 10/16 paper is 10/11 achievable, not 62.5%.
+        result = score_paper_completeness(
+            _reconciled(tables=[{"content": "t"}]), _wiki_page(), ref_count=5, has_figures=True,
+        )
+        self.assertEqual(result["achievable_field_count"], 11)
+        self.assertAlmostEqual(result["achievable_completeness_score"], 10 / 11, places=3)
+        self.assertGreater(result["achievable_completeness_score"], result["completeness_score"])
+
 
 class CorpusQualityAggregationTests(unittest.TestCase):
     def test_averages_completeness_across_papers(self):
@@ -160,6 +175,36 @@ class CorpusQualityAggregationTests(unittest.TestCase):
         metrics = compute_corpus_quality([{"completeness_score": 0.9}], {}, ref_papers=ref_papers)
         self.assertEqual(metrics["quality_gate"], "DEGRADED")
         self.assertTrue(any("DOI" in r for r in metrics["quality_gate_reasons"]))
+
+    def test_gate_uses_achievable_score_not_raw_score_with_real_paper_scores(self):
+        # Regression case for the real 2026-08-21 finding: a paper genuinely
+        # scoring well on everything the pipeline CAN extract (title, doi,
+        # methodology, dataset_population, results, limitations, future_work,
+        # references, tables, figures = 10 of 11 achievable fields) still
+        # only reaches 10/16=62.5% raw -- which used to sit right at the old
+        # gate's PASS boundary by coincidence, masking that the formula was
+        # wrong. With one fewer field present (9/11 achievable = 82%, but
+        # 9/16=56% raw, matching the real corpus's actual observed range
+        # this session), the OLD raw-based gate would have flagged this as
+        # DEGRADED ("below the 60% PASS threshold") despite the paper being
+        # extracted about as completely as this pipeline is currently able to.
+        good_paper = score_paper_completeness(
+            _reconciled(tables=[{"content": "t"}]), _wiki_page(), ref_count=5, has_figures=True,
+        )  # 10/11 achievable, 10/16 raw
+        ref_papers = [{"doi": f"10.1/{i}"} for i in range(5)]
+        metrics = compute_corpus_quality([good_paper], {}, ref_papers=ref_papers)
+
+        self.assertAlmostEqual(metrics["achievable_completeness"], 10 / 11, places=3)
+        self.assertAlmostEqual(metrics["extraction_completeness"], 10 / 16, places=3)  # still reported, honestly, unchanged
+        self.assertEqual(metrics["quality_gate"], "PASS")  # correctly PASSes on the achievable ceiling
+
+    def test_old_shaped_paper_scores_without_achievable_field_still_work(self):
+        # Backward compatibility: a paper_scores entry from before this fix
+        # (or any caller passing a bare {"completeness_score": x} dict)
+        # falls back to using completeness_score as the gate input, rather
+        # than crashing on a missing key.
+        metrics = compute_corpus_quality([{"completeness_score": 0.9}], {})
+        self.assertEqual(metrics["achievable_completeness"], 0.9)
 
 
 class QualityGateEnforcementTests(unittest.TestCase):

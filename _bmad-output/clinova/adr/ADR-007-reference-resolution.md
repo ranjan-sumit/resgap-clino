@@ -1,6 +1,6 @@
 # ADR-007: Canonical reference resolution — priority chain + explicit status model
 
-**Status:** Accepted (pending user review)
+**Status:** Accepted
 **Date:** 2026-08-20
 **Deciders:** BMAD planning pass (Data Architect, Research Methodology Specialist roles)
 

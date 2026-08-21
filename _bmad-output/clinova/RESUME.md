@@ -1,7 +1,7 @@
 ---
 name: 'Clinova Planning — Resume Index'
 type: index
-status: planning-complete-pending-review
+status: planning-accepted-implementation-in-progress
 created: '2026-08-20'
 ---
 
@@ -24,18 +24,18 @@ Planning complete; implementation underway (Phase 0-2, see "Current phase" below
 - **Your `.env` file (NVIDIA_API_KEY) is gitignored** — it's on this machine only, not backed up anywhere by me. Keep your own copy of the key somewhere safe.
 
 **Decisions only you (or a domain expert) can make:**
-- The medical/healthcare-AI deterministic gap-pattern list (`04-ai-research-architecture.md` §4) needs a real domain-expert pass — I can draft candidate patterns, but their clinical/methodological validity needs your judgment or a subject-matter expert's, not mine.
-- Quality-gate thresholds and the Search Coverage Score threshold (currently placeholder values — 0.35/0.60 fail/pass, 0.6 coverage) need real tuning once there's a bigger benchmark corpus than the current 2-3 papers. Don't treat the current numbers as final.
+- ~~The medical/healthcare-AI deterministic gap-pattern list needs a domain-expert pass~~ **Addressed 2026-08-21:** drafted `domain-patterns-healthcare-ai.md` — 20 additional patterns grounded in TRIPOD+AI/PROBAST/CONSORT-AI, at your explicit request rather than blocking. Still marked `draft-needs-expert-review` in its own frontmatter — treat as the Phase 3 starting point to correct, not validated fact, especially before anything clinical-deployment-facing depends on it.
+- ~~Quality-gate thresholds need real tuning~~ **Partially addressed 2026-08-21:** the gate had an actual formula bug, not just untuned thresholds — it was scoring every paper against all 16 fields when 5 of them have no extraction path anywhere yet, capping any paper at 68.75% regardless of real quality. Fixed to gate on the achievable ceiling instead (`pipeline/corpus_quality.py`, `achievable_completeness_score`). The FAIL/PASS threshold *values* (0.35/0.60) are unchanged and still genuinely need real tuning once there's a bigger benchmark than 2-3 papers — that part of the original note still stands. Same for the Search Coverage Score threshold (Phase 3, not built yet).
 - Phase 6 (governance/Keycloak/OPA) has no trigger yet — explicitly don't ask me to build it until there's a real second user or compliance need; building it speculatively contradicts the plan's own reasoning.
 
 **Known, intentional code gaps (not urgent, but real — don't be surprised by them):**
-- 4 of the 13 Evidence Object types aren't extracted yet (InterventionModel, ComparatorBaseline, Metric, a "Finding" distinct from "Result").
-- `wiki_compiler.py` still does its own independent LLM extraction, not yet unified with Evidence Objects — deliberately deferred to Phase 3 to avoid two risky edits to the same downstream consumers.
-- Evidence extraction currently only runs when the "Corpus Quality Engine" sidebar toggle is on (it reuses Docling's page data for provenance). If you want evidence extraction without paying Docling's ~90s/paper cost, that needs its own toggle — not built.
+- ~~4 of 13 Evidence Object types unextracted~~ **Fixed 2026-08-21:** all 13 types now covered — expanded the existing scoped LLM call from 3 to 7 types rather than adding a second call. Verified correct against the real API directly, but **not yet re-verified live through the full `app.py` browser flow** — an attempt was inconclusive because the NVIDIA API was running unusually slow that session (one isolated call took 298.7s vs. the normal few seconds), not because of a bug found. Worth a live re-check next session under normal latency.
+- ~~Evidence extraction tied to the Quality Engine toggle~~ **Fixed 2026-08-21:** decoupled — the free deterministic half now runs on every run regardless of the toggle; only real page-level provenance (vs. honest `null`) still depends on Docling having run. Same "not yet re-verified live" caveat as above applies to this change too.
+- `wiki_compiler.py` still does its own independent LLM extraction, not yet unified with Evidence Objects — **deliberately left alone**, not attempted this round. This one's a real behavior-change risk to a working, tested module, not a quick fix like the other two — still sequenced for Phase 3 as originally reasoned, unless you explicitly want it pulled forward despite the risk.
 - The Phase 0-era `generate_baseline_report.py`/diagnostic scripts and Playwright verification scripts in `evals/benchmarks/baseline/` are one-off manual verification tools, not part of the automated test suite — expect to re-run them by hand, not via `pytest`.
 
-**Housekeeping (cosmetic, whenever convenient):**
-- All planning docs (`00`-`10` + every ADR) still carry `status: draft-for-review` in their frontmatter. You've clearly been endorsing the plan by directing implementation against it, but I never got an explicit "approved" — say the word if you want that status flipped to `accepted` across the set (I haven't done it unprompted since it's a plan-approval action, not an engineering one).
+**Housekeeping:**
+- ~~Planning docs still marked draft-for-review~~ **Done 2026-08-21:** all of `00`-`10`, every ADR, and RESUME.md itself flipped to `accepted` (RESUME.md: `planning-accepted-implementation-in-progress`).
 
 ## Document reading order
 

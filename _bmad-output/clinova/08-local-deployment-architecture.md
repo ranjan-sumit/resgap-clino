@@ -2,7 +2,7 @@
 name: 'Clinova Research Intelligence Platform — Local Deployment Architecture'
 type: architecture
 altitude: capability
-status: draft-for-review
+status: accepted
 created: '2026-08-20'
 inputDocuments: ['00-analysis-and-architecture-options.md', '03-system-architecture.md']
 companions: ['10-phased-implementation-plan.md']

@@ -169,6 +169,30 @@ class LlmEvidenceExtractionTests(unittest.TestCase):
         self.assertEqual(objects, [])
         self.assertEqual(diag["rejected"], 1)
 
+    def test_all_seven_llm_evidence_types_accepted(self):
+        # 2026-08-21 fix: expanded from 3 to all 7 remaining types, closing
+        # the "4 of 13 evidence types unextracted" gap -- still one call.
+        client = MagicMock()
+        client.chat_json.return_value = Success(
+            '['
+            '{"evidence_type": "ResearchQuestion", "text": "q", "confidence": "high"},'
+            '{"evidence_type": "Problem", "text": "p", "confidence": "high"},'
+            '{"evidence_type": "StudyDesign", "text": "d", "confidence": "medium"},'
+            '{"evidence_type": "InterventionModel", "text": "i", "confidence": "medium"},'
+            '{"evidence_type": "ComparatorBaseline", "text": "c", "confidence": "medium"},'
+            '{"evidence_type": "Metric", "text": "m", "confidence": "high"},'
+            '{"evidence_type": "Finding", "text": "f", "confidence": "medium"}'
+            ']'
+        )
+        objects, diag = extract_llm_evidence("paper1", _wiki_page(), None, client)
+        self.assertEqual(len(objects), 7)
+        self.assertEqual(
+            {o.evidence_type for o in objects},
+            {"ResearchQuestion", "Problem", "StudyDesign", "InterventionModel",
+             "ComparatorBaseline", "Metric", "Finding"},
+        )
+        self.assertEqual(diag["accepted"], 7)
+
     def test_missing_confidence_defaults_to_medium(self):
         client = MagicMock()
         client.chat_json.return_value = Success(

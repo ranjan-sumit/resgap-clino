@@ -2,7 +2,7 @@
 name: 'Clinova Research Intelligence Platform — AI / Research Architecture'
 type: architecture
 altitude: capability
-status: draft-for-review
+status: accepted
 created: '2026-08-20'
 inputDocuments: ['00-analysis-and-architecture-options.md', '01-prd.md', '03-system-architecture.md']
 companions: ['05-data-architecture.md', '06-versioning-lineage-architecture.md', '07-evaluation-architecture.md']
@@ -74,7 +74,7 @@ AgentConfig {
 
 Three combined signal sources, per PRD FR-10, none sufficient alone:
 
-1. **Deterministic pattern library** — a versioned, code-defined (not LLM-defined) rule set evaluated against Evidence Objects and paper metadata. Starting set (medical/healthcare-AI domain, refined by a Research Methodology Specialist pass at Phase 3 detailed design per PRD's open question): missing external validation, single-center study, limited/non-diverse population, missing demographic subgroup analysis, small sample size, no longitudinal evidence, no fairness/bias testing, missing benchmark comparison, no explainability analysis, named methodological limitation (self-reported in the paper's own Limitations section).
+1. **Deterministic pattern library** — a versioned, code-defined (not LLM-defined) rule set evaluated against Evidence Objects and paper metadata. Starting set (medical/healthcare-AI domain): missing external validation, single-center study, limited/non-diverse population, missing demographic subgroup analysis, small sample size, no longitudinal evidence, no fairness/bias testing, missing benchmark comparison, no explainability analysis, named methodological limitation (self-reported in the paper's own Limitations section). **Expanded draft (2026-08-21):** `domain-patterns-healthcare-ai.md` — 20 additional patterns across study validity, population/fairness, comparison/interpretability, deployment, and data/reproducibility, grounded in TRIPOD+AI/PROBAST/CONSORT-AI. Explicitly marked draft-needs-expert-review — produced as a best-effort starting set at the user's request rather than blocking on an unavailable clinical/biostatistics reviewer; treat as the Phase 3 input to correct, not pre-validated fact. Not yet run against real papers to confirm the patterns actually fire correctly — that validation is real Phase 3 work.
 2. **Graph-structural reasoning** — queries over the persisted graph (Neo4j, Phase 3) for missing expected relationships, sparse subgraph regions, conflicting relationship claims, and untested combinations (e.g., an intervention studied in population A and a dataset studied in population B, never studied together).
 3. **Semantic reasoning** — a single Gap Generator LLM call per candidate area, scoped narrowly (per §2's discipline), used only where the first two sources surface a candidate area that needs conceptual interpretation to state as a gap.
 
