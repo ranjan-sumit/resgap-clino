@@ -15,7 +15,27 @@ created: '2026-08-20'
 
 ## What stage this project is at
 
-**Planning complete, pending your review. No implementation has started.** Per the enterprise brief's explicit instruction (§55): "Stop and request review before implementation begins."
+Planning complete; implementation underway (Phase 0-2, see "Current phase" below).
+
+## Things you need to take care of (consolidated, updated as they come up)
+
+**Environment / infrastructure — outside what I can do myself:**
+- **Docker isn't available on this machine** (company laptop, no admin rights — `amendments/2026-08-20-environment-constraints.md`). This blocks GROBID's normal setup and all of Phase 3+'s planned infra (Qdrant, Neo4j). GROBID has an untried no-Docker fallback (build+run via Gradle against the Java 11 already on this machine) — real but slow on first build, not attempted yet. If you get admin rights or move to a different machine, GROBID and the later-phase infra become straightforward again.
+- **Your `.env` file (NVIDIA_API_KEY) is gitignored** — it's on this machine only, not backed up anywhere by me. Keep your own copy of the key somewhere safe.
+
+**Decisions only you (or a domain expert) can make:**
+- The medical/healthcare-AI deterministic gap-pattern list (`04-ai-research-architecture.md` §4) needs a real domain-expert pass — I can draft candidate patterns, but their clinical/methodological validity needs your judgment or a subject-matter expert's, not mine.
+- Quality-gate thresholds and the Search Coverage Score threshold (currently placeholder values — 0.35/0.60 fail/pass, 0.6 coverage) need real tuning once there's a bigger benchmark corpus than the current 2-3 papers. Don't treat the current numbers as final.
+- Phase 6 (governance/Keycloak/OPA) has no trigger yet — explicitly don't ask me to build it until there's a real second user or compliance need; building it speculatively contradicts the plan's own reasoning.
+
+**Known, intentional code gaps (not urgent, but real — don't be surprised by them):**
+- 4 of the 13 Evidence Object types aren't extracted yet (InterventionModel, ComparatorBaseline, Metric, a "Finding" distinct from "Result").
+- `wiki_compiler.py` still does its own independent LLM extraction, not yet unified with Evidence Objects — deliberately deferred to Phase 3 to avoid two risky edits to the same downstream consumers.
+- Evidence extraction currently only runs when the "Corpus Quality Engine" sidebar toggle is on (it reuses Docling's page data for provenance). If you want evidence extraction without paying Docling's ~90s/paper cost, that needs its own toggle — not built.
+- The Phase 0-era `generate_baseline_report.py`/diagnostic scripts and Playwright verification scripts in `evals/benchmarks/baseline/` are one-off manual verification tools, not part of the automated test suite — expect to re-run them by hand, not via `pytest`.
+
+**Housekeeping (cosmetic, whenever convenient):**
+- All planning docs (`00`-`10` + every ADR) still carry `status: draft-for-review` in their frontmatter. You've clearly been endorsing the plan by directing implementation against it, but I never got an explicit "approved" — say the word if you want that status flipped to `accepted` across the set (I haven't done it unprompted since it's a plan-approval action, not an engineering one).
 
 ## Document reading order
 
@@ -34,7 +54,9 @@ created: '2026-08-20'
 
 ## Current phase
 
-**Phase 0 — Baseline: COMPLETE** (Epic 0.1 + Epic 0.2 hotfix, 2026-08-20/21). **Phase 1 — Data Foundation: COMPLETE** (Epics 1.1-1.4, 2026-08-21). **Phase 2 — Evidence Foundation: IN PROGRESS.** Epic 2.1 (Evidence Object Schema & Extraction) is fully done; Epic 2.2's Story 2.2.1 (persistence) is done; Story 2.2.2 (report citation) is not yet done. See `09-epics-and-stories.md` for full status notes.
+**Phase 0 — Baseline: COMPLETE** (Epic 0.1 + Epic 0.2 hotfix, 2026-08-20/21). **Phase 1 — Data Foundation: COMPLETE** (Epics 1.1-1.4, 2026-08-21). **Phase 2 — Evidence Foundation: Epics 2.1 + 2.2 COMPLETE** (2026-08-21) — the only intentionally-deferred piece is the wiki_compiler rendering-layer rewrite, pushed to Phase 3 (reasoning below). See `09-epics-and-stories.md` for full status notes.
+
+**Story 2.2.2 (report citation) done and wired into the live app.** `utils/export.py`'s HTML report gained a new, purely additive "Evidence" section. A new "Stage 2C — Evidence Extraction" step runs per paper (same opt-in toggle as Stage 2B). Verified end-to-end via a real browser session: 56 real evidence objects saved and correctly rendered in the actual generated report (20 + 36 across the two real papers), confirmed via direct database query and a rendered-report screenshot (`evals/benchmarks/baseline/screenshots/08_report_evidence_section.png`).
 
 **Phase 2 kickoff finding that shaped real scope:** neither parser tracked page numbers for body text (only tables). Inspected Docling's actual document model directly before assuming anything — confirmed `doc.texts` carries real per-segment page numbers, extended `pipeline/docling_parser.py` to capture them (`text_segments`, `DOCLING_STAGE_VERSION` bumped 1→2). This is what gives Evidence Objects genuine page provenance instead of a guess.
 
@@ -42,9 +64,9 @@ created: '2026-08-20'
 
 **Story 2.2.1:** Evidence Objects persisted via a new `evidence_objects` SQLite table, same cache-aside pattern as Phase 1, verified with a real (not mocked) cache round-trip.
 
-**Deferred, with reasoning recorded:** the original Epic 2.2 scope ("wire wiki_compiler as a rendering layer over Evidence Objects") is pushed to Phase 3 — `wiki_compiler.py` is an existing, tested, working module with its own independent LLM call; replacing its extraction path is a real behavior change, not a safe additive step, and Phase 3 is already touching the graph/gap engine's Evidence-Object consumption, so both changes should land together. Story 2.2.2 (report citation) and wiring evidence extraction into `app.py`'s live run at all are also not done yet.
+**Deferred, with reasoning recorded:** the original Epic 2.2 scope ("wire wiki_compiler as a rendering layer over Evidence Objects") is pushed to Phase 3 — `wiki_compiler.py` is an existing, tested, working module with its own independent LLM call; replacing its extraction path is a real behavior change, not a safe additive step, and Phase 3 is already touching the graph/gap engine's Evidence-Object consumption, so both changes should land together.
 
-Full test suite: 275 passing (85 new since Phase 1 completed).
+Full test suite: 281 passing (91 new since Phase 1 completed).
 
 **Epic 1.1 results:** `pipeline/docling_parser.py` (new, cached via `utils/database.py`'s `docling_extractions` table) and `pipeline/extraction_reconciler.py` (new) reconcile PyMuPDF + Docling extractions for `full_text`, `doi`, and `tables`, with LLM recovery scoped narrowly to an unresolved DOI. Docling measured heavy on this CPU-only machine (~1.1GB RSS, ~86s/paper) — revises the original desk estimate; see `evals/benchmarks/baseline/docling-resource-measurement.md`. Real-data validation against `Data-17072026/AuDHD_1.pdf` caught and fixed a genuine bug in the DOI-disambiguation logic (see `evals/benchmarks/baseline/doi-disambiguation-note.md`) before it shipped.
 

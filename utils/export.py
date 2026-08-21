@@ -373,6 +373,28 @@ def _status_class(status: str) -> str:
     }.get(str(status or "").lower(), "muted")
 
 
+def _evidence_rows(evidence_by_paper: dict) -> str:
+    """Clinova Phase 2, Story 2.2.2: renders each paper's extracted
+    Evidence Objects with their real provenance (page/section) where
+    resolved -- additive to the existing wiki-text-based report content,
+    not a replacement of it (05-data-architecture.md §8)."""
+    rows = []
+    for paper_name, items in (evidence_by_paper or {}).items():
+        for e in items:
+            prov = e.get("provenance") or {}
+            page = prov.get("page")
+            section = prov.get("section")
+            location = f"p.{page}" if page is not None else "—"
+            if section:
+                location = f"{location} ({section})" if page is not None else section
+            rows.append(
+                f"<tr><td>{_esc(paper_name)}</td><td>{_esc(e.get('evidence_type'))}</td>"
+                f"<td>{_esc(e.get('text'))}</td><td>{_esc(location)}</td>"
+                f"<td>{_esc(e.get('confidence'))}</td></tr>"
+            )
+    return "".join(rows)
+
+
 def to_enterprise_html_report(results: dict, context: dict, narrative: dict | None = None) -> str:
     """Build a polished standalone HTML report."""
     narrative = narrative or generate_report_narrative(results, context)
@@ -427,6 +449,9 @@ def to_enterprise_html_report(results: dict, context: dict, narrative: dict | No
         f"<tr><td>{i}</td><td>{_esc(t.get('stage'))}</td><td>{_esc(t.get('inputs'))}</td><td>{_esc(t.get('outputs'))}</td></tr>"
         for i, t in enumerate(trace, 1)
     )
+    evidence_by_paper = results.get("evidence_objects") or {}
+    evidence_count = sum(len(v) for v in evidence_by_paper.values())
+    evidence_rows = _evidence_rows(evidence_by_paper)
 
     return f"""<!doctype html>
 <html>
@@ -496,6 +521,12 @@ def to_enterprise_html_report(results: dict, context: dict, narrative: dict | No
     <h2>Papers Analyzed</h2>
     <table><thead><tr><th>#</th><th>Paper</th><th>Key contributions</th><th>Limitations</th></tr></thead><tbody>{paper_rows}</tbody></table>
   </section>
+
+  {"" if not evidence_by_paper else f'''<section>
+    <h2>Evidence</h2>
+    <p>{evidence_count} extracted evidence items with provenance, where resolved (Clinova Evidence Objects -- 05-data-architecture.md §8). A page/section location means the exact source passage was located in the paper; "—" means the item is grounded in the paper but a precise page could not be confidently matched.</p>
+    <table><thead><tr><th>Paper</th><th>Type</th><th>Text</th><th>Location</th><th>Confidence</th></tr></thead><tbody>{evidence_rows}</tbody></table>
+  </section>'''}
 
   <section>
     <h2>Reference Corpus Summary</h2>

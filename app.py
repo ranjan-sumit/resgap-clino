@@ -559,6 +559,7 @@ from pipeline.corpus_quality import (
     QualityGateBlockedError,
 )
 from pipeline.canonical_resolver import filter_and_dedupe_references
+from pipeline.evidence_extractor import extract_evidence_cached
 
 # Initialise DB on startup
 init_db()
@@ -914,13 +915,16 @@ if run_btn and uploaded_files:
         # field checklist, and enforces the PASS/DEGRADED/FAIL gate before
         # gap analysis is allowed to run (Story 1.2.3 / PRD FR-3).
         corpus_quality_metrics = None
+        evidence_objects = None
         if enable_quality_engine:
             upd("Stage 2B — Corpus Quality Engine (multi-parser cross-check)…", 35)
             paper_scores = []
+            docling_results = []
             wiki_pages = wiki.get("pages", [])
             for i, (paper, tmp_path) in enumerate(zip(all_papers, paper_tmp_paths)):
                 upd(f"Stage 2B — Cross-checking paper {i+1}/{len(all_papers)} with Docling…", 35)
                 wiki_page = wiki_pages[i] if i < len(wiki_pages) else {}
+                docling_result = None
                 try:
                     docling_result = extract_with_docling(tmp_path, paper.get("filename", uploaded_files[i].name))
                     reconciled = reconcile_paper(paper, docling_result, paper.get("filename", ""))
@@ -934,6 +938,7 @@ if run_btn and uploaded_files:
                     # below, which correctly lowers its completeness score
                     # rather than silently pretending nothing was lost.
                     reconciled = {"fields": {}}
+                docling_results.append(docling_result)
                 score = score_paper_completeness(
                     reconciled, wiki_page,
                     ref_count=len(ref_papers), has_figures=bool(paper.get("figures")),
@@ -967,6 +972,36 @@ if run_btn and uploaded_files:
                 f"{corpus_quality_metrics['extraction_completeness']:.0%} extraction completeness, "
                 f"{corpus_quality_metrics['doi_resolution_rate']:.0%} DOI resolution, "
                 f"gate={corpus_quality_metrics['quality_gate']}",
+            )
+
+            # Stage 2C: Evidence Extraction (Clinova Phase 2, Epic 2.1/2.2,
+            # same opt-in toggle -- real page provenance depends on Stage
+            # 2B's Docling text_segments having just run). Cheap: 6 of 13
+            # evidence types are deterministic (zero LLM cost), the other 3
+            # cost one small scoped call per paper (max_tokens=800).
+            upd("Stage 2C — Extracting evidence objects…", 35)
+            evidence_objects = {}
+            total_evidence = 0
+            for i, paper in enumerate(all_papers):
+                wiki_page = wiki_pages[i] if i < len(wiki_pages) else {}
+                docling_result = docling_results[i] if i < len(docling_results) else None
+                filename = paper.get("filename", f"paper_{i+1}")
+                try:
+                    evidence_dicts, _, _ = extract_evidence_cached(
+                        filename, wiki_page, docling_result, client=client, use_llm=True,
+                    )
+                except Exception:
+                    # Same never-let-one-paper-kill-the-run philosophy as
+                    # the Docling cross-check above -- evidence extraction
+                    # is additive, not load-bearing for the rest of the run.
+                    evidence_dicts = []
+                evidence_objects[filename] = evidence_dicts
+                total_evidence += len(evidence_dicts)
+
+            _add_trace(
+                "Stage 2C — Evidence Extraction",
+                f"{len(all_papers)} papers",
+                f"{total_evidence} evidence objects extracted",
             )
 
         for p in paper_tmp_paths:
@@ -1028,6 +1063,7 @@ if run_btn and uploaded_files:
             "ref_diagnostics": ref_diagnostics,
             "ref_resolution_diagnostics": ref_resolution_diagnostics,
             "corpus_quality_metrics": corpus_quality_metrics,
+            "evidence_objects": evidence_objects,
             "corpus": corpus,
             "pipeline_trace": st.session_state.pipeline_trace,
         }
