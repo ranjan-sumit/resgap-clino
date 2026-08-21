@@ -138,5 +138,60 @@ class SuccessfulExtractionTests(unittest.TestCase):
         self.assertEqual(result["communities"], [])               # community detection degraded gracefully
 
 
+class RetryOnParseFailureTests(unittest.TestCase):
+    """B24 fix (2026-08-21): extract_entities_and_relations() retries once
+    on a genuine parse failure -- both the raw="" reasoning-exhaustion case
+    (a "thinking" model spending its whole token budget on reasoning_content
+    before emitting any real content, measured live: finish_reason="length",
+    content="") and a malformed-JSON case (also measured live: a missing
+    comma mid-object) -- before accepting failure and falling back."""
+
+    def test_empty_raw_response_is_retried_and_recovers(self):
+        client = MagicMock()
+        client.chat_json.side_effect = [
+            Success(""),           # reasoning exhausted the token budget
+            Success(_ENTITY_JSON), # retry recovers
+            Success(_COMMUNITY_JSON),
+        ]
+        result = build_knowledge_graph(_wiki(), client)
+        self.assertFalse(result["diagnostics"]["used_fallback"])
+        self.assertEqual(len(result["entities"]), 1)
+        self.assertEqual(client.chat_json.call_count, 3)  # 2 extraction attempts + 1 community call
+
+    def test_malformed_json_is_retried_and_recovers(self):
+        client = MagicMock()
+        client.chat_json.side_effect = [
+            Success('{"entities": [{"id": "e1" "name": missing comma}'),  # malformed
+            Success(_ENTITY_JSON),
+            Success(_COMMUNITY_JSON),
+        ]
+        result = build_knowledge_graph(_wiki(), client)
+        self.assertFalse(result["diagnostics"]["used_fallback"])
+        self.assertEqual(len(result["entities"]), 1)
+
+    def test_both_attempts_failing_still_degrades_to_fallback_not_a_crash(self):
+        client = MagicMock()
+        client.chat_json.side_effect = [
+            Success(""),
+            Success(""),
+            Success(_COMMUNITY_JSON),
+        ]
+        result = build_knowledge_graph(_wiki(), client)
+        self.assertTrue(result["diagnostics"]["used_fallback"])
+        self.assertEqual(client.chat_json.call_count, 3)  # 2 extraction attempts + 1 community call
+        self.assertGreater(len(result["entities"]), 0)  # deterministic fallback graph, not empty
+
+    def test_genuinely_empty_extraction_is_not_retried(self):
+        # A real "no entities found" result (has the keys, just empty lists)
+        # must NOT be mistaken for a parse failure -- only one call expected.
+        client = MagicMock()
+        client.chat_json.side_effect = [
+            Success('{"entities": [], "relationships": []}'),
+            Success(_COMMUNITY_JSON),
+        ]
+        result = build_knowledge_graph(_wiki(), client)
+        self.assertEqual(client.chat_json.call_count, 2)  # 1 extraction + 1 community, no retry
+
+
 if __name__ == "__main__":
     unittest.main()

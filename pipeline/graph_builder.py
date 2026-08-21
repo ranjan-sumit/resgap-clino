@@ -119,16 +119,41 @@ Cross-paper connections already identified:
 Extract all entities and relationships for the knowledge graph.
 IMPORTANT: Return ONLY valid JSON — no text before or after."""
 
-    # B12 fix: unwrap raises LLMCallError on Failure — deliberately left uncaught
-    # here; build_knowledge_graph() (below) is responsible for catching it
-    # distinctly from a genuine-empty extraction (Story 1.3).
-    raw = unwrap(client.chat_json(
-        inject_domain_into_graph_prompt(ENTITY_EXTRACTION_PROMPT, domain_config or {}),
-        user_prompt,
-        max_tokens=6000,
-    ))
+    system_prompt = inject_domain_into_graph_prompt(ENTITY_EXTRACTION_PROMPT, domain_config or {})
 
+    # B24 fix (2026-08-21): max_tokens was 6000. Measured live against a real
+    # 2-paper corpus: gpt-oss models are "thinking" models that stream a
+    # reasoning_content phase before any real content -- on this prompt's
+    # complexity, reasoning alone measured ~6300 tokens, consuming the ENTIRE
+    # 6000-token budget before the model ever started the actual JSON answer
+    # (finish_reason="length", content="", NOT a parse failure -- a genuinely
+    # empty response that unconditionally fell back to the deterministic
+    # graph every single time, for every historical run checked). Reproduced
+    # identically on both openai/gpt-oss-120b and openai/gpt-oss-20b -- not a
+    # bigger-model-specific problem, a token-budget-too-small-for-reasoning
+    # problem. 16000 was measured just barely sufficient for reasoning
+    # (~11000 tokens) + full content (~6000 tokens) to both complete
+    # (finish_reason="stop") on that same real corpus; 24000 leaves real
+    # margin for a larger corpus rather than being exactly enough for the one
+    # test case measured.
+    raw = unwrap(client.chat_json(system_prompt, user_prompt, max_tokens=24000))
     graph_data = _robust_parse(raw, dict)
+
+    # B24 fix: retry once on a genuine parse failure before accepting it --
+    # mirrors gap_detector.py's B19 retry-once pattern. A parse failure here
+    # (raw was non-empty but no strategy produced a dict with real keys) is
+    # distinct from a raw="" reasoning-exhaustion failure the max_tokens bump
+    # above already targets, but both are worth one retry: a single LLM
+    # sample occasionally emits syntactically invalid JSON (a missing comma
+    # mid-object, measured live on this same prompt) that a second sample at
+    # the same temperature is not guaranteed to repeat.
+    parse_failed = "entities" not in graph_data and "relationships" not in graph_data
+    if parse_failed:
+        raw_retry = unwrap(client.chat_json(system_prompt, user_prompt, max_tokens=24000))
+        retry_data = _robust_parse(raw_retry, dict)
+        if "entities" in retry_data or "relationships" in retry_data:
+            raw, graph_data = raw_retry, retry_data
+
     graph_data["_raw_response_preview"] = raw[:1000] if raw else ""
     graph_data["_used_fallback"] = False
 
@@ -219,7 +244,16 @@ RELATIONSHIPS:
 Group into 3-6 thematic communities. Focus on identifying communities where gaps exist.
 Return ONLY valid JSON array."""
 
-    raw = unwrap(client.chat_json(COMMUNITY_PROMPT, user_prompt, max_tokens=3000))
+    # B24 fix (2026-08-21): bumped 3000 -> 8000, same reasoning-budget-
+    # exhaustion risk as extract_entities_and_relations() above (this call
+    # wasn't directly measured hitting it, but shares the same "thinking
+    # model, reasoning phase consumes the token budget before content"
+    # mechanism on a prompt of comparable complexity -- entities[:60] +
+    # relationships[:80] is not small). No retry-on-parse-failure here:
+    # build_knowledge_graph() already treats an empty communities list as a
+    # legitimate degrade-gracefully outcome (B13), not a hard failure worth
+    # spending a second live call on.
+    raw = unwrap(client.chat_json(COMMUNITY_PROMPT, user_prompt, max_tokens=8000))
     communities = _robust_parse(raw, list)
     return communities if isinstance(communities, list) else []
 
