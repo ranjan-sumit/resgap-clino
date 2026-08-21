@@ -192,8 +192,12 @@ As a Business Analyst, I want the baseline's measured state against brief Proble
 #### Story 1.4.1: Extract the LLMProvider interface behind the existing azure_client.py logic
 **AC:** **Given** the existing `Result[str, ErrorInfo]` pattern in `utils/azure_client.py`; **When** the `LLMProvider` port is introduced; **Then** all existing callers continue to work unchanged (behavior-preserving refactor) — verified by the existing test suite (`tests/test_azure_client.py`, `tests/test_caller_resilience.py`) passing unmodified.
 
+**Status:** done. `packages/contracts/llm_provider.py` defines `LLMProvider` as a `typing.Protocol` — `utils/azure_client.py` is **not modified at all** by this story, so the "unchanged" requirement is trivially, provably true rather than merely tested for. `AzureOpenAIClient` satisfies the port structurally (no inheritance change). A second, independent, non-NVIDIA test implementation (`tests/test_llm_provider_port.py::SecondIndependentProvider`) also satisfies it, proving the interface is genuinely swappable rather than an accidental one-class shape. 4 new tests; full suite 234 passing.
+
 #### Story 1.4.2: Create the branding/theme config layer with Clinova identity
 **AC:** **Given** the product name and tagline (`02-ux-specification.md` §2); **When** the branding layer is created; **Then** no other module references these strings literally, and the interim Streamlit UI reads them from this config — proving `03-system-architecture.md` AD-3 holds in practice.
+
+**Status:** done and wired into the live app (branding config itself was created in Phase 0 kickoff — see `packages/branding/theme.json`/`copy.json` — this story completes the wiring that was deferred at the time). `app.py` now loads `product_name`/`tagline` via a small `_load_branding()` helper and uses it at all three points the name previously appeared literally (browser tab title, sidebar header, main page header); the tagline is newly surfaced as a sidebar caption (previously loaded but never displayed anywhere). Verified visually via a live browser screenshot: tab title, sidebar, and main header all correctly show "Clinova Research Intelligence Platform," with the tagline "Evidence → Gaps → Hypotheses → Studies" visible under the sidebar header (`evals/benchmarks/baseline/screenshots/06_branding_check.png`).
 
 ---
 

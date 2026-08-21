@@ -1,5 +1,5 @@
 """
-Research Gap Analyzer
+Research Gap Analyzer (Clinova Research Intelligence Platform)
 An AI-powered tool for identifying research gaps across academic papers.
 Architecture: LLM Wiki + PageIndex + LazyGraphRAG + Academic Validation
 """
@@ -11,9 +11,24 @@ import time
 import html
 from pathlib import Path
 
+# Clinova Phase 1, Story 1.4.2: product name/tagline live in the branding
+# config layer (03-system-architecture.md AD-3), not hardcoded here -- the
+# product identity can change without touching this file. Falls back to the
+# pre-Clinova name if the config is ever missing (defensive, not expected).
+def _load_branding() -> dict:
+    try:
+        theme_path = Path(__file__).parent / "packages" / "branding" / "theme.json"
+        theme = json.loads(theme_path.read_text(encoding="utf-8"))
+        return {"product_name": theme.get("product_name", "Research Gap Analyzer"),
+                "tagline": theme.get("tagline", "")}
+    except Exception:
+        return {"product_name": "Research Gap Analyzer", "tagline": ""}
+
+_BRANDING = _load_branding()
+
 # ── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Research Gap Analyzer",
+    page_title=_BRANDING["product_name"],
     page_icon="🔬",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -604,7 +619,9 @@ def _add_trace(stage, inp, out, status="✅"):
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("### 🔬 Research Gap Analyzer")
+    st.markdown(f"### 🔬 {_BRANDING['product_name']}")
+    if _BRANDING["tagline"]:
+        st.caption(_BRANDING["tagline"])
     st.markdown("---")
 
     # API config
@@ -728,7 +745,7 @@ with st.sidebar:
             st.rerun()
 
 # ── Main header ───────────────────────────────────────────────────────────────
-st.markdown('<div class="main-header">Research Gap Analyzer</div>', unsafe_allow_html=True)
+st.markdown(f'<div class="main-header">{html.escape(_BRANDING["product_name"])}</div>', unsafe_allow_html=True)
 
 # Show loaded run banner
 if st.session_state.loaded_run_id:
