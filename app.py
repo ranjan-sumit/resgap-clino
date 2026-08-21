@@ -915,6 +915,16 @@ if run_btn and uploaded_files:
         # field checklist, and enforces the PASS/DEGRADED/FAIL gate before
         # gap analysis is allowed to run (Story 1.2.3 / PRD FR-3).
         corpus_quality_metrics = None
+        # B23 fix (2026-08-21): a FAIL gate used to raise all the way to the
+        # outer except block, discarding EVERYTHING already fetched this run
+        # (papers, references, wiki, evidence) with nothing saved -- a user
+        # whose corpus happened to score FAIL got back nothing at all, not
+        # even the data that had genuinely already been gathered. Now the
+        # block is caught locally: gap-analysis stages (3-6) are skipped,
+        # but Stage 1-2C's fetched data is still built into a normal results
+        # dict and saved, with the gate's FAIL status/reasons visible in it.
+        gate_blocked = False
+        gate_block_reasons = []
         wiki_pages = wiki.get("pages", [])
         # docling_results defaults to all-None (honest: no real page
         # provenance available) when the Quality Engine toggle is off --
@@ -960,15 +970,17 @@ if run_btn and uploaded_files:
                     override_by="streamlit_user",
                 )
             except QualityGateBlockedError as e:
-                # Cleanup deferred temp files before surfacing the error --
-                # the existing outer except block below reports this via
-                # st.error() same as any other pipeline failure.
-                for p in paper_tmp_paths:
-                    try:
-                        os.unlink(p)
-                    except OSError:
-                        pass
-                raise
+                # B23 fix: previously re-raised here, which discarded every
+                # paper/reference/wiki page already fetched this run -- now
+                # caught locally so that data is still saved. Stage 3-6
+                # (knowledge graph / gap detection / validation / proposals)
+                # are skipped below since running gap analysis against a
+                # FAIL-gated corpus would violate PRD FR-3; only that
+                # gap-analysis output is empty, not the whole run.
+                gate_blocked = True
+                gate_block_reasons = e.reasons
+                # Temp-file cleanup happens unconditionally a few lines below
+                # (runs whether or not the gate blocked) -- no need to repeat it here.
 
             _add_trace(
                 "Stage 2B — Corpus Quality Engine",
@@ -1024,33 +1036,46 @@ if run_btn and uploaded_files:
             f"({'with' if enable_quality_engine else 'without'} Docling page provenance)",
         )
 
-        # Stage 3: Knowledge Graph
-        upd("Stage 3 — Building knowledge graph (LazyGraphRAG)…", 36)
-        graph = build_knowledge_graph(wiki, client, domain_config=domain_cfg)
-        _add_trace("Stage 3 — Knowledge Graph",
-                   "Wiki pages + cross-links",
-                   f"{graph['stats']['entity_count']} entities, "
-                   f"{graph['stats']['relationship_count']} relationships")
-        prog.progress(48)
+        if not gate_blocked:
+            # Stage 3: Knowledge Graph
+            upd("Stage 3 — Building knowledge graph (LazyGraphRAG)…", 36)
+            graph = build_knowledge_graph(wiki, client, domain_config=domain_cfg)
+            _add_trace("Stage 3 — Knowledge Graph",
+                       "Wiki pages + cross-links",
+                       f"{graph['stats']['entity_count']} entities, "
+                       f"{graph['stats']['relationship_count']} relationships")
+            prog.progress(48)
 
-        # Stage 4+5: Gaps + Validation
-        upd("Stage 4 — Detecting research gaps…", 50)
-        gaps = detect_gaps(wiki, graph, context, client, domain_config=domain_cfg)
-        upd("Stage 5 — Validating gaps (Semantic Scholar + arXiv)…", 58)
-        validated_gaps = validate_gaps(gaps, client, domain_config=domain_cfg, ss_api_key=ss_api_key.strip())
-        _add_trace("Stage 4-5 — Gaps",
-                   "Wiki + graph + domain context",
-                   f"{len(validated_gaps)} gaps: "
-                   f"{sum(1 for g in validated_gaps if g.get('validation_status')=='open')} open")
-        prog.progress(66)
+            # Stage 4+5: Gaps + Validation
+            upd("Stage 4 — Detecting research gaps…", 50)
+            gaps = detect_gaps(wiki, graph, context, client, domain_config=domain_cfg)
+            upd("Stage 5 — Validating gaps (Semantic Scholar + arXiv)…", 58)
+            validated_gaps = validate_gaps(gaps, client, domain_config=domain_cfg, ss_api_key=ss_api_key.strip())
+            _add_trace("Stage 4-5 — Gaps",
+                       "Wiki + graph + domain context",
+                       f"{len(validated_gaps)} gaps: "
+                       f"{sum(1 for g in validated_gaps if g.get('validation_status')=='open')} open")
+            prog.progress(66)
 
-        # Stage 6: Proposals
-        upd("Stage 6 — Generating proposals…", 68)
-        proposals = generate_proposals(validated_gaps, wiki, context, client,
-                                       domain_config=domain_cfg)
-        _add_trace("Stage 6 — Proposals", f"{len(validated_gaps)} gaps",
-                   f"{len(proposals)} proposals")
-        prog.progress(75)
+            # Stage 6: Proposals
+            upd("Stage 6 — Generating proposals…", 68)
+            proposals = generate_proposals(validated_gaps, wiki, context, client,
+                                           domain_config=domain_cfg)
+            _add_trace("Stage 6 — Proposals", f"{len(validated_gaps)} gaps",
+                       f"{len(proposals)} proposals")
+            prog.progress(75)
+        else:
+            # B23 fix: gate-blocked runs skip gap analysis entirely (PRD
+            # FR-3 -- must not analyze a FAIL-gated corpus) but still reach
+            # this point with real fetched data to save below.
+            upd("Quality gate FAILED — skipping gap analysis, saving fetched data…", 68)
+            graph = {"stats": {"entity_count": 0, "relationship_count": 0}, "communities": []}
+            validated_gaps = []
+            proposals = []
+            _add_trace("Stage 3-6 — Skipped (quality gate FAIL)",
+                       f"{len(all_papers)} papers, {len(ref_papers)} refs",
+                       "; ".join(gate_block_reasons) or "corpus below quality threshold")
+            prog.progress(75)
 
         # Build full corpus
         corpus = assign_tiers(all_papers, ref_papers)
@@ -1080,10 +1105,17 @@ if run_btn and uploaded_files:
             "evidence_objects": evidence_objects,
             "corpus": corpus,
             "pipeline_trace": st.session_state.pipeline_trace,
+            # B23 fix: surfaced so the Results view can explain why gaps/
+            # proposals are empty on a gate-blocked run, distinct from a
+            # genuinely gap-free corpus.
+            "gate_blocked": gate_blocked,
+            "gate_block_reasons": gate_block_reasons,
         }
         st.session_state.results = results
 
-        # Auto-save to database
+        # Auto-save to database -- happens regardless of gate_blocked, so a
+        # FAIL-gated run's fetched papers/references/wiki/evidence are never
+        # lost (B23 fix).
         saved_id = save_run(name, results)
         st.session_state.loaded_run_id = None  # fresh run, not a loaded one
         st.session_state.current_run_id = saved_id
@@ -1091,8 +1123,16 @@ if run_btn and uploaded_files:
 
         prog.progress(80)
         prog.empty(); stat.empty()
-        st.success(f"✅ Done — {len(validated_gaps)} gaps, {len(proposals)} proposals. "
-                   f"Saved as '{name}' ({saved_id[:8]}…)")
+        if gate_blocked:
+            st.warning(
+                f"⚠️ Quality gate FAILED — gap analysis skipped: {'; '.join(gate_block_reasons)}. "
+                f"Fetched data ({len(all_papers)} papers, {len(ref_papers)} refs, "
+                f"{total_evidence} evidence objects) was saved as '{name}' ({saved_id[:8]}…). "
+                "Re-run with the sidebar override checked to force gap analysis anyway."
+            )
+        else:
+            st.success(f"✅ Done — {len(validated_gaps)} gaps, {len(proposals)} proposals. "
+                       f"Saved as '{name}' ({saved_id[:8]}…)")
 
     except Exception as e:
         prog.empty(); stat.empty()
@@ -1124,6 +1164,18 @@ if st.session_state.results:
       <span style="font-size:0.9rem;color:#0b1f3a;font-weight:500;margin-left:0.8rem;">
         {context.get('domain','')} — Domain-Tuned Analysis</span>
     </div>""", unsafe_allow_html=True)
+
+    # B23 fix: this run's gate-blocked status must stay visible after the
+    # original st.warning() toast is gone (e.g. reloading a saved run from
+    # history) -- gaps/proposals being empty here is a gate block, not a
+    # genuinely gap-free corpus, and that distinction matters to the user.
+    if res.get("gate_blocked"):
+        reasons = "; ".join(res.get("gate_block_reasons", [])) or "corpus below quality threshold"
+        st.warning(
+            f"⚠️ This run's quality gate FAILED, so gap analysis was skipped: {reasons}. "
+            "Papers, references, wiki, and evidence below were still fetched and saved. "
+            "Re-run with the sidebar override checked to force gap analysis anyway."
+        )
 
     # Corpus stats bar
     c_stats = res.get("corpus_stats", {})

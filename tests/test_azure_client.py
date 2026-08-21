@@ -44,12 +44,62 @@ class ChatResultTests(unittest.TestCase):
 
     @patch("time.sleep", return_value=None)
     def test_chat_rate_limit_exhaustion_returns_failure(self, _sleep):
+        # B22 fix: after the primary model's 3 attempts are exhausted, one
+        # more attempt is made on the fallback model (also fails here) --
+        # call_count is 4, not 3, because of that new fallback attempt.
         self.mock_client.chat.completions.create.side_effect = Exception("429 Too Many Requests")
         result = self.client.chat("system", "user")
         self.assertIsInstance(result, Failure)
         self.assertIsInstance(result.error, ErrorInfo)
         self.assertEqual(result.error.kind, "rate_limit")
-        self.assertEqual(self.mock_client.chat.completions.create.call_count, 3)  # initial + 2 retries
+        self.assertEqual(self.mock_client.chat.completions.create.call_count, 4)  # 3 primary + 1 fallback
+
+    @patch("time.sleep", return_value=None)
+    def test_chat_falls_back_to_smaller_model_after_primary_exhausted(self, _sleep):
+        from utils.azure_client import FALLBACK_MODEL, MASTER_MODEL
+        self.mock_client.chat.completions.create.side_effect = [
+            Exception("429 Too Many Requests"),  # primary attempt 1
+            Exception("429 Too Many Requests"),  # primary attempt 2
+            Exception("429 Too Many Requests"),  # primary attempt 3
+            _fake_stream("recovered on fallback model"),  # fallback attempt
+        ]
+        result = self.client.chat("system", "user")
+        self.assertIsInstance(result, Success)
+        self.assertEqual(result.value, "recovered on fallback model")
+        calls = self.mock_client.chat.completions.create.call_args_list
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(calls[0].kwargs["model"], MASTER_MODEL)
+        self.assertEqual(calls[1].kwargs["model"], MASTER_MODEL)
+        self.assertEqual(calls[2].kwargs["model"], MASTER_MODEL)
+        self.assertEqual(calls[3].kwargs["model"], FALLBACK_MODEL)
+
+    @patch("time.sleep", return_value=None)
+    def test_chat_fallback_attempt_itself_is_not_retried(self, _sleep):
+        # The fallback gets exactly one attempt -- if it also fails, chat()
+        # must not recurse into retrying the fallback or falling back again.
+        self.mock_client.chat.completions.create.side_effect = Exception("429 Too Many Requests")
+        result = self.client.chat("system", "user")
+        self.assertIsInstance(result, Failure)
+        self.assertEqual(self.mock_client.chat.completions.create.call_count, 4)  # not 5, 6, ...
+
+    def test_chat_non_retryable_error_skips_fallback_too(self):
+        # api_error (not rate_limit/timeout) fails fast on the primary model
+        # -- switching models is unlikely to fix a genuine API/auth error,
+        # so the fallback is deliberately not attempted for this kind.
+        self.mock_client.chat.completions.create.side_effect = Exception("Connection refused")
+        result = self.client.chat("system", "user")
+        self.assertIsInstance(result, Failure)
+        self.assertEqual(self.mock_client.chat.completions.create.call_count, 1)
+
+    @patch("time.sleep", return_value=None)
+    def test_fallback_disabled_when_constructed_with_none(self, _sleep):
+        with patch("utils.azure_client.make_nvidia_client") as mock_make:
+            mock_client = mock_make.return_value
+            client = AzureOpenAIClient(api_key="fake-key", fallback_model=None)
+        mock_client.chat.completions.create.side_effect = Exception("429 Too Many Requests")
+        result = client.chat("system", "user")
+        self.assertIsInstance(result, Failure)
+        self.assertEqual(mock_client.chat.completions.create.call_count, 3)  # no 4th fallback attempt
 
     @patch("time.sleep", return_value=None)
     def test_chat_timeout_exhaustion_returns_failure(self, _sleep):
@@ -99,6 +149,32 @@ class ChatResultTests(unittest.TestCase):
         result = self.client.vision("system", "what is this?", b"fake-image-bytes")
         self.assertIsInstance(result, Failure)
         self.assertEqual(result.error.kind, "api_error")
+        self.assertEqual(self.mock_client.chat.completions.create.call_count, 1)  # api_error: no retry
+
+    @patch("time.sleep", return_value=None)
+    def test_vision_retries_on_timeout_then_recovers(self, _sleep):
+        # B22 fix: vision() previously had zero retries at all.
+        self.mock_client.chat.completions.create.side_effect = [
+            Exception("Request timeout after 120s"),
+            _fake_stream("a cat", " (recovered)"),
+        ]
+        result = self.client.vision("system", "what is this?", b"fake-image-bytes")
+        self.assertIsInstance(result, Success)
+        self.assertEqual(result.value, "a cat (recovered)")
+        self.assertEqual(self.mock_client.chat.completions.create.call_count, 2)
+
+    @patch("time.sleep", return_value=None)
+    def test_vision_does_not_fall_back_to_a_different_model(self, _sleep):
+        # Deliberately narrower than chat()'s fix -- FALLBACK_MODEL's
+        # image-input support isn't confirmed, so vision() stays on
+        # self.model for all retry attempts, never switching models.
+        from utils.azure_client import MASTER_MODEL
+        self.mock_client.chat.completions.create.side_effect = Exception("429 Too Many Requests")
+        result = self.client.vision("system", "what is this?", b"fake-image-bytes")
+        self.assertIsInstance(result, Failure)
+        calls = self.mock_client.chat.completions.create.call_args_list
+        self.assertEqual(len(calls), 3)  # initial + 2 retries, no 4th fallback attempt
+        self.assertTrue(all(c.kwargs["model"] == MASTER_MODEL for c in calls))
 
 
 class ClassifyErrorTests(unittest.TestCase):
