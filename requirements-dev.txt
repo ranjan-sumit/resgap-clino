@@ -1,2 +1,3 @@
--r requirements.txt
+-r requirements-clinova.txt
 pytest>=8.0.0
+psutil>=6.0.0

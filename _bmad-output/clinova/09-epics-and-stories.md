@@ -99,6 +99,8 @@ As a Business Analyst, I want the baseline's measured state against brief Proble
 - **When** it's added to the Phase 1 environment
 - **Then** it runs directly in the Python venv with no container dependency, and a measured resource-cost result is recorded, confirming or revising the desk estimate in `05-data-architecture.md` §2
 
+**Status:** done. Measured 2026-08-21 against real papers: **~1.1 GB process RSS, ~86s/paper steady-state (CPU, torch-based)** — revises the original "Moderate" desk estimate to "Heavy" (`evals/benchmarks/baseline/docling-resource-measurement.md`). Caching by content hash made binding as a result (`utils/database.py`'s `docling_extractions` table, `pipeline/docling_parser.py`).
+
 #### Story 1.1.1b: Stand up GROBID via Gradle (deferred — see `amendments/2026-08-20-environment-constraints.md`)
 **AC:**
 - **Given** this development machine has no Docker access (no admin rights, no WSL2) but does have Java 11 already installed
@@ -107,11 +109,15 @@ As a Business Analyst, I want the baseline's measured state against brief Proble
 - **And** a measured resource-cost result (RAM/startup time) is recorded, confirming or revising the desk estimate in `05-data-architecture.md` §2
 - **Not required to unblock the rest of Epic 1.1** — Story 1.1.2-1.1.4 proceed with PyMuPDF + Docling as the two-parser interim combination in the meantime
 
+**Status:** still deferred — not picked up this pass, per its own AC (not required to unblock 1.1.2-1.1.4).
+
 #### Story 1.1.2: Extract a paper independently with each available parser
 **AC:**
 - **Given** a sample paper
 - **When** extraction runs
 - **Then** an independent `ExtractedField` set exists per available parser (`05-data-architecture.md` §3) — PyMuPDF + Docling now, GROBID added once Story 1.1.1b lands — each correctly tagged by `source`, and reconciliation (Story 1.1.3) works correctly with either two or three parser inputs (never assumes exactly three)
+
+**Status:** done. `pipeline/docling_parser.py` (new) alongside the existing `pipeline/pdf_parser.py`. Verified against real `Data-17072026/AuDHD_1.pdf`: PyMuPDF 5.3s/53,417 chars/5 tables; Docling 96.1s (cold)/65,083 chars/5 tables. Tests: `tests/test_docling_parser_cache.py`.
 
 #### Story 1.1.3: Reconcile multi-parser output into one canonical paper representation
 **AC:**
@@ -119,6 +125,8 @@ As a Business Analyst, I want the baseline's measured state against brief Proble
 - **When** reconciliation runs
 - **Then** one canonical value is chosen per field with a documented resolution rule, and all candidate values remain queryable (not discarded)
 - **And** a field where every parser fails is marked missing/low-confidence, never silently omitted
+
+**Status:** done, scoped to the fields both parsers can produce deterministically today (`full_text`, `doi`, `tables` — title/authors/abstract/etc. remain LLM-derived via `wiki_compiler.py` unchanged, not silently claimed as reconciled). `pipeline/extraction_reconciler.py` (new). Real-data validation caught and fixed a genuine bug in the first implementation (a naive "prefer longer string" DOI tiebreak that happened to work by coincidence on the first test but isn't the actual right signal) — see `evals/benchmarks/baseline/doi-disambiguation-note.md` for the full finding: position-in-text, not length, correctly distinguishes a paper's own DOI from an unrelated one (e.g. a linked OSF dataset DOI) mentioned later in the body. Tests: `tests/test_extraction_reconciler.py` (18 cases).
 
 #### Story 1.1.4: LLM recovery only for genuinely unresolved fields
 **AC:**
@@ -128,6 +136,8 @@ As a Business Analyst, I want the baseline's measured state against brief Proble
 - **Given** a field where parsers agree
 - **When** reconciliation runs
 - **Then** no LLM call is made for that field (enforces `04-ai-research-architecture.md` §2's discipline)
+
+**Status:** done, scoped to the `doi` field (the only field in this pass's reconciliation scope that both parsers can fail to resolve at all — `full_text`/`tables` always have a fallback candidate as long as either parser produced anything). `recover_doi_via_llm()` in `pipeline/extraction_reconciler.py`, invoked only when `needs_llm_recovery=True`. Tests confirm the LLM is never called when a DOI is already resolved (`tests/test_extraction_reconciler.py::DoiLlmRecoveryTests`).
 
 ### Epic 1.2: Corpus Quality Engine & Quality Gates
 **FRs:** FR-2, FR-3 · **Depends on:** Epic 1.1

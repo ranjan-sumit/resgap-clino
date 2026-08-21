@@ -34,7 +34,9 @@ created: '2026-08-20'
 
 ## Current phase
 
-**Phase 0 — Baseline: COMPLETE.** Epic 0.1 (Stories 0.1.1-0.1.3) done 2026-08-20. Phase 1 is now unblocked — see `10-phased-implementation-plan.md`'s phase-gate table and `09-epics-and-stories.md`'s Epic 1.1-1.4 for the next stories.
+**Phase 0 — Baseline: COMPLETE** (Epic 0.1 + Epic 0.2 hotfix, 2026-08-20/21). **Phase 1 — Data Foundation: IN PROGRESS.** Epic 1.1's Stories 1.1.1a, 1.1.2, 1.1.3, 1.1.4 are done (2026-08-21) — see `09-epics-and-stories.md` for status notes on each. Story 1.1.1b (GROBID) remains deferred, not blocking. **Next up: Epic 1.2 (Corpus Quality Engine & Quality Gates) and Epic 1.3 (Canonical Reference & Paper Identity Resolution)** — see `10-phased-implementation-plan.md`.
+
+**Epic 1.1 results:** `pipeline/docling_parser.py` (new, cached via `utils/database.py`'s `docling_extractions` table) and `pipeline/extraction_reconciler.py` (new) reconcile PyMuPDF + Docling extractions for `full_text`, `doi`, and `tables`, with LLM recovery scoped narrowly to an unresolved DOI. Docling measured heavy on this CPU-only machine (~1.1GB RSS, ~86s/paper) — revises the original desk estimate; see `evals/benchmarks/baseline/docling-resource-measurement.md`. Real-data validation against `Data-17072026/AuDHD_1.pdf` caught and fixed a genuine bug in the DOI-disambiguation logic (see `evals/benchmarks/baseline/doi-disambiguation-note.md`) before it shipped. 26 new tests; full suite now 186 passing.
 
 **Environment status:** Python 3.11.9 installed per-user (no admin rights on this machine — see `amendments/2026-08-20-environment-constraints.md`), venv at repo root `.venv/`, `requirements-dev.txt` installed. All 155 existing tests pass unmodified.
 

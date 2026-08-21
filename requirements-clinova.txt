@@ -1,0 +1,5 @@
+# Additional runtime dependencies introduced by the Clinova rebuild
+# (Phase 1, Epic 1.1). requirements.txt itself is left untouched -- it
+# stays the exact baseline the original ResGap app depends on.
+-r requirements.txt
+docling>=2.121.0

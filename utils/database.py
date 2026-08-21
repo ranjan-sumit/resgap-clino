@@ -67,6 +67,13 @@ def init_db() -> None:
             params_json         TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS docling_extractions (
+            cache_key           TEXT PRIMARY KEY,
+            content_hash        TEXT,
+            stage_logic_version INTEGER,
+            extraction_json     TEXT
+        );
+
         CREATE TABLE IF NOT EXISTS "references" (
             cache_key           TEXT PRIMARY KEY,
             doi_or_title_hash   TEXT,
@@ -204,6 +211,44 @@ def save_cached_parameters(
            (cache_key, content_hash, stage_logic_version, params_json)
            VALUES (?,?,?,?)""",
         (cache_key, content_hash, stage_logic_version, json.dumps(params_json, default=str)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_cached_docling_extraction(cache_key: str) -> dict | None:
+    """Return the cached Docling extraction for cache_key, or None on a
+    cache miss (including a corrupted/unparseable row). Docling is measured
+    at ~1.1GB RSS / ~90s per paper on CPU (Clinova Story 1.1.1a,
+    evals/benchmarks/baseline/docling-resource-measurement.md) -- caching is
+    a binding requirement, not an optimization, at that cost."""
+    init_db()
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT extraction_json FROM docling_extractions WHERE cache_key = ?", (cache_key,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    try:
+        parsed = json.loads(row["extraction_json"])
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def save_cached_docling_extraction(
+    cache_key: str, content_hash: str, stage_logic_version: int, extraction_json: dict,
+) -> None:
+    """Cache a paper's Docling extraction. No domain_hash column -- PDF
+    structural extraction is domain-invariant, same as `parameters`."""
+    init_db()
+    conn = _get_conn()
+    conn.execute(
+        """INSERT OR REPLACE INTO docling_extractions
+           (cache_key, content_hash, stage_logic_version, extraction_json)
+           VALUES (?,?,?,?)""",
+        (cache_key, content_hash, stage_logic_version, json.dumps(extraction_json, default=str)),
     )
     conn.commit()
     conn.close()
