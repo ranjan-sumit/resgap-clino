@@ -528,6 +528,7 @@ from pipeline.wiki_compiler import build_wiki
 from pipeline.graph_builder import build_knowledge_graph
 from pipeline.gap_detector import detect_gaps
 from pipeline.deterministic_gap_patterns import detect_deterministic_gaps
+from pipeline.graph_structural_gaps import detect_graph_structural_gaps
 from pipeline.academic_search import validate_gaps
 from pipeline.proposal_generator import generate_proposals
 from pipeline.param_extractor import (
@@ -1060,12 +1061,22 @@ if run_btn and uploaded_files:
             # provenance requirement. No-op outside Healthcare AI today (the
             # pattern library is domain-specific, per its own module docstring).
             det_gaps = detect_deterministic_gaps(evidence_objects, context.get("domain", ""))
-            gaps = gaps + det_gaps
+            # Graph-structural signal (source 2 of 3): queries the local
+            # entity/relationship graph Stage 3 just built above -- no Neo4j,
+            # no LLM call, domain-agnostic (unlike the pattern library).
+            # Neo4j itself (the "primary new infra" 10-phased-implementation-
+            # plan.md names for Phase 3) is deferred pending Docker/admin
+            # access on this machine; querying the graph structurally does
+            # not actually require it, since a real graph is already built
+            # for every run today.
+            graph_gaps = detect_graph_structural_gaps(graph)
+            gaps = gaps + det_gaps + graph_gaps
             upd("Stage 5 — Validating gaps (Semantic Scholar + arXiv)…", 58)
             validated_gaps = validate_gaps(gaps, client, domain_config=domain_cfg, ss_api_key=ss_api_key.strip())
             _add_trace("Stage 4-5 — Gaps",
                        "Wiki + graph + domain context"
-                       + (f" + {len(det_gaps)} deterministic-pattern candidates" if det_gaps else ""),
+                       + (f" + {len(det_gaps)} deterministic-pattern candidates" if det_gaps else "")
+                       + (f" + {len(graph_gaps)} graph-structural candidates" if graph_gaps else ""),
                        f"{len(validated_gaps)} gaps: "
                        f"{sum(1 for g in validated_gaps if g.get('validation_status')=='open')} open")
             prog.progress(66)

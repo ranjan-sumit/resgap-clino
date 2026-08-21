@@ -95,8 +95,16 @@ def detect_gaps(wiki: dict, graph: dict, context: dict, client, domain_config: d
     """
     pages = wiki.get("pages", [])
     communities = graph.get("communities", [])
-    orphans = graph.get("orphan_concepts", [])
-    bridges = graph.get("missing_bridges", [])
+    # Orphan concepts and missing bridges are deliberately NOT fed into this
+    # prompt (Clinova Phase 3, Epic 3.2 fix, 2026-08-21): they're now
+    # independently promoted to their own tagged candidate gaps by
+    # pipeline/graph_structural_gaps.py, which app.py's Stage 4 already
+    # merges alongside this function's output. Feeding the same raw signal
+    # into the semantic LLM call too meant it would often re-derive a
+    # differently-worded gap about the identical underlying signal,
+    # producing near-duplicate gaps across the two supposedly-distinct
+    # Hybrid Gap Engine sources. Communities/conflicts/complementary pairs
+    # below are NOT duplicated by the graph-structural source, so they stay.
     cross_links = wiki.get("cross_links", {})
 
     # Build comprehensive context for the detector
@@ -121,8 +129,6 @@ def detect_gaps(wiki: dict, graph: dict, context: dict, client, domain_config: d
         for c in communities
     ]
 
-    orphan_signals = [o.get("signal", "") for o in orphans[:10]]
-    bridge_signals = [b.get("description", "") for b in bridges[:10]]
     conflicts = cross_links.get("conflicts", [])
     complementary = cross_links.get("complementary_pairs", [])
 
@@ -141,12 +147,6 @@ def detect_gaps(wiki: dict, graph: dict, context: dict, client, domain_config: d
 
 KNOWLEDGE GRAPH COMMUNITIES:
 {json.dumps(community_summary, indent=2)}
-
-ORPHAN CONCEPTS (mentioned but not built upon):
-{json.dumps(orphan_signals, indent=2)}
-
-MISSING BRIDGES (limitations that could be solved cross-paper):
-{json.dumps(bridge_signals, indent=2)}
 
 COMPLEMENTARY PAPER PAIRS:
 {json.dumps(complementary, indent=2)}
