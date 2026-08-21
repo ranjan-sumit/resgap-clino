@@ -4,8 +4,51 @@ Queries the knowledge graph + wiki with domain context
 to identify citation-grounded research gaps.
 """
 import json
+import re
 from domain_config import inject_domain_into_gap_prompt
 from utils.azure_client import unwrap
+
+
+class GapDetectionError(Exception):
+    """B19 fix: raised when detect_gaps cannot obtain a parseable gap list
+    from the LLM after retrying once. Distinct from a genuine empty result --
+    previously a parse failure silently became `gaps = []`, indistinguishable
+    from the LLM genuinely finding zero gaps, and that silent empty list then
+    flowed into generate_proposals, which fabricated proposals from nothing
+    (see evals/benchmarks/baseline/phase0-findings.md, 2026-08-20 zero-gap-
+    silent-fabrication finding)."""
+    def __init__(self, message: str, raw_response_preview: str = ""):
+        super().__init__(message)
+        self.raw_response_preview = raw_response_preview
+
+
+def _parse_gaps_response(raw: str):
+    """Returns (gaps, parse_failed). parse_failed=True means `raw` could not
+    be interpreted as a JSON list by any of the three fallback strategies --
+    distinct from a genuinely-empty `[]` response, which returns
+    ([], False)."""
+    if not raw or not raw.strip():
+        return None, True
+    for strategy in (
+        lambda s: s,
+        lambda s: re.sub(r'^```(?:json)?\s*|\s*```$', '', s.strip()),
+        lambda s: re.sub(r',\s*([}\]])', r'\1', s),
+    ):
+        try:
+            result = json.loads(strategy(raw))
+            if isinstance(result, list):
+                return result, False
+        except Exception:
+            pass
+    match = re.search(r'\[.*\]', raw, re.DOTALL)
+    if match:
+        try:
+            result = json.loads(match.group())
+            if isinstance(result, list):
+                return result, False
+        except Exception:
+            pass
+    return None, True
 
 
 GAP_DETECTION_PROMPT = """You are an expert research gap analyst. Your task is to identify genuine, specific, and actionable research gaps from a set of analyzed papers.
@@ -114,22 +157,25 @@ CONFLICTS BETWEEN PAPERS:
 Based on all this, identify 4-7 specific, evidence-grounded research gaps.
 Prioritize gaps aligned with the researcher's domain: {context.get('domain', 'General AI/ML')}"""
 
+    # B19 fix: retry once on a genuine parse failure before giving up --
+    # gap-detection output is nondeterministic (live-reproduced: an identical
+    # retry recovered a valid 5-gap response after one parse failure), so a
+    # single retry has real recovery value. If both attempts fail to parse,
+    # raise explicitly rather than silently returning [] -- a parse failure
+    # must never be indistinguishable from "the LLM found zero gaps."
     raw = unwrap(client.chat_json(prompt_system, user_prompt, max_tokens=4000))
+    gaps, parse_failed = _parse_gaps_response(raw)
 
-    try:
-        gaps = json.loads(raw)
-        if not isinstance(gaps, list):
-            gaps = []
-    except json.JSONDecodeError:
-        import re
-        match = re.search(r'\[.*\]', raw, re.DOTALL)
-        if match:
-            try:
-                gaps = json.loads(match.group())
-            except Exception:
-                gaps = []
-        else:
-            gaps = []
+    if parse_failed:
+        raw_retry = unwrap(client.chat_json(prompt_system, user_prompt, max_tokens=4000))
+        gaps, parse_failed = _parse_gaps_response(raw_retry)
+        if parse_failed:
+            preview = (raw_retry or raw or "")[:1000]
+            raise GapDetectionError(
+                "Gap detection response could not be parsed as a JSON gap "
+                "list after 2 attempts -- not a genuine zero-gap result.",
+                raw_response_preview=preview,
+            )
 
     # Attach validation placeholder
     for g in gaps:

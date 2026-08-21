@@ -48,6 +48,42 @@ As a Business Analyst, I want the baseline's measured state against brief Proble
 - **When** the Phase 0 findings document is completed
 - **Then** it states, for each of Problems A-F, whether the baseline exhibits the problem with concrete evidence — refining the cross-reference table already drafted in `00-analysis-and-architecture-options.md` §4 against the real Story 0.1.1 report rather than desk analysis alone
 
+### Epic 0.2: Zero-Gap Fabrication Hotfix (unplanned — found live during Story 0.1.1, fixed 2026-08-21)
+
+**Goal:** the headline Phase 0 finding (`evals/benchmarks/baseline/phase0-findings.md`) was severe enough — confidently fabricated, ungrounded proposals presented as real research directions — that the user asked for a thorough fix before proceeding to Phase 1, rather than deferring it to Phase 3's Gap Challenger as originally scoped. This epic is scoped narrowly to the two files directly implicated in the observed failure chain; it does not attempt the broader `_robust_parse`-duplication cleanup noted as a pre-existing, separately-scoped issue across `discovery_engine.py`/`graph_builder.py`/`llm_council.py`/`param_extractor.py`.
+
+**FRs:** none directly (a data-integrity bugfix, not a planned capability) · **Files:** `pipeline/gap_detector.py`, `pipeline/proposal_generator.py` · **Bug-fix changelog ID:** B19 (continuing the inherited project's `# B<N> fix:` numbering — B18 was the last used).
+
+#### Story 0.2.1: detect_gaps distinguishes a parse failure from a genuine empty result
+
+**AC:**
+- **Given** `detect_gaps`'s LLM response parses as a valid JSON list on the first attempt
+- **When** the stage completes
+- **Then** the parsed gaps are returned and `chat_json` is called exactly once
+- **Given** the response is a literal, valid `[]`
+- **When** the stage completes
+- **Then** `[]` is returned without a retry (a genuine empty result is preserved, not conflated with a parse failure)
+- **Given** the response fails to parse on the first attempt (not valid JSON, or valid JSON but not a list)
+- **When** the stage retries
+- **Then** exactly one retry is attempted with the identical prompt, and its result is used if it parses successfully
+- **Given** both attempts fail to parse
+- **When** the stage exhausts its retry
+- **Then** it raises `GapDetectionError` (carrying `raw_response_preview`) rather than returning `[]` silently
+
+**Status:** done. Tests: `tests/test_gap_detector_parse_retry.py` (7 cases). Verified against the real Phase 0 data that exposed the bug (`evals/benchmarks/baseline/verify_b19_fix.py`): the exact wiki/graph/context that originally produced 0 gaps now produces 5 real, evidence-grounded gaps.
+
+#### Story 0.2.2: generate_proposals never calls the LLM on an empty gap list
+
+**AC:**
+- **Given** `gaps == []`
+- **When** `generate_proposals` is called
+- **Then** it returns `[]` immediately, without calling the LLM
+- **Given** `gaps` is non-empty but none are `open`/`partial` (all `solved`)
+- **When** `generate_proposals` is called
+- **Then** the existing fallback-to-all-gaps behavior is unchanged (this story does not alter that pre-existing branch)
+
+**Status:** done. Tests: `tests/test_proposal_generator_empty_guard.py` (3 cases, including a regression guard for the unaffected all-solved branch). Verified directly against real Phase 0 data.
+
 ---
 
 ## Phase 1 — Data Foundation

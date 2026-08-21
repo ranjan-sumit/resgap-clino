@@ -39,6 +39,15 @@ def generate_proposals(gaps: list, wiki: dict, context: dict, client, domain_con
     """
     Generate research proposals from validated open/partial gaps.
     """
+    # B19 fix: an empty `gaps` list means gap detection found nothing to
+    # build proposals from. Calling the LLM anyway invites it to fabricate
+    # proposals ungrounded in any actual gap -- live-reproduced 2026-08-20
+    # (see evals/benchmarks/baseline/phase0-findings.md): a 0-gap run still
+    # produced 4 specific, plausible-sounding, entirely invented proposals.
+    # Return early instead of ever sending an empty gap list to the LLM.
+    if not gaps:
+        return []
+
     # Only generate proposals for open or partial gaps
     actionable_gaps = [
         g for g in gaps

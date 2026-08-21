@@ -55,6 +55,16 @@ Scanning the run's 82 enriched references for near-duplicate titles surfaced:
 
 These four are added to `evals/benchmarks/` as Benchmark v1's first real, evidence-backed cases — see `evals/benchmarks/v1/` for the extracted fixtures.
 
+## Resolution (2026-08-21) — B19 fix
+
+The headline finding (zero-gap-silent-fabrication) was fixed directly, ahead of Phase 3, at the user's request. See `_bmad-output/clinova/09-epics-and-stories.md` Epic 0.2 for the full Given/When/Then acceptance criteria. Summary:
+
+- **`pipeline/gap_detector.py`**: `detect_gaps` now distinguishes a genuine empty result (`[]`) from a parse failure. On parse failure, it retries once (LLM output is nondeterministic — this exact retry pattern recovered a valid result in the diagnostic re-run above), and raises a new `GapDetectionError` (with the raw response preserved) if both attempts fail — never silently returning `[]`.
+- **`pipeline/proposal_generator.py`**: `generate_proposals` now returns `[]` immediately, without calling the LLM at all, when handed an empty `gaps` list.
+- **Verified against the real data that exposed the bug**: re-running `detect_gaps` against the exact saved Phase 0 wiki/graph/context (`evals/benchmarks/baseline/verify_b19_fix.py`) now returns **5 real, evidence-grounded gaps** instead of silently 0. `generate_proposals([], ...)` was confirmed to never call the LLM.
+- **Tests**: `tests/test_gap_detector_parse_retry.py` (7 cases) and `tests/test_proposal_generator_empty_guard.py` (3 cases) — full suite is 165 passing (155 original + 10 new).
+- Benchmark v1's `case-zero-gap-silent-fabrication.json` remains as a permanent regression fixture — its `expected_behavior` field is now what this fix delivers.
+
 ## What this changes in the plan
 
 No ADR or architecture document needs revision — every finding here confirms an already-identified problem (`00-analysis-and-architecture-options.md` §4's Problem A-F cross-reference table) with real evidence rather than contradicting the plan. One addition: `09-epics-and-stories.md` Epic 1.1/1.3 should treat `generate_proposals`'s missing empty-gaps guard as an explicit acceptance-test case for Phase 3's Gap Challenger work (it's a symptom of Problem C's downstream-trust issue, not a Phase 1 data-foundation issue, so it stays scoped to Phase 3 rather than pulled forward) — noted in Story 3.4's future detailed-story pass.
