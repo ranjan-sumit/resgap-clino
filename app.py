@@ -531,6 +531,19 @@ from pipeline.simulation_engine import run_simulation, filter_confident_params, 
 from pipeline.multi_run import run_multi_council
 from pipeline.doc_generator import build_zip
 from domain_config import get_domain_display_options, parse_domain_selection, get_domain_config
+# Clinova Phase 1 (Epics 1.2-1.3) -- opt-in Corpus Quality Engine + canonical
+# reference resolution. Not imported into the always-on Stage 1-6 flow
+# above: Docling (docling_parser.py) is measured heavy on CPU (~1.1GB RSS,
+# ~86s/paper, evals/benchmarks/baseline/docling-resource-measurement.md),
+# so this stays behind the "enable_quality_engine" sidebar toggle rather
+# than silently adding that cost to every run.
+from pipeline.docling_parser import extract_with_docling
+from pipeline.extraction_reconciler import reconcile_paper
+from pipeline.corpus_quality import (
+    score_paper_completeness, compute_corpus_quality, enforce_quality_gate,
+    QualityGateBlockedError,
+)
+from pipeline.canonical_resolver import filter_and_dedupe_references
 
 # Initialise DB on startup
 init_db()
@@ -658,6 +671,20 @@ with st.sidebar:
     n_council_runs = st.select_slider("🔄 Council runs", options=[1,2,3], value=2,
                                        help="Run insight council N times and merge findings.")
 
+    enable_quality_engine = st.checkbox(
+        "🔬 Corpus Quality Engine (multi-parser + gate)", value=False,
+        help="Cross-checks each paper with a second parser (Docling) and canonically "
+             "resolves references before gap analysis runs. Adds ~90s per NEW paper "
+             "(cached after the first run on that paper). Blocks the run if quality is "
+             "too low unless you check the override below.")
+    override_quality_gate = False
+    if enable_quality_engine:
+        override_quality_gate = st.checkbox(
+            "⚠️ Proceed even if the quality gate is FAIL", value=False,
+            help="A FAIL gate blocks the run by default (Clinova Phase 1, Story 1.2.3). "
+                 "Check this to proceed anyway -- the DEGRADED/FAIL provenance still "
+                 "propagates into the results either way.")
+
     st.markdown("---")
 
     # ── Run History ────────────────────────────────────────────────────────────
@@ -781,6 +808,11 @@ if run_btn and uploaded_files:
 
         # Stage 1+2: Parse + PageIndex
         upd("Stage 1 — Parsing PDFs & building PageIndex trees…", 5)
+        # Clinova Phase 1: when the Corpus Quality Engine is enabled, Stage
+        # 2B below needs each paper's original PDF file (Docling operates
+        # on the file, not the already-extracted text) -- keep the temp
+        # files alive until Stage 2B runs instead of deleting them here.
+        paper_tmp_paths = []
         for uf in uploaded_files:
             with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
                 tmp.write(uf.getvalue()); tmp_path = tmp.name
@@ -790,7 +822,10 @@ if run_btn and uploaded_files:
             paper["tier"] = 1
             all_papers.append(paper)
             all_trees.append(build_tree(paper))
-            os.unlink(tmp_path)
+            if enable_quality_engine:
+                paper_tmp_paths.append(tmp_path)
+            else:
+                os.unlink(tmp_path)
 
         _add_trace("Stage 1 — PDF Parse",
                    f"{len(uploaded_files)} PDFs",
@@ -800,6 +835,7 @@ if run_btn and uploaded_files:
         # Stage 1B: Reference extraction (optional)
         ref_papers = []
         ref_diagnostics = {}
+        ref_resolution_diagnostics = None
         if extract_refs:
             upd("Stage 1B — Extracting & enriching references (50+ paper corpus)…", 14)
             limit_value = None if ref_limit == "All" else int(ref_limit)
@@ -819,6 +855,31 @@ if run_btn and uploaded_files:
                        f"{len(uploaded_files)} PDFs scanned",
                        f"{summary['total']} refs from {ref_diagnostics.get('raw_entries',0)} raw entries: "
                        f"{summary['tier2_abstract']} with abstract, {summary['tier3_title']} title-only")
+
+            # Stage 1C: Canonical reference resolution + filtering
+            # (Clinova Phase 1, Story 1.3.3 -- default-safe corpus
+            # filtering, opt-in via the same Corpus Quality Engine toggle).
+            # Only VERIFIED/ACCEPTED references (a real DOI/PMID/OpenAlex-
+            # ID/SS-ID match, or a full title+author+year match) feed the
+            # rest of the pipeline; QUARANTINED (title-only partial match)
+            # and UNRESOLVED references are dropped from what downstream
+            # stages see, but counted in ref_resolution_diagnostics --
+            # never silently discarded without a trace.
+            if enable_quality_engine and ref_papers:
+                upd("Stage 1C — Canonical reference resolution…", 21)
+                trusted_refs, ref_resolution_diagnostics = filter_and_dedupe_references(ref_papers)
+                ref_papers = trusted_refs
+                st.session_state.ref_papers = ref_papers
+                st.session_state.ref_resolution_diagnostics = ref_resolution_diagnostics
+                sc = ref_resolution_diagnostics["status_counts"]
+                _add_trace(
+                    "Stage 1C — Reference Resolution",
+                    f"{ref_resolution_diagnostics['input_count']} enriched refs",
+                    f"{ref_resolution_diagnostics['trusted_count']} trusted "
+                    f"(VERIFIED {sc['VERIFIED']}, ACCEPTED {sc['ACCEPTED']}), "
+                    f"{sc['QUARANTINED']} quarantined, {sc['UNRESOLVED']} unresolved, "
+                    f"{ref_resolution_diagnostics['duplicates_removed']} duplicates merged",
+                )
         prog.progress(20)
 
         # Stage 2: Wiki
@@ -829,6 +890,73 @@ if run_btn and uploaded_files:
                    f"{len(wiki.get('pages',[]))} pages, "
                    f"{len(wiki.get('cross_links',{}).get('shared_concepts',[]))} links")
         prog.progress(34)
+
+        # Stage 2B: Corpus Quality Engine (Clinova Phase 1, Epic 1.2, opt-in)
+        # Cross-checks each paper against a second parser (Docling), scores
+        # extraction completeness against the 05-data-architecture.md §4
+        # field checklist, and enforces the PASS/DEGRADED/FAIL gate before
+        # gap analysis is allowed to run (Story 1.2.3 / PRD FR-3).
+        corpus_quality_metrics = None
+        if enable_quality_engine:
+            upd("Stage 2B — Corpus Quality Engine (multi-parser cross-check)…", 35)
+            paper_scores = []
+            wiki_pages = wiki.get("pages", [])
+            for i, (paper, tmp_path) in enumerate(zip(all_papers, paper_tmp_paths)):
+                upd(f"Stage 2B — Cross-checking paper {i+1}/{len(all_papers)} with Docling…", 35)
+                wiki_page = wiki_pages[i] if i < len(wiki_pages) else {}
+                try:
+                    docling_result = extract_with_docling(tmp_path, paper.get("filename", uploaded_files[i].name))
+                    reconciled = reconcile_paper(paper, docling_result, paper.get("filename", ""))
+                except Exception:
+                    # A Docling failure degrades the paper's score to
+                    # "nothing reconciled" rather than aborting the whole
+                    # run -- consistent with this file's existing B6/B12/B17
+                    # philosophy of never letting one paper's failure kill
+                    # processing that could otherwise proceed. This paper's
+                    # doi/tables fields will score not-extracted/empty
+                    # below, which correctly lowers its completeness score
+                    # rather than silently pretending nothing was lost.
+                    reconciled = {"fields": {}}
+                score = score_paper_completeness(
+                    reconciled, wiki_page,
+                    ref_count=len(ref_papers), has_figures=bool(paper.get("figures")),
+                )
+                paper_scores.append(score)
+
+            corpus_quality_metrics = compute_corpus_quality(
+                paper_scores, ref_diagnostics, ref_papers=ref_papers,
+            )
+            try:
+                corpus_quality_metrics = enforce_quality_gate(
+                    corpus_quality_metrics,
+                    override=override_quality_gate,
+                    override_reason="user-checked override in sidebar" if override_quality_gate else "",
+                    override_by="streamlit_user",
+                )
+            except QualityGateBlockedError as e:
+                # Cleanup deferred temp files before surfacing the error --
+                # the existing outer except block below reports this via
+                # st.error() same as any other pipeline failure.
+                for p in paper_tmp_paths:
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        pass
+                raise
+
+            _add_trace(
+                "Stage 2B — Corpus Quality Engine",
+                f"{len(all_papers)} papers, {len(ref_papers)} refs",
+                f"{corpus_quality_metrics['extraction_completeness']:.0%} extraction completeness, "
+                f"{corpus_quality_metrics['doi_resolution_rate']:.0%} DOI resolution, "
+                f"gate={corpus_quality_metrics['quality_gate']}",
+            )
+
+        for p in paper_tmp_paths:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
 
         # Stage 3: Knowledge Graph
         upd("Stage 3 — Building knowledge graph (LazyGraphRAG)…", 36)
@@ -881,6 +1009,8 @@ if run_btn and uploaded_files:
             "ref_summary": summarise_reference_corpus(ref_papers),
             "ref_papers": ref_papers,
             "ref_diagnostics": ref_diagnostics,
+            "ref_resolution_diagnostics": ref_resolution_diagnostics,
+            "corpus_quality_metrics": corpus_quality_metrics,
             "corpus": corpus,
             "pipeline_trace": st.session_state.pipeline_trace,
         }

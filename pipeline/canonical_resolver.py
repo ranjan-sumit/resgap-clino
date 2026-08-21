@@ -175,3 +175,47 @@ def merge_canonical_references(refs: list[dict]) -> list[dict]:
         by_identity[identity_key]["provider_records"].append(dict(ref))
 
     return list(by_identity.values()) + unresolved
+
+
+def filter_and_dedupe_references(refs: list[dict]) -> tuple[list[dict], dict]:
+    """Application-facing helper (Story 1.3.3's default-safe corpus
+    filtering, wired into app.py): filters an enriched reference list down
+    to VERIFIED/ACCEPTED entries only, deduplicating by canonical identity,
+    while preserving each surviving entry's ORIGINAL flat shape (title,
+    doi, abstract, tier, ... ) rather than merge_canonical_references()'s
+    wrapper shape -- so downstream code that already expects a flat
+    reference list (summarise_reference_corpus, assign_tiers, etc. in
+    pipeline/paper_manager.py and pipeline/reference_extractor.py) keeps
+    working unchanged. QUARANTINED/UNRESOLVED entries and duplicates are
+    dropped from the returned list but counted in the returned
+    diagnostics -- never silently discarded without a trace."""
+    seen_identities: set[str] = set()
+    trusted: list[dict] = []
+    status_counts = {"VERIFIED": 0, "ACCEPTED": 0, "QUARANTINED": 0, "UNRESOLVED": 0}
+    duplicates_removed = 0
+
+    for ref in refs:
+        resolution = resolve_canonical_identity(ref)
+        status = resolve_status(resolution["identity_level"])
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+        if status not in ("VERIFIED", "ACCEPTED"):
+            continue
+
+        identity_key = resolution["identity_key"]
+        if identity_key and identity_key in seen_identities:
+            duplicates_removed += 1
+            continue
+        if identity_key:
+            seen_identities.add(identity_key)
+
+        entry = dict(ref)
+        entry["resolution_status"] = status
+        trusted.append(entry)
+
+    return trusted, {
+        "input_count": len(refs),
+        "trusted_count": len(trusted),
+        "status_counts": status_counts,
+        "duplicates_removed": duplicates_removed,
+    }

@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.canonical_resolver import (
     resolve_canonical_identity, resolve_status, merge_canonical_references,
+    filter_and_dedupe_references,
 )
 
 BENCHMARK_V1 = Path(__file__).resolve().parent.parent / "evals" / "benchmarks" / "v1"
@@ -181,6 +182,54 @@ class BenchmarkV1RegressionTests(unittest.TestCase):
         # are known-malformed (that's Story 1.1.3/1.1.4's problem to fix
         # upstream, not this module's).
         self.assertEqual(len(canonical), len(refs))
+
+
+class FilterAndDedupeReferencesTests(unittest.TestCase):
+    """Story 1.3.3, app.py-facing helper: default-safe corpus filtering."""
+
+    def test_verified_and_accepted_survive_quarantined_and_unresolved_dropped(self):
+        refs = [
+            {"doi": "10.1/a", "title": "Verified Paper"},                                    # VERIFIED
+            {"title": "Accepted Paper", "authors": ["Smith J"], "year": 2020},                # ACCEPTED
+            {"title": "Partial Only Title"},                                                   # QUARANTINED
+            {"title": "", "authors": [], "year": None},                                        # UNRESOLVED
+        ]
+        trusted, diag = filter_and_dedupe_references(refs)
+
+        self.assertEqual(len(trusted), 2)
+        self.assertEqual({r["title"] for r in trusted}, {"Verified Paper", "Accepted Paper"})
+        self.assertEqual(diag["status_counts"]["VERIFIED"], 1)
+        self.assertEqual(diag["status_counts"]["ACCEPTED"], 1)
+        self.assertEqual(diag["status_counts"]["QUARANTINED"], 1)
+        self.assertEqual(diag["status_counts"]["UNRESOLVED"], 1)
+        self.assertEqual(diag["input_count"], 4)
+        self.assertEqual(diag["trusted_count"], 2)
+
+    def test_original_flat_shape_preserved_not_wrapped(self):
+        # Downstream code (summarise_reference_corpus, assign_tiers) expects
+        # the original flat reference dict, not merge_canonical_references()'s
+        # provider_records wrapper shape.
+        refs = [{"doi": "10.1/a", "title": "T", "abstract": "A", "tier": 2}]
+        trusted, _ = filter_and_dedupe_references(refs)
+        self.assertEqual(trusted[0]["title"], "T")
+        self.assertEqual(trusted[0]["abstract"], "A")
+        self.assertEqual(trusted[0]["tier"], 2)
+        self.assertNotIn("provider_records", trusted[0])
+        self.assertEqual(trusted[0]["resolution_status"], "VERIFIED")
+
+    def test_duplicate_dois_deduplicated_not_just_filtered(self):
+        refs = [
+            {"doi": "10.1/a", "title": "Same Paper", "found_in_paper": "p1.pdf"},
+            {"doi": "10.1/a", "title": "Same Paper", "found_in_paper": "p2.pdf"},
+        ]
+        trusted, diag = filter_and_dedupe_references(refs)
+        self.assertEqual(len(trusted), 1)
+        self.assertEqual(diag["duplicates_removed"], 1)
+
+    def test_empty_input_returns_empty_output_not_crash(self):
+        trusted, diag = filter_and_dedupe_references([])
+        self.assertEqual(trusted, [])
+        self.assertEqual(diag["input_count"], 0)
 
 
 class RealCorpusFieldShapeTests(unittest.TestCase):
