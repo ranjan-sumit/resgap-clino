@@ -20,7 +20,7 @@ Planning complete; implementation underway (Phase 0-2, see "Current phase" below
 ## Things you need to take care of (consolidated, updated as they come up)
 
 **Environment / infrastructure — outside what I can do myself:**
-- **Docker isn't available on this machine** (company laptop, no admin rights — `amendments/2026-08-20-environment-constraints.md`). This blocks GROBID's normal setup and all of Phase 3+'s planned infra (Qdrant, Neo4j). GROBID has an untried no-Docker fallback (build+run via Gradle against the Java 11 already on this machine) — real but slow on first build, not attempted yet. If you get admin rights or move to a different machine, GROBID and the later-phase infra become straightforward again.
+- **Docker isn't available on this machine** (company laptop, no admin rights) — **full current list of everything this blocks, kept up to date: `amendments/2026-08-20-environment-constraints.md`'s "Update, 2026-08-22" section.** Short version: Neo4j (Epic 3.1, cross-run graph persistence) and Qdrant (Epic 3.5 + rest of 3.3, embeddings/rerank) are the two that actually matter right now; GROBID has an untried but confirmed non-Docker path (Gradle + the Java 11 already installed); everything later (Postgres/MinIO, Keycloak/OPA, observability, K8s) has no trigger yet regardless of Docker. Will fix once Docker/admin access is resolved (IT-provisioned or a different machine) — you said you'd come back to the Neo4j-vs-local-graph question specifically.
 - **Your `.env` file (NVIDIA_API_KEY) is gitignored** — it's on this machine only, not backed up anywhere by me. Keep your own copy of the key somewhere safe.
 
 **Decisions only you (or a domain expert) can make:**
