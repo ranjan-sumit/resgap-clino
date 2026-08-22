@@ -530,6 +530,7 @@ from pipeline.gap_detector import detect_gaps
 from pipeline.deterministic_gap_patterns import detect_deterministic_gaps
 from pipeline.graph_structural_gaps import detect_graph_structural_gaps
 from pipeline.gap_challenger import run_challenge
+from pipeline.repeatability_score import compute_repeatability_score
 from pipeline.academic_search import validate_gaps
 from pipeline.proposal_generator import generate_proposals
 from pipeline.param_extractor import (
@@ -761,6 +762,51 @@ with st.sidebar:
             )
 
     if runs:
+        # Clinova Phase 3, Epic 3.6: makes pipeline/repeatability_score.py
+        # actually usable from the app, not just a standalone tested
+        # module -- select 2+ saved runs (from repeated analyses of the
+        # SAME corpus/context; this function can't verify that from gap
+        # lists alone, so picking unrelated runs will just produce a low,
+        # honestly-meaningless score, not an error) and see how stable
+        # the gap output was across them.
+        with st.expander("🔁 Repeatability Check (compare saved runs)"):
+            run_options = {f"{r['name'][:30]} ({r['id'][:8]}, {r['n_gaps']}g)": r["id"] for r in runs}
+            selected_labels = st.multiselect(
+                "Pick 2+ runs from repeated analyses of the same corpus/context",
+                options=list(run_options.keys()),
+                key="repeatability_run_select",
+            )
+            if st.button("Compute Repeatability Score", key="compute_repeatability",
+                         disabled=len(selected_labels) < 2):
+                selected_ids = [run_options[lbl] for lbl in selected_labels]
+                gap_sets = [load_run(rid).get("results", {}).get("gaps", []) for rid in selected_ids]
+                try:
+                    report = compute_repeatability_score(gap_sets, run_ids=selected_ids)
+                    st.markdown(
+                        f"**Gap overlap:** {report['gap_overlap_mean']} · "
+                        f"**Claim stability:** {report['claim_stability_mean']} · "
+                        f"**Ranking correlation:** {report['ranking_correlation_mean']} · "
+                        f"**Confidence drift:** {report['confidence_drift_mean']}"
+                    )
+                    if report.get("duplicate_run_note"):
+                        st.warning(
+                            f"⚠️ {report['n_duplicate_pairs_excluded']} pair(s) excluded from the "
+                            f"averages above -- {report['duplicate_run_note']}"
+                        )
+                    st.caption(report["ranking_proxy_note"])
+                    st.markdown("")
+                    _section_label("Per-Pair Detail")
+                    for p in report["pairs"]:
+                        dup = " ⚠️ likely duplicate (excluded above)" if p["likely_duplicate_run"] else ""
+                        st.markdown(
+                            f"`{p['run_a'][:8]}` vs `{p['run_b'][:8]}`{dup} — "
+                            f"overlap {p['gap_overlap']}, stability {p['claim_stability']}, "
+                            f"ranking corr {p['ranking_correlation']}, drift {p['confidence_drift']} "
+                            f"({p['n_common_gaps']} common gaps)"
+                        )
+                except ValueError as e:
+                    st.error(str(e))
+
         if st.button("🗑 Clear all history", key="clear_history"):
             for r in runs:
                 delete_run(r["id"])
