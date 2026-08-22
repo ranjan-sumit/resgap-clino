@@ -167,14 +167,25 @@ class ChatResultTests(unittest.TestCase):
     def test_vision_does_not_fall_back_to_a_different_model(self, _sleep):
         # Deliberately narrower than chat()'s fix -- FALLBACK_MODEL's
         # image-input support isn't confirmed, so vision() stays on
-        # self.model for all retry attempts, never switching models.
-        from utils.azure_client import MASTER_MODEL
+        # VISION_MODEL for all retry attempts, never switching models.
+        from utils.azure_client import VISION_MODEL
         self.mock_client.chat.completions.create.side_effect = Exception("429 Too Many Requests")
         result = self.client.vision("system", "what is this?", b"fake-image-bytes")
         self.assertIsInstance(result, Failure)
         calls = self.mock_client.chat.completions.create.call_args_list
         self.assertEqual(len(calls), 3)  # initial + 2 retries, no 4th fallback attempt
-        self.assertTrue(all(c.kwargs["model"] == MASTER_MODEL for c in calls))
+        self.assertTrue(all(c.kwargs["model"] == VISION_MODEL for c in calls))
+
+    def test_vision_uses_vision_model_not_master_model(self):
+        # B25 fix regression guard: vision() must stay on VISION_MODEL even
+        # though MASTER_MODEL now points at a model without confirmed
+        # image-input support (20b) after the B25 master/fallback swap.
+        from utils.azure_client import VISION_MODEL, MASTER_MODEL
+        self.assertNotEqual(VISION_MODEL, MASTER_MODEL)
+        self.mock_client.chat.completions.create.return_value = _fake_stream("a cat")
+        self.client.vision("system", "what is this?", b"fake-image-bytes")
+        call = self.mock_client.chat.completions.create.call_args_list[0]
+        self.assertEqual(call.kwargs["model"], VISION_MODEL)
 
 
 class ClassifyErrorTests(unittest.TestCase):

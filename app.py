@@ -515,7 +515,7 @@ import streamlit as st
 import tempfile, os, json, traceback
 from datetime import datetime
 
-from utils.azure_client import AzureOpenAIClient
+from utils.azure_client import AzureOpenAIClient, MASTER_MODEL, FALLBACK_MODEL
 from utils.export import (
     to_json, to_markdown_report, to_pdf_report,
     generate_report_narrative, to_enterprise_html_report,
@@ -629,13 +629,21 @@ with st.sidebar:
 
     # API config
     st.markdown("##### API Configuration")
-    st.markdown("""
+    # B25 fix (2026-08-22): reads MASTER_MODEL/FALLBACK_MODEL from
+    # utils/azure_client.py instead of hardcoding the label, so this panel
+    # can't silently go stale the next time the master/fallback roles
+    # change (exactly what happened here -- this label still said
+    # "gpt-oss-120b" after B25 swapped the master model to gpt-oss-20b).
+    _master_short = MASTER_MODEL.replace("openai/", "")
+    _fallback_short = FALLBACK_MODEL.replace("openai/", "")
+    st.markdown(f"""
     <div style="background:#edf6ff;border:1px solid #7ab8f5;border-radius:6px;
                 padding:0.8rem 1rem;margin-bottom:0.8rem;">
       <div style="font-family:'DM Mono',monospace;font-size:0.65rem;color:#0066cc;
                   text-transform:uppercase;letter-spacing:0.1em;margin-bottom:0.5rem;">Model Stack</div>
-      <div style="font-size:0.78rem;color:#0b1f3a;font-weight:500;">🧠 Master — gpt-oss-120b</div>
+      <div style="font-size:0.78rem;color:#0b1f3a;font-weight:500;">🧠 Master — {_master_short}</div>
       <div style="font-family:'DM Mono',monospace;font-size:0.62rem;color:#55708f;line-height:1.9;">
+        Fallback · {_fallback_short}<br>
         Council A1 · gpt-oss-20b<br>Council A2 · llama-3.2-3b<br>
         Council A3 · nemotron-30b<br>Chair · gpt-oss-120b · NVIDIA NIM
       </div>

@@ -1,7 +1,9 @@
 """
-LLM Client — NVIDIA NIM, Master Model: openai/gpt-oss-120b
+LLM Client — NVIDIA NIM, Master Model: openai/gpt-oss-20b
 Used for all 7 main pipeline stages.
-LLM Council uses separate per-agent models (see llm_council.py).
+LLM Council uses separate per-agent models (see llm_council.py) -- that
+file hardcodes its own model strings for each council seat independently
+and is unaffected by which model this file calls "master".
 
 All models share the same NVIDIA base URL and API key.
 Streaming is used throughout — handles reasoning_content from thinking models.
@@ -13,18 +15,25 @@ from typing import Generic, Literal, TypeVar
 from openai import OpenAI
 
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
-MASTER_MODEL    = "openai/gpt-oss-120b"
-# B22 fix (2026-08-21): smaller/faster fallback model, tried once after
-# MASTER_MODEL's own retries are exhausted, before giving up entirely.
-# Not a new, unproven model -- openai/gpt-oss-20b is already one of
-# pipeline/llm_council.py's tuned agents against this exact NVIDIA NIM
-# endpoint. Real motivation: an isolated evidence-extraction call to
-# MASTER_MODEL took 298.7s this session (this file's own retry math
-# accounts for that exactly -- 120s timeout x2 attempts + backoff),
-# consistent with the NVIDIA API running degraded rather than a code bug.
-# A different, smaller model is a genuine independent recovery path in
-# that scenario, not just "retry the same slow thing again."
-FALLBACK_MODEL  = "openai/gpt-oss-20b"
+# B25 fix (2026-08-22): swapped master/fallback roles. Measured live,
+# repeatedly, against this exact NVIDIA endpoint this session:
+# gpt-oss-20b was faster than gpt-oss-120b on every single test run --
+# from ~20-150x faster on trivial completions to ~1.5x faster on the
+# heaviest real call in this pipeline (knowledge-graph extraction: 232s
+# vs 344s for an equivalent, equally-successful real extraction against
+# the same corpus, both non-fallback). gpt-oss-120b was never observed to
+# be faster in any measurement. 20b is now the default MASTER_MODEL;
+# 120b becomes the fallback -- a genuinely higher-capacity model to fall
+# back to (rather than a smaller one), for the rare case 20b itself
+# repeatedly fails on a rate_limit/timeout.
+MASTER_MODEL    = "openai/gpt-oss-20b"
+FALLBACK_MODEL  = "openai/gpt-oss-120b"
+# B25 fix: vision() is deliberately NOT tied to MASTER_MODEL -- it's a
+# separate capability decision (confirmed image-input support) from "which
+# model is fastest at text reasoning," and coupling them meant this swap
+# would have silently changed vision()'s model too. Pinned to the model
+# this codebase has actual prior confirmation supports image input.
+VISION_MODEL    = "openai/gpt-oss-120b"
 
 T = TypeVar("T")
 
@@ -102,7 +111,10 @@ def make_nvidia_client(api_key: str) -> OpenAI:
 
 class AzureOpenAIClient:
     """
-    Master pipeline client using openai/gpt-oss-120b via NVIDIA NIM.
+    Master pipeline client using openai/gpt-oss-20b via NVIDIA NIM, with
+    openai/gpt-oss-120b as the one-shot fallback on a retryable failure
+    (see MASTER_MODEL/FALLBACK_MODEL above -- B25 swapped which model
+    plays which role, 2026-08-22).
     Name kept for backward compatibility — all pipeline imports unchanged.
     """
 
@@ -178,18 +190,23 @@ class AzureOpenAIClient:
                image_bytes: bytes, max_tokens: int = 2048, _retry: int = 0) -> Result[str]:
         """Vision call — gpt-oss-120b supports image input. Returns Result[str].
         B22 fix (2026-08-21): previously had zero retries at all (unlike chat()) --
-        now gets the same retry-with-backoff treatment. Deliberately NOT given the
-        smaller-model fallback chat() has: FALLBACK_MODEL's image-input support
-        isn't confirmed, and silently falling back to a model that can't actually
-        see the image would produce a wrong-but-successful-looking answer, which
-        is worse than a clean Failure -- narrower scope than chat()'s fix,
-        on purpose."""
+        now gets the same retry-with-backoff treatment.
+        B25 fix (2026-08-22): always uses VISION_MODEL, deliberately NOT
+        self.model -- previously used self.model when MASTER_MODEL was
+        pinned to the vision-capable 120b, but MASTER_MODEL now points at
+        20b for text-reasoning speed (B25), and 20b's image-input support
+        was never confirmed. Silently vision()-ing on an unconfirmed model
+        would produce a wrong-but-successful-looking answer, worse than a
+        clean Failure -- so this call's model choice is now independent of
+        whichever model is "master" for text calls. Still no model
+        fallback within vision() itself, same reasoning as before: a
+        second unconfirmed model is no better than the first."""
         import time
         MAX_RETRIES = 2
         b64 = base64.b64encode(image_bytes).decode("utf-8")
         try:
             stream = self.client.chat.completions.create(
-                model=self.model,
+                model=VISION_MODEL,
                 messages=[
                     {"role": "system", "content": system},
                     {
