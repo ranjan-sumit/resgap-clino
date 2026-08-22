@@ -529,6 +529,7 @@ from pipeline.graph_builder import build_knowledge_graph
 from pipeline.gap_detector import detect_gaps
 from pipeline.deterministic_gap_patterns import detect_deterministic_gaps
 from pipeline.graph_structural_gaps import detect_graph_structural_gaps
+from pipeline.gap_challenger import run_challenge
 from pipeline.academic_search import validate_gaps
 from pipeline.proposal_generator import generate_proposals
 from pipeline.param_extractor import (
@@ -712,6 +713,16 @@ with st.sidebar:
             help="A FAIL gate blocks the run by default (Clinova Phase 1, Story 1.2.3). "
                  "Check this to proceed anyway -- the DEGRADED/FAIL provenance still "
                  "propagates into the results either way.")
+
+    enable_gap_challenger = st.checkbox(
+        "🥊 Gap Challenger (rich status + search coverage)", value=False,
+        help="Clinova Phase 3, Epic 3.4. Replaces the plain open/partial/solved "
+             "validation with the full 6-status lifecycle (INSUFFICIENT_EVIDENCE / "
+             "OPEN / PARTIALLY_OPEN / CONTESTED / LIKELY_CLOSED / CLOSED), assigned "
+             "deterministically from a measured Search Coverage Score -- a technically-"
+             "empty search can never silently resolve to OPEN. Runs an extra search + "
+             "LLM judgment per gap on top of the existing validation, adding real time "
+             "(~30s+ per gap, live-measured) -- opt-in for that reason.")
 
     st.markdown("---")
 
@@ -1088,6 +1099,34 @@ if run_btn and uploaded_files:
                        f"{len(validated_gaps)} gaps: "
                        f"{sum(1 for g in validated_gaps if g.get('validation_status')=='open')} open")
             prog.progress(66)
+
+            # Stage 5b: Gap Challenger (Clinova Phase 3, Epic 3.4, opt-in --
+            # additive enrichment on top of Stage 5's existing open/partial/
+            # solved validation, not a replacement for it). Each gap gets
+            # `challenger_state`/`challenger_status`/`challenge_funnel` keys
+            # merged in; a per-gap failure degrades that one gap to no
+            # enrichment rather than aborting the run, matching this file's
+            # existing per-paper-failure-isolation philosophy elsewhere.
+            if enable_gap_challenger:
+                upd("Stage 5b — Gap Challenger (search coverage + terminal status)…", 62)
+                for i, gap in enumerate(validated_gaps):
+                    upd(f"Stage 5b — Challenging gap {i+1}/{len(validated_gaps)}…", 62)
+                    try:
+                        challenge = run_challenge(
+                            gap, client, ss_api_key=ss_api_key.strip(), domain_config=domain_cfg,
+                        )
+                        gap.update(challenge)
+                    except Exception as e:
+                        gap["challenger_state"] = None
+                        gap["challenger_status"] = None
+                        gap["challenger_error"] = str(e)
+                statuses = [g.get("challenger_status") for g in validated_gaps if g.get("challenger_status")]
+                status_counts = {s: statuses.count(s) for s in sorted(set(statuses))}
+                _add_trace(
+                    "Stage 5b — Gap Challenger",
+                    f"{len(validated_gaps)} gaps",
+                    ", ".join(f"{v} {k}" for k, v in status_counts.items()) or "no gaps reached a terminal status",
+                )
 
             # Stage 6: Proposals
             upd("Stage 6 — Generating proposals…", 68)
@@ -1569,14 +1608,30 @@ if st.session_state.results:
             "solved":  _badge("Solved","#c81e1e","#fff1f1","#f0a0a0"),
             "pending": _badge("Pending","#55708f","#f2f5f8","#c9dff5"),
         }
+        # Clinova Phase 3, Epic 3.4 -- only present when the opt-in Gap
+        # Challenger toggle ran; additive to status_badge above, not a
+        # replacement (Stage 5's simple validation_status still renders too).
+        challenger_badge = {
+            "INSUFFICIENT_EVIDENCE": _badge("Insufficient Evidence","#55708f","#f2f5f8","#c9dff5"),
+            "OPEN":                  _badge("Challenger: Open","#087f5b","#e7f8f1","#83d7b1"),
+            "PARTIALLY_OPEN":        _badge("Partially Open","#b7791f","#fff7e6","#f0c36a"),
+            "CONTESTED":             _badge("Contested","#a94ba0","#f9edf8","#dcaad9"),
+            "LIKELY_CLOSED":         _badge("Likely Closed","#c8681e","#fff1e6","#f0b380"),
+            "CLOSED":                _badge("Closed","#c81e1e","#fff1f1","#f0a0a0"),
+        }
         for gap in gaps:
             status = gap.get("validation_status","pending")
             conf   = gap.get("confidence","medium")
+            source = gap.get("source", "semantic")
+            source_badge = _badge(source.replace("_", " ").title(), "#55708f", "#f2f5f8", "#c9dff5")
+            challenger_status = gap.get("challenger_status")
             st.markdown(
                 f'<div class="gap-card {status}">'
                 f'<div class="gap-title">{gap.get("title","Untitled")}</div>'
                 f'<div class="gap-meta">{status_badge.get(status,"")} '
-                f'{_badge(conf.title()+" Conf","#004b93","#e5f2ff","#7ab8f5")}</div>'
+                f'{_badge(conf.title()+" Conf","#004b93","#e5f2ff","#7ab8f5")} '
+                f'{source_badge}'
+                f'{challenger_badge.get(challenger_status, "")}</div>'
                 f'<div class="gap-desc">{gap.get("description","")}</div></div>',
                 unsafe_allow_html=True)
             with st.expander("Evidence + validation"):
@@ -1591,6 +1646,31 @@ if st.session_state.results:
                 with ec2:
                     for ep in gap.get("existing_papers",[])[:4]:
                         _item(f"📄 {ep.get('title','N/A')} ({ep.get('year','')}) [{ep.get('source','')}]")
+
+                funnel = gap.get("challenge_funnel")
+                if funnel:
+                    st.markdown("")
+                    _section_label("Gap Challenger — Search Coverage Funnel")
+                    st.markdown(
+                        f"Coverage score: **{funnel.get('search_coverage_score', 0):.2f}** "
+                        f"(threshold 0.60) · candidates found: {funnel.get('candidate_count', 0)} → "
+                        f"deduped: {funnel.get('post_dedup_count', 0)} · "
+                        f"relevant: {funnel.get('relevant_count', 0)} · "
+                        f"contradicting: {funnel.get('contradiction_count', 0)} · "
+                        f"converging (high-conf, direct): {funnel.get('converging_count', 0)}"
+                    )
+                    providers = funnel.get("provider_success", {})
+                    if providers:
+                        st.markdown(
+                            "Providers: " + ", ".join(
+                                f"{'✅' if ok else '❌'} {name.replace('_', ' ')}"
+                                for name, ok in providers.items()
+                            )
+                        )
+                    for q in funnel.get("query_families", []):
+                        st.code(q, language=None)
+                elif gap.get("challenger_error"):
+                    st.caption(f"Gap Challenger failed for this gap: {gap['challenger_error']}")
 
     # ── Tab 5: Proposals ───────────────────────────────────────────────────────
     with tab5:
