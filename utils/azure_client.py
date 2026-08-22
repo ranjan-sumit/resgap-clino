@@ -28,12 +28,23 @@ NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 # repeatedly fails on a rate_limit/timeout.
 MASTER_MODEL    = "openai/gpt-oss-20b"
 FALLBACK_MODEL  = "openai/gpt-oss-120b"
+# B26 fix (2026-08-22): was "openai/gpt-oss-120b" -- live-tested with a
+# real image and it explicitly replied "I can't see an image," not a wrong
+# guess, an outright claim of receiving none. None of the gpt-oss models
+# are actually vision-capable on NVIDIA NIM; pipeline/pdf_parser.py's own
+# leftover "GPT-4o Vision" comment on the call site was the clue this had
+# never been re-validated after moving off whatever provider that
+# originally referred to. meta/llama-3.2-11b-vision-instruct is NVIDIA's
+# actual hosted VLM on this same integrate.api.nvidia.com endpoint, same
+# OpenAI-compatible image_url/base64-data-URI format this file already
+# sends -- live-verified: correctly identified a real test image's color
+# in 4.8s.
+#
 # B25 fix: vision() is deliberately NOT tied to MASTER_MODEL -- it's a
 # separate capability decision (confirmed image-input support) from "which
-# model is fastest at text reasoning," and coupling them meant this swap
-# would have silently changed vision()'s model too. Pinned to the model
-# this codebase has actual prior confirmation supports image input.
-VISION_MODEL    = "openai/gpt-oss-120b"
+# model is fastest at text reasoning," and coupling them meant a master-
+# model swap for speed would silently change vision()'s model too.
+VISION_MODEL    = "meta/llama-3.2-11b-vision-instruct"
 
 T = TypeVar("T")
 
@@ -188,19 +199,21 @@ class AzureOpenAIClient:
 
     def vision(self, system: str, user_text: str,
                image_bytes: bytes, max_tokens: int = 2048, _retry: int = 0) -> Result[str]:
-        """Vision call — gpt-oss-120b supports image input. Returns Result[str].
+        """Vision call — see VISION_MODEL's module-level comment (B26) for
+        which model actually supports image input on NVIDIA NIM and why.
+        Returns Result[str].
         B22 fix (2026-08-21): previously had zero retries at all (unlike chat()) --
         now gets the same retry-with-backoff treatment.
         B25 fix (2026-08-22): always uses VISION_MODEL, deliberately NOT
-        self.model -- previously used self.model when MASTER_MODEL was
-        pinned to the vision-capable 120b, but MASTER_MODEL now points at
-        20b for text-reasoning speed (B25), and 20b's image-input support
-        was never confirmed. Silently vision()-ing on an unconfirmed model
-        would produce a wrong-but-successful-looking answer, worse than a
-        clean Failure -- so this call's model choice is now independent of
-        whichever model is "master" for text calls. Still no model
-        fallback within vision() itself, same reasoning as before: a
-        second unconfirmed model is no better than the first."""
+        self.model -- previously used self.model, coupling vision's model
+        choice to whichever model happened to be MASTER_MODEL for
+        unrelated text-reasoning reasons. That coupling is exactly what
+        let B26's bug go unnoticed: MASTER_MODEL was assumed, never
+        confirmed, to support images. Vision's model choice is now a
+        genuinely independent decision (VISION_MODEL), so a future
+        master-model swap for text speed can't silently change it again.
+        Still no model fallback within vision() itself: a second
+        unconfirmed model is no better than the first."""
         import time
         MAX_RETRIES = 2
         b64 = base64.b64encode(image_bytes).decode("utf-8")

@@ -125,8 +125,19 @@ def _page_to_image_bytes(pdf_path: str, page_index: int, dpi: int = 150) -> byte
 
 def _analyze_figures_with_vision(pdf_path: str, client, figure_pages: list) -> list:
     """
-    Send figure-heavy pages to GPT-4o Vision for analysis.
-    Returns list of figure descriptions.
+    Send figure-heavy pages to client.vision() (utils/azure_client.py's
+    VISION_MODEL -- meta/llama-3.2-11b-vision-instruct on NVIDIA NIM as of
+    B26, 2026-08-22) for analysis. Returns list of figure descriptions.
+
+    B26 fix note: this docstring previously said "GPT-4o Vision" -- a
+    leftover from a different provider/model that was never actually
+    wired up here. The real model in use (gpt-oss-120b, before B26) had
+    no confirmed image support at all and was silently returning "I can't
+    see an image" as if it were a real description; nothing here would
+    have caught that, since unwrap() only raises on a Failure, not on a
+    Success carrying a wrong-but-well-formed answer. Fixed at the source
+    (VISION_MODEL now points at a model that actually works), not by
+    adding output-sniffing here.
     """
     descriptions = []
     system = (
