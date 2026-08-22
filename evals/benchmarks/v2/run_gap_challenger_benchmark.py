@@ -25,11 +25,11 @@ _ACCEPTABLE_STATUSES = {
 }
 
 
-def run_case(case_path: str, client) -> dict:
+def run_case(case_path: str, client, ss_api_key: str = "") -> dict:
     with open(case_path, encoding="utf-8") as f:
         case = json.load(f)
 
-    result = run_challenge(case["gap"], client)
+    result = run_challenge(case["gap"], client, ss_api_key=ss_api_key)
     status = result.get("challenger_status")
     coverage = result.get("challenge_funnel", {}).get("search_coverage_score")
 
@@ -62,11 +62,19 @@ def main():
 
     api_key = os.environ["NVIDIA_API_KEY"]
     client = AzureOpenAIClient(api_key=api_key)
+    # B27-adjacent fix (2026-08-22): this runner previously never read
+    # SEMANTIC_SCHOLAR_API_KEY at all, so even with a real key in .env,
+    # run_challenge() would always hit Semantic Scholar unauthenticated --
+    # exactly the rate-limited path that made the last live run
+    # inconclusive. Found while testing with a real, freshly-issued key.
+    ss_api_key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "").strip()
+    print(f"Semantic Scholar API key: {'present' if ss_api_key else 'NOT SET (unauthenticated, low rate limit)'}")
+    print()
 
     results = []
     for case_path in case_files:
         print(f"Running {os.path.basename(case_path)}...")
-        r = run_case(case_path, client)
+        r = run_case(case_path, client, ss_api_key=ss_api_key)
         results.append(r)
         print(f"  case_id={r['case_id']}")
         print(f"  expected_class={r['expected_class']} actual_status={r['actual_status']} "

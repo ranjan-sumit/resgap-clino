@@ -176,7 +176,8 @@ Description: {description}
 For EACH candidate paper below, judge:
 - "relevant": does this paper address the gap's specific claim at all (true/false)?
 - "relevance_type": "direct" (addresses the gap's specific claim) or "adjacent" (related area, doesn't directly address it) -- only set if relevant=true
-- "contradicts_gap": does this paper's finding conflict with the gap's framing, OR does it conflict with another candidate paper's finding on this same question (true/false) -- only meaningful if relevant=true
+- "contradicts_gap": do the CANDIDATE PAPERS disagree WITH EACH OTHER on this question (true/false) -- e.g. one paper finds a causal link, another finds none. This is about genuine disagreement IN THE LITERATURE, comparing candidates to each other -- only meaningful if relevant=true.
+  IMPORTANT: do NOT set this true just because a paper's finding is the opposite of how the gap is phrased. Many gaps are phrased as an absence ("X is missing", "X is unestablished") -- a paper that directly demonstrates X is exactly the evidence that CLOSES that kind of gap, not a contradiction. Only use contradicts_gap for papers that disagree with OTHER papers in this same candidate list.
 - "confidence": "high", "medium", or "low" -- how confident are you this paper genuinely addresses the gap (not just keyword-matches)
 
 Return ONLY a JSON array, one entry per candidate paper, same order as given:
@@ -264,6 +265,15 @@ def apply_decision_table(search_coverage_score: float, judged_candidates: list) 
                 "contradiction_count": 0, "converging_count": 0}
 
     relevant = [c for c in judged_candidates if c.get("relevant")]
+    # B27-adjacent fix (2026-08-22): `contradicts_gap` means candidate
+    # papers disagreeing WITH EACH OTHER (see _CHALLENGE_PROMPT) -- real
+    # literature-internal controversy, not "this paper's finding is the
+    # opposite of the gap's negatively-phrased claim." Found live via
+    # evals/benchmarks/v2's ADHD-heritability case: 4 converging papers
+    # all confirming ADHD's genetic basis were flagged contradicts_gap=True
+    # under the OLD prompt wording (they contradicted the gap's own
+    # "unestablished" framing), routing a genuinely closed gap to CONTESTED
+    # instead of CLOSED.
     contradicting = [c for c in relevant if c.get("contradicts_gap")]
     # "independent, directly-relevant, converging, high-confidence" --
     # direct (not merely adjacent), high confidence, and not itself
