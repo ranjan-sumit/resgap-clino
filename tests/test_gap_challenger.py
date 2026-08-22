@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.azure_client import Success, Failure, ErrorInfo
 from pipeline.gap_challenger import (
     check_evidence_supported, generate_query_families, run_search_funnel,
-    judge_candidates, apply_decision_table, run_challenge,
+    judge_candidates, apply_decision_table, run_challenge, _rerank_candidates,
     SEARCH_COVERAGE_THRESHOLD,
 )
 
@@ -126,6 +126,66 @@ class SearchFunnelTests(unittest.TestCase):
         funnel = run_search_funnel(["q1"])
         self.assertEqual(funnel["candidate_count"], 2)
         self.assertEqual(funnel["post_dedup_count"], 1)
+
+    @patch("pipeline.gap_challenger._search_arxiv_with_status")
+    @patch("pipeline.gap_challenger._search_semantic_scholar_with_status")
+    def test_no_rerank_query_or_api_key_leaves_order_and_flag_false(self, mock_ss, mock_arxiv):
+        mock_ss.return_value = ([_candidate("Paper A")], True)
+        mock_arxiv.return_value = ([], True)
+        funnel = run_search_funnel(["q1"])
+        self.assertFalse(funnel["rerank_used"])
+        self.assertEqual(funnel["post_rerank_count"], funnel["post_dedup_count"])
+
+    @patch("pipeline.gap_challenger.rerank_candidates")
+    @patch("pipeline.gap_challenger._search_arxiv_with_status")
+    @patch("pipeline.gap_challenger._search_semantic_scholar_with_status")
+    def test_rerank_reorders_candidates_when_enabled(self, mock_ss, mock_arxiv, mock_rerank):
+        mock_ss.return_value = ([_candidate("Paper A"), _candidate("Paper B")], True)
+        mock_arxiv.return_value = ([], True)
+        # Reranker says Paper B (index 1) is more relevant than Paper A (index 0).
+        mock_rerank.return_value = [{"index": 1, "score": 5.0}, {"index": 0, "score": 0.1}]
+        funnel = run_search_funnel(["q1"], rerank_query="some gap", nvidia_api_key="key")
+        self.assertTrue(funnel["rerank_used"])
+        self.assertEqual([c["title"] for c in funnel["candidates"]], ["Paper B", "Paper A"])
+        self.assertEqual(funnel["post_rerank_count"], 2)
+
+    @patch("pipeline.gap_challenger.rerank_candidates")
+    @patch("pipeline.gap_challenger._search_arxiv_with_status")
+    @patch("pipeline.gap_challenger._search_semantic_scholar_with_status")
+    def test_rerank_failure_falls_back_to_unranked_order(self, mock_ss, mock_arxiv, mock_rerank):
+        mock_ss.return_value = ([_candidate("Paper A")], True)
+        mock_arxiv.return_value = ([], True)
+        mock_rerank.side_effect = Exception("NVIDIA API down")
+        funnel = run_search_funnel(["q1"], rerank_query="some gap", nvidia_api_key="key")
+        self.assertFalse(funnel["rerank_used"])
+        self.assertEqual([c["title"] for c in funnel["candidates"]], ["Paper A"])
+
+
+class RerankCandidatesHelperTests(unittest.TestCase):
+    def test_no_api_key_skips_reranking(self):
+        candidates = [_candidate("A")]
+        result, used = _rerank_candidates("query", candidates, api_key="")
+        self.assertEqual(result, candidates)
+        self.assertFalse(used)
+
+    def test_no_query_skips_reranking(self):
+        candidates = [_candidate("A")]
+        result, used = _rerank_candidates("", candidates, api_key="key")
+        self.assertEqual(result, candidates)
+        self.assertFalse(used)
+
+    def test_empty_candidates_skips_reranking(self):
+        result, used = _rerank_candidates("query", [], api_key="key")
+        self.assertEqual(result, [])
+        self.assertFalse(used)
+
+    @patch("pipeline.gap_challenger.rerank_candidates")
+    def test_rankings_covering_only_some_candidates_appends_the_rest(self, mock_rerank):
+        candidates = [_candidate("A"), _candidate("B"), _candidate("C")]
+        mock_rerank.return_value = [{"index": 2, "score": 1.0}]  # only "C" ranked
+        result, used = _rerank_candidates("query", candidates, api_key="key")
+        self.assertTrue(used)
+        self.assertEqual([c["title"] for c in result], ["C", "A", "B"])
 
 
 class JudgeCandidatesTests(unittest.TestCase):
@@ -263,6 +323,11 @@ class RunChallengeOrchestrationTests(unittest.TestCase):
         mock_ss.return_value = ([_candidate("Relevant Paper")], True)
         mock_arxiv.return_value = ([], True)
         client = MagicMock()
+        # A bare MagicMock().api_key auto-creates a truthy attribute, which
+        # would make _rerank_candidates() attempt a real HTTP call to
+        # NVIDIA's reranker instead of skipping it -- explicit empty string
+        # keeps this test's "mocked, no live service" guarantee.
+        client.api_key = ""
         client.chat_json.return_value = Success(
             '[{"title": "Relevant Paper", "relevant": true, "relevance_type": "adjacent", '
             '"contradicts_gap": false, "confidence": "medium"}]'

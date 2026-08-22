@@ -9,13 +9,22 @@ of it -- not a replacement. `validate_gaps()` and its simple open/partial/
 solved status keep working unchanged; `run_challenge()` here is a second,
 additive path any caller can opt into per gap.
 
-No new infrastructure needed: query-family generation is deterministic
-string variation (no embeddings/Qdrant), multi-provider search reuses the
-existing SS/arXiv functions, and only the relevance/contradiction
-judgment step uses one scoped LLM call per gap -- everything else,
-including the terminal-status decision itself, is plain deterministic
-code, per §5.1's explicit requirement ("never left to implicit LLM
-judgment").
+Query-family generation is deterministic string variation (no LLM call),
+multi-provider search reuses the existing SS/arXiv functions, and only
+the relevance/contradiction judgment step uses one scoped LLM call per
+gap -- the terminal-status decision itself is plain deterministic code,
+per §5.1's explicit requirement ("never left to implicit LLM judgment").
+
+Epic 3.5, 2026-08-22: dedup -> rerank -> judge is now a real funnel, not
+dedup -> judge. pipeline/relevance_ranking.py reranks deduped candidates
+against the gap's own title+description via NVIDIA NIM's hosted
+reranker (not Qdrant/local BGE -- see that module's docstring for why)
+before judge_candidates() truncates to its LLM-call budget, so the
+budget is spent on the most relevant candidates rather than whatever
+order the search APIs happened to return. Reranking is additive and
+fails soft: no API key, an HTTP error, or a timeout falls back to
+unranked dedup order -- the funnel never breaks because reranking
+didn't work.
 """
 import json
 import re
@@ -25,6 +34,7 @@ from pipeline.academic_search import (
     _search_semantic_scholar_with_status, _search_arxiv_with_status,
     _truncate_at_word_boundary, _strip_negation_framing,
 )
+from pipeline.relevance_ranking import rerank_candidates
 
 GAP_CHALLENGER_STAGE_VERSION = 1
 
@@ -116,18 +126,47 @@ def _dedupe_by_title(papers: list) -> list:
     return out
 
 
+def _rerank_candidates(rerank_query: str, candidates: list, api_key: str) -> tuple[list, bool]:
+    """Best-effort reorder of `candidates` by relevance to `rerank_query`
+    via pipeline/relevance_ranking.py's NVIDIA-hosted reranker. Returns
+    (candidates, False) unchanged on any failure -- no API key, an HTTP
+    error, a timeout, or a candidate list too large/empty to bother with
+    -- so a reranker outage degrades the funnel to its pre-Epic-3.5
+    behavior rather than breaking it."""
+    if not api_key or not rerank_query or not candidates:
+        return candidates, False
+    passages = [f"{c.get('title', '')}. {c.get('abstract', '')}".strip() for c in candidates]
+    try:
+        rankings = rerank_candidates(rerank_query, passages, api_key)
+    except Exception:
+        return candidates, False
+    if not rankings:
+        return candidates, False
+    ordered = [candidates[r["index"]] for r in rankings if r["index"] < len(candidates)]
+    # Any candidate the reranker's response didn't cover (shouldn't happen
+    # given `passages` is built 1:1 from `candidates`, but not assumed)
+    # stays included, appended after the ranked ones rather than dropped.
+    covered = {r["index"] for r in rankings}
+    ordered.extend(c for i, c in enumerate(candidates) if i not in covered)
+    return ordered, True
+
+
 def run_search_funnel(query_families: list[str], ss_api_key: str = "",
-                       per_query_limit: int = 5) -> dict:
+                       per_query_limit: int = 5,
+                       rerank_query: str = "", nvidia_api_key: str = "") -> dict:
     """§5.1's SEARCHED state: "full query-planning -> query-expansion ->
-    multi-provider search -> dedup -> rerank funnel has executed." No
-    reranker exists yet (Epic 3.5, needs embeddings/Qdrant -- not
-    available on this machine); dedup is by normalized title, the same
-    identity key the rest of this codebase already uses for reference
-    dedup (pipeline/reference_extractor.py).
+    multi-provider search -> dedup -> rerank funnel has executed." Dedup
+    is by normalized title, the same identity key the rest of this
+    codebase already uses for reference dedup
+    (pipeline/reference_extractor.py). Reranking (Epic 3.5, see
+    pipeline/relevance_ranking.py) is additive and optional -- pass
+    `rerank_query`/`nvidia_api_key` to enable it; omitting either leaves
+    dedup order unchanged, same as before Epic 3.5.
 
     Returns a funnel dict recording every stage per §5.3's inspectability
     requirement: query families used, providers queried, candidate count,
-    post-dedup count, and the deduped candidate list itself.
+    post-dedup count, post-rerank count, whether reranking actually ran,
+    and the (possibly reranked) candidate list itself.
     """
     provider_success = {p: False for p in _PROVIDERS}
     all_candidates = []
@@ -144,6 +183,7 @@ def run_search_funnel(query_families: list[str], ss_api_key: str = "",
         all_candidates.extend(arxiv_results)
 
     deduped = _dedupe_by_title(all_candidates)
+    reranked, rerank_used = _rerank_candidates(rerank_query, deduped, nvidia_api_key)
 
     providers_responded = sum(1 for ok in provider_success.values() if ok)
     query_family_execution_rate = 1.0 if query_families else 0.0
@@ -162,7 +202,9 @@ def run_search_funnel(query_families: list[str], ss_api_key: str = "",
         "provider_success": provider_success,
         "candidate_count": len(all_candidates),
         "post_dedup_count": len(deduped),
-        "candidates": deduped,
+        "post_rerank_count": len(reranked),
+        "rerank_used": rerank_used,
+        "candidates": reranked,
         "search_coverage_score": search_coverage_score,
     }
 
@@ -336,7 +378,11 @@ def run_challenge(gap: dict, client, ss_api_key: str = "", domain_config: dict =
         result["challenger_reason"] = "No usable query text could be generated from this gap."
         return result
 
-    funnel = run_search_funnel(query_families, ss_api_key=ss_api_key)
+    rerank_query = f"{gap.get('title', '')}. {gap.get('description', '')}".strip()
+    funnel = run_search_funnel(
+        query_families, ss_api_key=ss_api_key,
+        rerank_query=rerank_query, nvidia_api_key=getattr(client, "api_key", ""),
+    )
     result["challenger_state"] = "SEARCHED"
     result["challenge_funnel"] = {
         "query_families": funnel["query_families"],
@@ -344,6 +390,8 @@ def run_challenge(gap: dict, client, ss_api_key: str = "", domain_config: dict =
         "provider_success": funnel["provider_success"],
         "candidate_count": funnel["candidate_count"],
         "post_dedup_count": funnel["post_dedup_count"],
+        "post_rerank_count": funnel["post_rerank_count"],
+        "rerank_used": funnel["rerank_used"],
         "search_coverage_score": funnel["search_coverage_score"],
     }
 
