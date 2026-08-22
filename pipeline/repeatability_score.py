@@ -122,18 +122,53 @@ def _confidence_drift(gaps_a: list, gaps_b: list) -> float | None:
     return sum(diffs) / len(diffs)
 
 
-def compute_repeatability_score(gap_sets: list[list[dict]], run_ids: list[str] = None) -> dict:
+def _is_likely_duplicate_run(gaps_a: list, gaps_b: list) -> bool:
+    """True if the two gap lists are identical in content AND order --
+    title, confidence, and sequence all matching exactly.
+
+    Real-data finding (2026-08-22): app.py's Computational Lab feature
+    (the "Run Computational Lab" button) saves a NEW run via
+    `save_run(lab_run_name, st.session_state.results, comp_results)` --
+    passing the ORIGINAL, unchanged pipeline results (gaps included)
+    alongside new simulation output, not a fresh pipeline re-run. Two
+    runs related this way will score a perfect 1.0 on every metric here,
+    but that is not evidence of genuine pipeline repeatability -- it is
+    the same generation saved twice under two run_ids. A gap_overlap==1.0
+    check alone isn't quite strict enough (two independently-generated
+    runs could coincidentally converge on the same SET of titles in a
+    different order); requiring exact order too is a stronger, more
+    specific signal of "this is the same saved list," not a coincidence.
+    """
+    if len(gaps_a) != len(gaps_b) or not gaps_a:
+        return False
+    sig_a = [(_normalize_title(g.get("title", "")), g.get("confidence")) for g in gaps_a]
+    sig_b = [(_normalize_title(g.get("title", "")), g.get("confidence")) for g in gaps_b]
+    return sig_a == sig_b
+
+
+def compute_repeatability_score(gap_sets: list[list[dict]], run_ids: list[str] = None,
+                                 include_duplicate_runs: bool = False) -> dict:
     """Main entry point. `gap_sets` is a list of N runs' `gaps` lists
     (the same shape app.py's results["gaps"] already has) from repeated
     runs against the SAME corpus/context -- comparing runs from different
     corpora would produce a meaningless score, so this function trusts
     the caller to have already selected genuinely repeated runs (it
-    cannot verify "same corpus" from the gap lists alone).
+    cannot verify "same corpus" from the gap lists alone) -- it CAN,
+    however, detect the specific real case of two runs sharing the exact
+    same generation (see `_is_likely_duplicate_run()`), and does so
+    automatically: such pairs are excluded from the averaged metrics by
+    default (`include_duplicate_runs=False`) since they are not
+    independent samples and would silently inflate the score, but they
+    are still listed in `pairs` with `likely_duplicate_run: true` so
+    nothing is hidden, only excluded from the headline numbers. Pass
+    `include_duplicate_runs=True` to fall back to the raw, unfiltered
+    averages (e.g. for debugging this detection itself).
 
     Returns a report with per-pair and averaged values for all four
-    metrics, `n_runs`, `n_pairs`, and an explicit `ranking_proxy_note`
-    documenting the opportunity_score substitution -- never silently
-    reported as if it were the literal metric the architecture doc names.
+    metrics, `n_runs`, `n_pairs`, `n_duplicate_pairs_excluded`, and an
+    explicit `ranking_proxy_note` documenting the opportunity_score
+    substitution -- never silently reported as if it were the literal
+    metric the architecture doc names.
     """
     n = len(gap_sets)
     if n < 2:
@@ -143,6 +178,7 @@ def compute_repeatability_score(gap_sets: list[list[dict]], run_ids: list[str] =
     ids = run_ids or [f"run_{i}" for i in range(n)]
     pairs_report = []
     overlaps, stabilities, corrs, drifts = [], [], [], []
+    n_duplicates = 0
 
     for i, j in combinations(range(n), 2):
         ga, gb = gap_sets[i], gap_sets[j]
@@ -150,13 +186,17 @@ def compute_repeatability_score(gap_sets: list[list[dict]], run_ids: list[str] =
         stability = _claim_stability(ga, gb)
         corr = _ranking_correlation(ga, gb)
         drift = _confidence_drift(ga, gb)
+        is_duplicate = _is_likely_duplicate_run(ga, gb)
+        if is_duplicate:
+            n_duplicates += 1
 
-        overlaps.append(overlap)
-        stabilities.append(stability)
-        if corr is not None:
-            corrs.append(corr)
-        if drift is not None:
-            drifts.append(drift)
+        if include_duplicate_runs or not is_duplicate:
+            overlaps.append(overlap)
+            stabilities.append(stability)
+            if corr is not None:
+                corrs.append(corr)
+            if drift is not None:
+                drifts.append(drift)
 
         pairs_report.append({
             "run_a": ids[i], "run_b": ids[j],
@@ -165,6 +205,7 @@ def compute_repeatability_score(gap_sets: list[list[dict]], run_ids: list[str] =
             "ranking_correlation": round(corr, 3) if corr is not None else None,
             "confidence_drift": round(drift, 3) if drift is not None else None,
             "n_common_gaps": len(_matched_pairs(ga, gb)),
+            "likely_duplicate_run": is_duplicate,
         })
 
     def _avg(values):
@@ -174,17 +215,27 @@ def compute_repeatability_score(gap_sets: list[list[dict]], run_ids: list[str] =
         "repeatability_score_version": REPEATABILITY_SCORE_VERSION,
         "n_runs": n,
         "n_pairs": len(pairs_report),
+        "n_duplicate_pairs_excluded": 0 if include_duplicate_runs else n_duplicates,
         "gap_overlap_mean": _avg(overlaps),
         "claim_stability_mean": _avg(stabilities),
         "ranking_correlation_mean": _avg(corrs),
         "confidence_drift_mean": _avg(drifts),
-        "ranking_correlation_undefined_pairs": len(pairs_report) - len(corrs),
-        "confidence_drift_undefined_pairs": len(pairs_report) - len(drifts),
+        "ranking_correlation_undefined_pairs": len(pairs_report) - n_duplicates - len(corrs) if not include_duplicate_runs else len(pairs_report) - len(corrs),
+        "confidence_drift_undefined_pairs": len(pairs_report) - n_duplicates - len(drifts) if not include_duplicate_runs else len(pairs_report) - len(drifts),
         "ranking_proxy_note": (
             "ranking_correlation uses each run's gap generation order as a proxy "
             "for the architecture doc's 'opportunity-score ranking' -- no "
             "opportunity_score field exists in the pipeline yet (Phase 5 UX-spec "
             "concept only), so this is an honest substitute, not the literal metric."
         ),
+        "duplicate_run_note": (
+            "Pairs flagged likely_duplicate_run=true (identical gap titles, "
+            "confidences, AND order) are excluded from the *_mean values above -- "
+            "app.py's Computational Lab feature saves the original pipeline "
+            "results unchanged alongside new simulation output, so two run_ids "
+            "can legitimately share one identical generation; that is not a "
+            "measurement of repeatability. Pass include_duplicate_runs=True to "
+            "include them anyway."
+        ) if n_duplicates else None,
         "pairs": pairs_report,
     }
