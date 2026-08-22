@@ -23,7 +23,7 @@ import re
 from utils.azure_client import unwrap
 from pipeline.academic_search import (
     _search_semantic_scholar_with_status, _search_arxiv_with_status,
-    _truncate_at_word_boundary,
+    _truncate_at_word_boundary, _strip_negation_framing,
 )
 
 GAP_CHALLENGER_STAGE_VERSION = 1
@@ -65,10 +65,18 @@ def generate_query_families(gap: dict, domain_config: dict = None) -> list[str]:
     "synonyms/terminology/broader-narrower" -- implemented deterministically
     (no LLM call) as 2-3 distinct query strings from the gap's own already-
     extracted text, not a semantic paraphrase. Returns 2 or 3 non-empty,
-    de-duplicated queries."""
-    title = (gap.get("title") or "").strip()
-    missing = (gap.get("missing_connection") or "").strip()
-    description = (gap.get("description") or "").strip()
+    de-duplicated queries.
+
+    B27 fix (2026-08-22): title/missing_connection/description are run
+    through _strip_negation_framing() first -- see that function's
+    docstring in academic_search.py. Found live via evals/benchmarks/v2's
+    ADHD-heritability regression case: the raw gap text ("...is
+    unestablished") was sent as-is to Semantic Scholar (which never goes
+    through arXiv's separately-fixed AND-join), returning zero candidates
+    for a genuinely well-established topic."""
+    title = _strip_negation_framing((gap.get("title") or "").strip())
+    missing = _strip_negation_framing((gap.get("missing_connection") or "").strip())
+    description = _strip_negation_framing((gap.get("description") or "").strip())
 
     families = []
 

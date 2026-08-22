@@ -15,7 +15,10 @@ from requests.models import PreparedRequest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline.academic_search import ARXIV_BASE, _build_arxiv_query, _build_search_query, _search_arxiv, _truncate_at_word_boundary
+from pipeline.academic_search import (
+    ARXIV_BASE, _build_arxiv_query, _build_search_query, _search_arxiv,
+    _truncate_at_word_boundary, _strip_negation_framing,
+)
 
 
 class _FakeResponse:
@@ -60,6 +63,31 @@ class BuildArxivQueryTests(unittest.TestCase):
         result = _build_arxiv_query('genomics ( ) data')
         self.assertEqual(result, "all:genomics AND all:data")
 
+    def test_negation_and_stopwords_are_dropped_b27(self):
+        # B27 fix, real bug found live via evals/benchmarks/v2's
+        # ADHD-heritability regression case: "...is unestablished
+        # heritability of ADHD" previously forced "unestablished"/"is"/"of"
+        # as mandatory AND terms, guaranteeing zero results for a
+        # well-established topic (no real paper describes itself as
+        # "unestablished"). Framing/negation words and plain stopwords must
+        # not survive into the query.
+        result = _build_arxiv_query("Genetic contribution to ADHD risk is unestablished heritability of ADHD")
+        self.assertNotIn("unestablished", result)
+        self.assertNotIn("all:is ", result)
+        self.assertNotIn("all:to ", result)
+        self.assertNotIn("all:of ", result)
+        self.assertEqual(
+            result,
+            "all:Genetic AND all:contribution AND all:ADHD AND all:risk AND all:heritability AND all:ADHD",
+        )
+
+    def test_gap_style_negation_prefixes_are_dropped(self):
+        # Real gap titles from this pipeline's own deterministic pattern
+        # library ("Missing X", "No Y", "Untested combination") must not
+        # have "missing"/"no"/"untested" survive into the query either.
+        result = _build_arxiv_query("Missing external validation")
+        self.assertEqual(result, "all:external AND all:validation")
+
 
 class SearchArxivQueryConstructionTests(unittest.TestCase):
     def test_search_query_param_is_and_joined(self):
@@ -88,6 +116,42 @@ class SearchArxivQueryConstructionTests(unittest.TestCase):
             results = _search_arxiv(None)  # type: ignore[arg-type]
         self.assertEqual(results, [])
         mock_get.assert_not_called()
+
+
+class StripNegationFramingTests(unittest.TestCase):
+    """B27 fix, 2026-08-22: real bug found live via evals/benchmarks/v2's
+    ADHD-heritability regression case -- a gap's own negation/framing
+    words ("missing", "no", "is unestablished") sent raw to Semantic
+    Scholar's free-text search actively describe the opposite of what a
+    matching paper would say, not just fail to help."""
+
+    def test_strips_standalone_negation_words(self):
+        result = _strip_negation_framing("Genetic contribution to ADHD risk is unestablished")
+        self.assertNotIn("unestablished", result.lower())
+
+    def test_strips_gap_style_prefixes(self):
+        self.assertEqual(_strip_negation_framing("Missing external validation"), "external validation")
+        self.assertEqual(_strip_negation_framing("No fairness testing"), "fairness testing")
+
+    def test_does_not_strip_substrings_inside_other_words(self):
+        # Word-boundary-safe: "notable" must not become "able" because it
+        # contains "not".
+        result = _strip_negation_framing("notable findings")
+        self.assertIn("notable", result)
+
+    def test_collapses_resulting_whitespace(self):
+        result = _strip_negation_framing("Missing  external   validation")
+        self.assertNotIn("  ", result)
+
+    def test_empty_and_none_input_do_not_crash(self):
+        self.assertEqual(_strip_negation_framing(""), "")
+        self.assertEqual(_strip_negation_framing(None), "")
+
+    def test_build_search_query_applies_the_strip(self):
+        gap = {"title": "Genetic contribution to ADHD risk is unestablished",
+               "missing_connection": "heritability of ADHD"}
+        query = _build_search_query(gap)
+        self.assertNotIn("unestablished", query.lower())
 
 
 class TruncateAtWordBoundaryTests(unittest.TestCase):

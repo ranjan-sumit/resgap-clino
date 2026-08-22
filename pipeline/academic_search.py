@@ -117,6 +117,25 @@ def _fetch_arxiv(params: dict) -> str:
 _ARXIV_RESERVED_CHARS = re.compile(r'[():"]')
 _ARXIV_BOOLEAN_WORDS = {"AND", "OR", "NOT"}
 
+# B27 fix (2026-08-22): every one of these, if left in, becomes a MANDATORY
+# AND term below -- a real paper about a well-established topic will never
+# contain the word "unestablished"/"missing"/"untested" describing itself,
+# because those words describe the GAP's framing, not the literature. Found
+# live: evals/benchmarks/v2's ADHD-heritability regression case (a genuine,
+# independently-verified well-established finding) got zero arXiv candidates
+# because the query "...is unestablished heritability of ADHD" forced
+# "unestablished" as a required AND term, structurally guaranteeing no real
+# paper could ever match. Plain English stopwords ("is", "to", "of") are
+# included too -- they add no discriminating signal and only tighten the
+# AND-join further for no benefit. This is shared production code
+# (validate_gaps()'s Stage 5 search uses the same _build_search_query() ->
+# _build_arxiv_query() path) -- not new-code-only.
+_ARXIV_NOISE_WORDS = {
+    "is", "to", "of", "the", "a", "an", "in", "on", "for", "and", "or", "not",
+    "no", "missing", "lack", "lacking", "untested", "unexplored", "unresolved",
+    "unestablished", "unknown", "insufficient", "limited", "absence",
+}
+
 
 def _build_arxiv_query(query: str) -> str:
     """Group search terms so arXiv matches papers about the combined
@@ -129,11 +148,14 @@ def _build_arxiv_query(query: str) -> str:
     each term and drops any term that is itself a literal boolean operator
     word -- both would otherwise corrupt the query structure (e.g. a
     gap title containing "Gap: (LLMs) reasoning" or the literal word
-    "AND")."""
+    "AND"). B27 fix: also drops gap-framing/negation words and plain
+    stopwords (_ARXIV_NOISE_WORDS) -- these describe the GAP, not the
+    literature, and each one left in over-constrains the mandatory
+    AND-join for no benefit."""
     terms = []
     for t in query.split():
         t = _ARXIV_RESERVED_CHARS.sub("", t)
-        if t and t.upper() not in _ARXIV_BOOLEAN_WORDS:
+        if t and t.upper() not in _ARXIV_BOOLEAN_WORDS and t.lower() not in _ARXIV_NOISE_WORDS:
             terms.append(t)
     if not terms:
         return "all:"
@@ -218,11 +240,39 @@ def _truncate_at_word_boundary(text: str, max_len: int) -> str:
     return truncated[:last_space] if last_space > 0 else truncated
 
 
+# B27 fix (2026-08-22): a gap's own title/description is written in GAP
+# vocabulary ("missing X", "no Y", "X is unestablished") -- words that
+# describe the ABSENCE of something a real paper would never use to
+# describe itself (no paper about established ADHD heritability findings
+# calls itself "unestablished"). Sent raw to Semantic Scholar's free-text
+# search, these words don't just fail to help -- they actively describe
+# the opposite of what a matching paper would say, diluting or misdirecting
+# relevance ranking. _build_arxiv_query() already strips these from its
+# mandatory AND-join (where the harm is structural, not just a dilution);
+# this strips them from the shared query TEXT itself, so Semantic
+# Scholar's search (which never goes through _build_arxiv_query) benefits
+# too. Word-boundary-safe, case-insensitive; collapses the resulting
+# whitespace.
+_NEGATION_FRAMING_WORDS = (
+    "missing", "no", "not", "lack", "lacking", "untested", "unexplored",
+    "unresolved", "unestablished", "unknown", "insufficient", "limited",
+    "absence",
+)
+_NEGATION_FRAMING_RE = re.compile(
+    r'\b(?:' + '|'.join(_NEGATION_FRAMING_WORDS) + r')\b', re.IGNORECASE,
+)
+
+
+def _strip_negation_framing(text: str) -> str:
+    cleaned = _NEGATION_FRAMING_RE.sub('', text or '')
+    return re.sub(r'\s+', ' ', cleaned).strip()
+
+
 def _build_search_query(gap: dict) -> str:
     """Build a focused academic search query from a gap description."""
-    title = gap.get("title", "")
-    missing = gap.get("missing_connection", "")
-    description = gap.get("description", "")[:150]
+    title = _strip_negation_framing(gap.get("title", ""))
+    missing = _strip_negation_framing(gap.get("missing_connection", ""))
+    description = _strip_negation_framing(gap.get("description", "")[:150])
 
     # Use title + missing connection for best query
     if missing:

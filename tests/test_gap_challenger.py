@@ -48,7 +48,10 @@ class QueryFamilyTests(unittest.TestCase):
     def test_generates_specific_and_broader_queries(self):
         families = generate_query_families(_gap())
         self.assertGreaterEqual(len(families), 2)
-        self.assertIn("Missing external validation", families[1])
+        # B27 fix: "Missing" is gap-framing, not literature vocabulary --
+        # stripped before becoming a search query (see NegationFramingTests).
+        self.assertIn("external validation", families[1])
+        self.assertNotIn("Missing", families[1])
 
     def test_domain_boost_adds_a_third_family(self):
         domain_cfg = {"search_boost_terms": ["clinical validation", "healthcare"]}
@@ -59,6 +62,17 @@ class QueryFamilyTests(unittest.TestCase):
         gap = _gap(title="X", missing_connection="")
         families = generate_query_families(gap)
         self.assertEqual(len(families), len(set(families)))
+
+    def test_negation_framing_words_are_stripped_from_the_query(self):
+        # Real bug found live via evals/benchmarks/v2's ADHD-heritability
+        # regression case: "...is unestablished" sent as-is to Semantic
+        # Scholar (which doesn't go through arXiv's separate AND-join fix)
+        # returned zero candidates for a genuinely well-established topic.
+        gap = _gap(title="Genetic contribution to ADHD risk is unestablished",
+                   missing_connection="heritability of ADHD")
+        families = generate_query_families(gap)
+        combined = " ".join(families).lower()
+        self.assertNotIn("unestablished", combined)
 
     def test_empty_gap_falls_back_to_description(self):
         gap = {"title": "", "description": "some fallback text", "missing_connection": ""}
