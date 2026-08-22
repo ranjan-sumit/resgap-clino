@@ -11,6 +11,24 @@ import time
 import html
 from pathlib import Path
 
+
+def _load_dotenv(path: Path) -> None:
+    """Minimal .env loader -- avoids adding python-dotenv as a new dependency.
+    Existing real environment variables always win (matches the same helper
+    already used across evals/benchmarks/baseline/*.py)."""
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        if k.strip() and k.strip() not in os.environ:
+            os.environ[k.strip()] = v.strip()
+
+
+_load_dotenv(Path(__file__).parent / ".env")
+
 # Clinova Phase 1, Story 1.4.2: product name/tagline live in the branding
 # config layer (03-system-architecture.md AD-3), not hardcoded here -- the
 # product identity can change without touching this file. Falls back to the
@@ -531,6 +549,10 @@ from pipeline.deterministic_gap_patterns import detect_deterministic_gaps
 from pipeline.graph_structural_gaps import detect_graph_structural_gaps
 from pipeline.gap_challenger import run_challenge
 from pipeline.repeatability_score import compute_repeatability_score
+from pipeline.graph_persistence import (
+    connect_ok as arcadedb_connect_ok, save_graph_snapshot, load_graph_snapshot,
+    list_graph_snapshots, diff_graph_snapshots,
+)
 from pipeline.academic_search import validate_gaps
 from pipeline.proposal_generator import generate_proposals
 from pipeline.param_extractor import (
@@ -725,6 +747,15 @@ with st.sidebar:
              "LLM judgment per gap on top of the existing validation, adding real time "
              "(~30s+ per gap, live-measured) -- opt-in for that reason.")
 
+    enable_graph_persistence = st.checkbox(
+        "🗄️ Persist graph to ArcadeDB (cross-run graph history)", value=False,
+        help="Clinova Phase 3, Epic 3.1. Saves this run's knowledge graph to a local "
+             "ArcadeDB server so it can be compared against other runs later (which "
+             "entities/relationships are new, which persist across analyses). Requires "
+             "ArcadeDB running locally first -- see RESUME.md for setup. If the server "
+             "isn't reachable, the run still completes normally; only the graph save is "
+             "skipped, with a warning.")
+
     st.markdown("---")
 
     # ── Run History ────────────────────────────────────────────────────────────
@@ -806,6 +837,62 @@ with st.sidebar:
                         )
                 except ValueError as e:
                     st.error(str(e))
+
+        # Clinova Phase 3, Epic 3.1 -- browses graphs persisted to
+        # ArcadeDB (opt-in "Persist graph to ArcadeDB" toggle above, per
+        # run). A separate list from Run History above: only runs saved
+        # WITH that toggle checked appear here, and ArcadeDB must be
+        # reachable right now for this panel to show anything but a
+        # clear "not connected" message.
+        with st.expander("🗄️ Graph History (ArcadeDB, cross-run diff)"):
+            ok, msg = arcadedb_connect_ok()
+            if not ok:
+                st.caption(f"Not connected -- {msg}")
+            else:
+                try:
+                    graph_runs = list_graph_snapshots()
+                except Exception as e:
+                    graph_runs = []
+                    st.error(f"Could not list saved graphs: {e}")
+                if not graph_runs:
+                    st.caption("No graphs persisted yet -- check the toggle above and run an analysis.")
+                else:
+                    graph_options = {
+                        f"{g['name'][:30]} ({g['run_id'][:8]}, {g['entity_count']}e/{g['relationship_count']}r)": g["run_id"]
+                        for g in graph_runs
+                    }
+                    selected_graph_labels = st.multiselect(
+                        "Pick exactly 2 persisted graphs to diff",
+                        options=list(graph_options.keys()),
+                        key="graph_diff_select",
+                    )
+                    if st.button("Diff Graphs", key="diff_graphs",
+                                 disabled=len(selected_graph_labels) != 2):
+                        id_a, id_b = [graph_options[lbl] for lbl in selected_graph_labels]
+                        try:
+                            diff = diff_graph_snapshots(id_a, id_b)
+                            st.markdown(
+                                f"**Entities:** {len(diff['entities_common'])} common · "
+                                f"{len(diff['entities_only_in_a'])} only in `{id_a[:8]}` · "
+                                f"{len(diff['entities_only_in_b'])} only in `{id_b[:8]}`"
+                            )
+                            st.markdown(
+                                f"**Relationships:** {len(diff['relationships_common'])} common · "
+                                f"{len(diff['relationships_only_in_a'])} only in `{id_a[:8]}` · "
+                                f"{len(diff['relationships_only_in_b'])} only in `{id_b[:8]}`"
+                            )
+                            if diff["entities_only_in_a"]:
+                                st.markdown("")
+                                _section_label(f"Entities only in {id_a[:8]}")
+                                for name_ in diff["entities_only_in_a"][:15]:
+                                    _item(f"🔹 {name_}")
+                            if diff["entities_only_in_b"]:
+                                st.markdown("")
+                                _section_label(f"Entities only in {id_b[:8]}")
+                                for name_ in diff["entities_only_in_b"][:15]:
+                                    _item(f"🔹 {name_}")
+                        except Exception as e:
+                            st.error(f"Diff failed: {e}")
 
         if st.button("🗑 Clear all history", key="clear_history"):
             for r in runs:
@@ -1237,6 +1324,27 @@ if run_btn and uploaded_files:
         st.session_state.loaded_run_id = None  # fresh run, not a loaded one
         st.session_state.current_run_id = saved_id
         st.session_state.current_run_name = name
+
+        # Clinova Phase 3, Epic 3.1 (opt-in) -- persists this run's graph to
+        # ArcadeDB so it can be compared against other runs later. Skipped
+        # (not attempted) when gate_blocked, since that path's graph is an
+        # empty placeholder with nothing real to persist. A failure here
+        # (most commonly: ArcadeDB isn't running) degrades to a warning,
+        # never blocks the already-successful run from completing.
+        if enable_graph_persistence and not gate_blocked:
+            ok, msg = arcadedb_connect_ok()
+            if ok:
+                try:
+                    gsummary = save_graph_snapshot(saved_id, name, graph)
+                    _add_trace(
+                        "Graph Persistence (ArcadeDB)",
+                        f"{gsummary['entity_count']} entities, {gsummary['relationship_count']} relationships",
+                        f"Saved under run_id={saved_id[:8]}…",
+                    )
+                except Exception as e:
+                    st.warning(f"⚠️ Graph persistence failed (run itself completed normally): {e}")
+            else:
+                st.warning(f"⚠️ Graph not persisted -- {msg}")
 
         prog.progress(80)
         prog.empty(); stat.empty()
