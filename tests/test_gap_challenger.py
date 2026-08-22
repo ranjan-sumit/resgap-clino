@@ -14,7 +14,7 @@ from utils.azure_client import Success, Failure, ErrorInfo
 from pipeline.gap_challenger import (
     check_evidence_supported, generate_query_families, run_search_funnel,
     judge_candidates, apply_decision_table, run_challenge, _rerank_candidates,
-    SEARCH_COVERAGE_THRESHOLD,
+    _filter_by_metadata, SEARCH_COVERAGE_THRESHOLD,
 )
 
 
@@ -159,6 +159,84 @@ class SearchFunnelTests(unittest.TestCase):
         funnel = run_search_funnel(["q1"], rerank_query="some gap", nvidia_api_key="key")
         self.assertFalse(funnel["rerank_used"])
         self.assertEqual([c["title"] for c in funnel["candidates"]], ["Paper A"])
+
+    @patch("pipeline.gap_challenger._search_arxiv_with_status")
+    @patch("pipeline.gap_challenger._search_semantic_scholar_with_status")
+    def test_metadata_filter_drops_implausible_year_candidates(self, mock_ss, mock_arxiv):
+        from datetime import datetime
+        future_year = datetime.now().year + 10
+        mock_ss.return_value = ([_candidate("Good Paper", year=2022),
+                                  _candidate("Bad Paper", year=future_year)], True)
+        mock_arxiv.return_value = ([], True)
+        funnel = run_search_funnel(["q1"])
+        self.assertEqual(funnel["post_dedup_count"], 2)
+        self.assertEqual(funnel["post_metadata_filter_count"], 1)
+        self.assertEqual(funnel["metadata_filtered_count"], 1)
+        self.assertEqual([c["title"] for c in funnel["candidates"]], ["Good Paper"])
+
+    @patch("pipeline.gap_challenger._search_arxiv_with_status")
+    @patch("pipeline.gap_challenger._search_semantic_scholar_with_status")
+    def test_metadata_filter_year_bounds_are_opt_in(self, mock_ss, mock_arxiv):
+        mock_ss.return_value = ([_candidate("Old Paper", year=1990)], True)
+        mock_arxiv.return_value = ([], True)
+        funnel = run_search_funnel(["q1"], year_from=2015)
+        self.assertEqual(funnel["post_metadata_filter_count"], 0)
+        funnel_no_bound = run_search_funnel(["q1"])
+        self.assertEqual(funnel_no_bound["post_metadata_filter_count"], 1)
+
+
+class FilterByMetadataTests(unittest.TestCase):
+    def test_missing_year_is_kept_not_dropped(self):
+        c = _candidate("No Year Paper", year=None)
+        kept, dropped = _filter_by_metadata([c])
+        self.assertEqual(kept, [c])
+        self.assertEqual(dropped, 0)
+
+    def test_future_year_is_dropped_as_implausible(self):
+        from datetime import datetime
+        future = datetime.now().year + 5
+        c = _candidate("Time Traveler Paper", year=future)
+        kept, dropped = _filter_by_metadata([c])
+        self.assertEqual(kept, [])
+        self.assertEqual(dropped, 1)
+
+    def test_absurdly_old_year_is_dropped_as_implausible(self):
+        c = _candidate("Bad Parse", year=42)
+        kept, dropped = _filter_by_metadata([c])
+        self.assertEqual(kept, [])
+        self.assertEqual(dropped, 1)
+
+    def test_normal_year_is_kept_by_default(self):
+        c = _candidate("Normal Paper", year=2020)
+        kept, dropped = _filter_by_metadata([c])
+        self.assertEqual(kept, [c])
+        self.assertEqual(dropped, 0)
+
+    def test_year_from_excludes_older_candidates(self):
+        old = _candidate("Old Paper", year=2010)
+        new = _candidate("New Paper", year=2023)
+        kept, dropped = _filter_by_metadata([old, new], year_from=2015)
+        self.assertEqual(kept, [new])
+        self.assertEqual(dropped, 1)
+
+    def test_year_to_excludes_newer_candidates(self):
+        old = _candidate("Old Paper", year=2010)
+        new = _candidate("New Paper", year=2023)
+        kept, dropped = _filter_by_metadata([old, new], year_to=2015)
+        self.assertEqual(kept, [old])
+        self.assertEqual(dropped, 1)
+
+    def test_year_range_missing_year_still_kept(self):
+        c = _candidate("No Year Paper", year=None)
+        kept, dropped = _filter_by_metadata([c], year_from=2015, year_to=2020)
+        self.assertEqual(kept, [c])
+        self.assertEqual(dropped, 0)
+
+    def test_no_bounds_no_op_on_normal_candidates(self):
+        candidates = [_candidate("A", year=1990), _candidate("B", year=2024)]
+        kept, dropped = _filter_by_metadata(candidates)
+        self.assertEqual(kept, candidates)
+        self.assertEqual(dropped, 0)
 
 
 class RerankCandidatesHelperTests(unittest.TestCase):

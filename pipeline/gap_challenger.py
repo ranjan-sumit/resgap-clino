@@ -15,15 +15,24 @@ the relevance/contradiction judgment step uses one scoped LLM call per
 gap -- the terminal-status decision itself is plain deterministic code,
 per §5.1's explicit requirement ("never left to implicit LLM judgment").
 
-Epic 3.5, 2026-08-22: dedup -> rerank -> judge is now a real funnel, not
-dedup -> judge. pipeline/relevance_ranking.py reranks deduped candidates
-against the gap's own title+description via NVIDIA NIM's hosted
-reranker (not Qdrant/local BGE -- see that module's docstring for why)
-before judge_candidates() truncates to its LLM-call budget, so the
-budget is spent on the most relevant candidates rather than whatever
-order the search APIs happened to return. Reranking is additive and
-fails soft: no API key, an HTTP error, or a timeout falls back to
-unranked dedup order -- the funnel never breaks because reranking
+Epic 3.3, 2026-08-22: dedup -> metadata filter -> rerank -> judge is now
+FR-15's exact stated funnel order. _filter_by_metadata() always drops
+candidates with an implausible year (future-dated or below 1000 -- a
+provider data-quality issue, per 04-ai-research-architecture.md §2's
+"deterministic filtering: date ranges, provider status codes"); a
+missing year is never dropped for that reason alone. year_from/year_to
+are opt-in and unset by default -- this codebase has no actual opinion
+on what date range a gap should prefer yet, so no caller invents one.
+
+Epic 3.5, 2026-08-22: rerank -> judge is now real, not a no-op.
+pipeline/relevance_ranking.py reranks the filtered candidates against
+the gap's own title+description via NVIDIA NIM's hosted reranker (not
+Qdrant/local BGE -- see that module's docstring for why) before
+judge_candidates() truncates to its LLM-call budget, so the budget is
+spent on the most relevant candidates rather than whatever order the
+search APIs happened to return. Both new stages are additive and fail
+soft: a missing input or an HTTP error/timeout just leaves the prior
+stage's order unchanged -- the funnel never breaks because a stage
 didn't work.
 """
 import json
@@ -126,6 +135,46 @@ def _dedupe_by_title(papers: list) -> list:
     return out
 
 
+def _filter_by_metadata(candidates: list, year_from: int = None, year_to: int = None) -> tuple[list, int]:
+    """Epic 3.3's remaining gap: the deterministic "metadata filter" step
+    FR-15/04-ai-research-architecture.md §2's port table names ("date
+    ranges, provider status codes") between dedup and rerank. Two things,
+    both deterministic, no LLM/embedding call:
+
+    1. Always drops a candidate whose year is implausible -- in the
+       future relative to today, or below 1000 -- a real provider
+       data-quality issue (a malformed/misparsed year field), not a
+       legitimate result. A MISSING year is never dropped for that
+       reason alone: absence of metadata isn't bad metadata, and
+       dropping every year-less candidate would silently lose real
+       results (arXiv/SS entries with sparse metadata do exist).
+    2. If `year_from`/`year_to` are given (opt-in -- no caller sets them
+       yet, since this codebase has no actual opinion on what date range
+       a gap should prefer, and inventing one would be scope creep, not
+       spec fulfillment), drops candidates outside that range. Same
+       missing-year exception as above.
+
+    Returns (kept_candidates, dropped_count)."""
+    from datetime import datetime
+    current_year = datetime.now().year
+    kept = []
+    dropped = 0
+    for c in candidates:
+        year = c.get("year")
+        if year is not None:
+            if year > current_year or year < 1000:
+                dropped += 1
+                continue
+            if year_from is not None and year < year_from:
+                dropped += 1
+                continue
+            if year_to is not None and year > year_to:
+                dropped += 1
+                continue
+        kept.append(c)
+    return kept, dropped
+
+
 def _rerank_candidates(rerank_query: str, candidates: list, api_key: str) -> tuple[list, bool]:
     """Best-effort reorder of `candidates` by relevance to `rerank_query`
     via pipeline/relevance_ranking.py's NVIDIA-hosted reranker. Returns
@@ -153,20 +202,25 @@ def _rerank_candidates(rerank_query: str, candidates: list, api_key: str) -> tup
 
 def run_search_funnel(query_families: list[str], ss_api_key: str = "",
                        per_query_limit: int = 5,
-                       rerank_query: str = "", nvidia_api_key: str = "") -> dict:
+                       rerank_query: str = "", nvidia_api_key: str = "",
+                       year_from: int = None, year_to: int = None) -> dict:
     """§5.1's SEARCHED state: "full query-planning -> query-expansion ->
-    multi-provider search -> dedup -> rerank funnel has executed." Dedup
-    is by normalized title, the same identity key the rest of this
-    codebase already uses for reference dedup
-    (pipeline/reference_extractor.py). Reranking (Epic 3.5, see
-    pipeline/relevance_ranking.py) is additive and optional -- pass
-    `rerank_query`/`nvidia_api_key` to enable it; omitting either leaves
-    dedup order unchanged, same as before Epic 3.5.
+    multi-provider search -> dedup -> [metadata filter ->] rerank funnel
+    has executed" -- FR-15's exact stated order (union -> canonical dedup
+    -> metadata filter -> embedding retrieval -> rerank -> LLM relevance
+    review). Dedup is by normalized title, the same identity key the rest
+    of this codebase already uses for reference dedup
+    (pipeline/reference_extractor.py). Metadata filtering (Epic 3.3, see
+    _filter_by_metadata()) always drops implausible-year candidates and
+    optionally enforces a `year_from`/`year_to` range. Reranking (Epic
+    3.5, see pipeline/relevance_ranking.py) is additive and optional --
+    pass `rerank_query`/`nvidia_api_key` to enable it; omitting either
+    leaves order unchanged, same as before Epic 3.5.
 
     Returns a funnel dict recording every stage per §5.3's inspectability
     requirement: query families used, providers queried, candidate count,
-    post-dedup count, post-rerank count, whether reranking actually ran,
-    and the (possibly reranked) candidate list itself.
+    post-dedup count, post-metadata-filter count, post-rerank count,
+    whether reranking actually ran, and the final candidate list.
     """
     provider_success = {p: False for p in _PROVIDERS}
     all_candidates = []
@@ -183,7 +237,8 @@ def run_search_funnel(query_families: list[str], ss_api_key: str = "",
         all_candidates.extend(arxiv_results)
 
     deduped = _dedupe_by_title(all_candidates)
-    reranked, rerank_used = _rerank_candidates(rerank_query, deduped, nvidia_api_key)
+    filtered, metadata_filtered_count = _filter_by_metadata(deduped, year_from=year_from, year_to=year_to)
+    reranked, rerank_used = _rerank_candidates(rerank_query, filtered, nvidia_api_key)
 
     providers_responded = sum(1 for ok in provider_success.values() if ok)
     query_family_execution_rate = 1.0 if query_families else 0.0
@@ -202,6 +257,8 @@ def run_search_funnel(query_families: list[str], ss_api_key: str = "",
         "provider_success": provider_success,
         "candidate_count": len(all_candidates),
         "post_dedup_count": len(deduped),
+        "post_metadata_filter_count": len(filtered),
+        "metadata_filtered_count": metadata_filtered_count,
         "post_rerank_count": len(reranked),
         "rerank_used": rerank_used,
         "candidates": reranked,
@@ -390,6 +447,8 @@ def run_challenge(gap: dict, client, ss_api_key: str = "", domain_config: dict =
         "provider_success": funnel["provider_success"],
         "candidate_count": funnel["candidate_count"],
         "post_dedup_count": funnel["post_dedup_count"],
+        "post_metadata_filter_count": funnel["post_metadata_filter_count"],
+        "metadata_filtered_count": funnel["metadata_filtered_count"],
         "post_rerank_count": funnel["post_rerank_count"],
         "rerank_used": funnel["rerank_used"],
         "search_coverage_score": funnel["search_coverage_score"],
