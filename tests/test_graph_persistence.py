@@ -120,6 +120,29 @@ class SaveGraphSnapshotTests(unittest.TestCase):
         summary = save_graph_snapshot("run_1", "Test Run", graph, config=_TEST_CONFIG)
         self.assertEqual(summary["relationship_count"], 0)
 
+    @patch("pipeline.graph_persistence.requests.post")
+    def test_quality_dict_is_persisted_onto_the_graphrun_insert(self, mock_post):
+        mock_post.return_value = _resp(json_data={"result": []})
+        quality = {"build_status": "DEGRADED", "quality_score": 0.42}
+        save_graph_snapshot("run_1", "Test", {"entities": [], "relationships": []},
+                             config=_TEST_CONFIG, quality=quality)
+        run_insert_calls = [c for c in mock_post.call_args_list
+                             if "INSERT INTO GraphRun" in c.kwargs["json"]["command"]]
+        self.assertTrue(run_insert_calls)
+        params = run_insert_calls[0].kwargs["json"]["params"]
+        self.assertEqual(params["build_status"], "DEGRADED")
+        self.assertEqual(params["quality_score"], 0.42)
+
+    @patch("pipeline.graph_persistence.requests.post")
+    def test_missing_quality_dict_stores_none_not_a_crash(self, mock_post):
+        mock_post.return_value = _resp(json_data={"result": []})
+        save_graph_snapshot("run_1", "Test", {"entities": [], "relationships": []}, config=_TEST_CONFIG)
+        run_insert_calls = [c for c in mock_post.call_args_list
+                             if "INSERT INTO GraphRun" in c.kwargs["json"]["command"]]
+        params = run_insert_calls[0].kwargs["json"]["params"]
+        self.assertIsNone(params["build_status"])
+        self.assertIsNone(params["quality_score"])
+
 
 class LoadGraphSnapshotTests(unittest.TestCase):
     @patch("pipeline.graph_persistence.requests.post")
@@ -181,6 +204,27 @@ class ListGraphSnapshotsTests(unittest.TestCase):
         runs = list_graph_snapshots(config=_TEST_CONFIG)
         self.assertEqual(len(runs), 2)
         self.assertEqual(runs[0]["run_id"], "run_2")
+
+    @patch("pipeline.graph_persistence.requests.post")
+    def test_build_status_and_quality_score_pass_through(self, mock_post):
+        mock_post.return_value = _resp(json_data={"result": [
+            {"run_id": "run_1", "name": "Scored", "saved_at": "2026-08-22T10:00:00",
+             "entity_count": 4, "relationship_count": 2,
+             "build_status": "CLEAN", "quality_score": 0.91},
+        ]})
+        runs = list_graph_snapshots(config=_TEST_CONFIG)
+        self.assertEqual(runs[0]["build_status"], "CLEAN")
+        self.assertEqual(runs[0]["quality_score"], 0.91)
+
+    @patch("pipeline.graph_persistence.requests.post")
+    def test_run_saved_before_scoring_existed_reports_none_not_a_crash(self, mock_post):
+        mock_post.return_value = _resp(json_data={"result": [
+            {"run_id": "run_0", "name": "Old", "saved_at": "2026-08-20T10:00:00",
+             "entity_count": 4, "relationship_count": 2},
+        ]})
+        runs = list_graph_snapshots(config=_TEST_CONFIG)
+        self.assertIsNone(runs[0]["build_status"])
+        self.assertIsNone(runs[0]["quality_score"])
 
 
 class DiffGraphSnapshotsTests(unittest.TestCase):

@@ -547,6 +547,7 @@ from pipeline.graph_builder import build_knowledge_graph
 from pipeline.gap_detector import detect_gaps
 from pipeline.deterministic_gap_patterns import detect_deterministic_gaps
 from pipeline.graph_structural_gaps import detect_graph_structural_gaps
+from pipeline.graph_quality import score_graph_quality, apply_graph_quality_to_gaps
 from pipeline.gap_challenger import run_challenge
 from pipeline.repeatability_score import compute_repeatability_score
 from pipeline.graph_persistence import (
@@ -858,7 +859,8 @@ with st.sidebar:
                     st.caption("No graphs persisted yet -- check the toggle above and run an analysis.")
                 else:
                     graph_options = {
-                        f"{g['name'][:30]} ({g['run_id'][:8]}, {g['entity_count']}e/{g['relationship_count']}r)": g["run_id"]
+                        f"{g['name'][:30]} ({g['run_id'][:8]}, {g['entity_count']}e/{g['relationship_count']}r"
+                        + (f", {g['build_status']} {g['quality_score']:.2f})" if g.get("build_status") else ")"): g["run_id"]
                         for g in graph_runs
                     }
                     selected_graph_labels = st.multiselect(
@@ -1194,10 +1196,18 @@ if run_btn and uploaded_files:
             # Stage 3: Knowledge Graph
             upd("Stage 3 — Building knowledge graph (LazyGraphRAG)…", 36)
             graph = build_knowledge_graph(wiki, client, domain_config=domain_cfg)
+            # Clinova Phase 3, Epic 3.1 (FR-7): every graph build is scored,
+            # not just counted -- build_status/quality_score feed into the
+            # gap confidence downgrade below (real success criterion: "a
+            # degraded graph provably reduces the confidence of any gap
+            # conclusion derived from it").
+            graph_quality = score_graph_quality(graph, wiki)
             _add_trace("Stage 3 — Knowledge Graph",
                        "Wiki pages + cross-links",
                        f"{graph['stats']['entity_count']} entities, "
-                       f"{graph['stats']['relationship_count']} relationships")
+                       f"{graph['stats']['relationship_count']} relationships "
+                       f"— {graph_quality['build_status']} "
+                       f"(quality={graph_quality['quality_score']})")
             prog.progress(48)
 
             # Stage 4+5: Gaps + Validation
@@ -1223,6 +1233,11 @@ if run_btn and uploaded_files:
             # for every run today.
             graph_gaps = detect_graph_structural_gaps(graph)
             gaps = gaps + det_gaps + graph_gaps
+            # FR-7's success criterion, made real: a DEGRADED/FALLBACK graph
+            # build downgrades confidence for gaps whose entire evidentiary
+            # basis is that graph (source == "graph_structural") -- not
+            # silently treated as equal-quality to a clean build.
+            gaps = apply_graph_quality_to_gaps(gaps, graph_quality)
             upd("Stage 5 — Validating gaps (Semantic Scholar + arXiv)…", 58)
             validated_gaps = validate_gaps(gaps, client, domain_config=domain_cfg, ss_api_key=ss_api_key.strip())
             _add_trace("Stage 4-5 — Gaps",
@@ -1274,6 +1289,7 @@ if run_btn and uploaded_files:
             # this point with real fetched data to save below.
             upd("Quality gate FAILED — skipping gap analysis, saving fetched data…", 68)
             graph = {"stats": {"entity_count": 0, "relationship_count": 0}, "communities": []}
+            graph_quality = None
             validated_gaps = []
             proposals = []
             _add_trace("Stage 3-6 — Skipped (quality gate FAIL)",
@@ -1296,7 +1312,7 @@ if run_btn and uploaded_files:
                  "tier": 1}
                 for p, w, t in zip(all_papers, wiki["pages"], all_trees)
             ],
-            "wiki": wiki, "graph": graph,
+            "wiki": wiki, "graph": graph, "graph_quality": graph_quality,
             "gaps": validated_gaps, "proposals": proposals,
             "communities": graph.get("communities", []),
             "context": context,
@@ -1335,7 +1351,7 @@ if run_btn and uploaded_files:
             ok, msg = arcadedb_connect_ok()
             if ok:
                 try:
-                    gsummary = save_graph_snapshot(saved_id, name, graph)
+                    gsummary = save_graph_snapshot(saved_id, name, graph, quality=graph_quality)
                     _add_trace(
                         "Graph Persistence (ArcadeDB)",
                         f"{gsummary['entity_count']} entities, {gsummary['relationship_count']} relationships",
@@ -1652,6 +1668,32 @@ if st.session_state.results:
             st.warning("The LLM graph extraction returned no entities, so a deterministic fallback graph was built from wiki concepts, methods, datasets, limitations, and findings.")
         elif graph_diag:
             st.info(f"LLM graph extraction produced {graph_diag.get('llm_entities', 0)} entities and {graph_diag.get('llm_relationships', 0)} relationships.")
+
+        # Clinova Phase 3, Epic 3.1 (FR-7): graph build status + quality
+        # score, computed by pipeline/graph_quality.py. None on a
+        # gate-blocked run (Stage 3 never ran). A DEGRADED/FALLBACK badge
+        # here is the same signal that already downgraded confidence on
+        # any graph-structural gap -- surfaced, not just applied silently.
+        gq = res.get("graph_quality")
+        if gq:
+            _status_style = {
+                "CLEAN": ("✅", "#1a7f37"), "DEGRADED": ("⚠️", "#9a6700"), "FALLBACK": ("🛑", "#b42318"),
+            }.get(gq["build_status"], ("ℹ️", "#57606a"))
+            icon, color = _status_style
+            st.markdown(
+                f'<div style="border:1px solid {color}22; background:{color}11; '
+                f'border-radius:8px; padding:0.6rem 0.9rem; margin-bottom:0.75rem;">'
+                f'<span style="color:{color}; font-weight:600;">{icon} Graph Quality: {gq["build_status"]}</span> '
+                f'&nbsp;·&nbsp; score {gq["quality_score"]:.2f} '
+                f'&nbsp;·&nbsp; extraction coverage {gq["extraction_coverage"]:.0%} '
+                f'&nbsp;·&nbsp; evidence coverage {gq["evidence_coverage"]:.0%} '
+                f'&nbsp;·&nbsp; duplicate rate {gq["duplicate_rate"]:.0%} '
+                f'&nbsp;·&nbsp; unresolved-entity rate {gq["unresolved_entity_rate"]:.0%}'
+                f'</div>', unsafe_allow_html=True)
+            if gq["build_status"] != "CLEAN":
+                st.caption("Graph-structural gaps derived from this build have had their confidence "
+                           "downgraded accordingly — see each gap's caveat in the Research Gaps tab.")
+
         gc1,gc2,gc3,gc4 = st.columns(4)
         for col,(lbl,val) in zip([gc1,gc2,gc3,gc4],[
             ("Entities",stats.get("entity_count",0)),
@@ -1788,6 +1830,8 @@ if st.session_state.results:
                 f'{challenger_badge.get(challenger_status, "")}</div>'
                 f'<div class="gap-desc">{gap.get("description","")}</div></div>',
                 unsafe_allow_html=True)
+            if gap.get("confidence_caveat"):
+                st.caption(f"⚠️ {gap['confidence_caveat']}")
             with st.expander("Evidence + validation"):
                 ec1,ec2 = st.columns(2)
                 with ec1:

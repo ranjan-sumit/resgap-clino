@@ -108,12 +108,20 @@ def _normalize_name(name: str) -> str:
     return re.sub(r"\s+", " ", (name or "").strip().lower())
 
 
-def save_graph_snapshot(run_id: str, run_name: str, graph: dict, config: dict = None) -> dict:
+def save_graph_snapshot(run_id: str, run_name: str, graph: dict, config: dict = None,
+                         quality: dict = None) -> dict:
     """Persists one run's graph (the same dict shape
     pipeline/graph_builder.py's build_knowledge_graph() already returns)
     under `run_id`. Idempotent per run_id -- re-saving the same run_id
     replaces its prior snapshot rather than duplicating it, so a re-run
     of the same analysis doesn't accumulate stale copies.
+
+    `quality` is pipeline/graph_quality.py's score_graph_quality() output
+    (optional -- callers that haven't computed it yet still save fine;
+    build_status/quality_score are just stored as None). Persisting it
+    here is what makes "Compare Graph Version" (ADR-002's own stated
+    reason a persisted store is needed for FR-7) actually possible instead
+    of only comparing entity/relationship counts.
 
     Returns a small summary dict {run_id, entity_count, relationship_count}."""
     config = config or _config()
@@ -121,6 +129,7 @@ def save_graph_snapshot(run_id: str, run_name: str, graph: dict, config: dict = 
 
     entities = graph.get("entities", [])
     relationships = graph.get("relationships", [])
+    quality = quality or {}
 
     # Replace any prior snapshot for this run_id (edges first -- ArcadeDB
     # won't delete a vertex that still has edges attached).
@@ -131,12 +140,15 @@ def save_graph_snapshot(run_id: str, run_name: str, graph: dict, config: dict = 
         INSERT INTO GraphRun SET run_id = :run_id, name = :name,
             saved_at = :saved_at, entity_count = :entity_count,
             relationship_count = :relationship_count,
-            graph_persistence_version = :version
+            graph_persistence_version = :version,
+            build_status = :build_status, quality_score = :quality_score
     """, {
         "run_id": run_id, "name": run_name,
         "saved_at": datetime.now(timezone.utc).isoformat(),
         "entity_count": len(entities), "relationship_count": len(relationships),
         "version": GRAPH_PERSISTENCE_VERSION,
+        "build_status": quality.get("build_status"),
+        "quality_score": quality.get("quality_score"),
     })
 
     # entity_id -> ArcadeDB @rid, needed to wire up edges below.
@@ -221,6 +233,10 @@ def list_graph_snapshots(config: dict = None) -> list[dict]:
         "saved_at": r.get("saved_at", ""),
         "entity_count": r.get("entity_count", 0),
         "relationship_count": r.get("relationship_count", 0),
+        # None for any run saved before this field existed -- honest
+        # "not scored", not a fabricated 0/CLEAN.
+        "build_status": r.get("build_status"),
+        "quality_score": r.get("quality_score"),
     } for r in rows]
 
 
