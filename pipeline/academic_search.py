@@ -73,6 +73,35 @@ def _search_semantic_scholar(query: str, limit: int = 5, api_key: str = "") -> l
     return results
 
 
+def _search_semantic_scholar_with_status(query: str, limit: int = 5, api_key: str = "") -> tuple[list, bool]:
+    """Same as _search_semantic_scholar(), but also reports whether the
+    request itself succeeded (`success`), distinct from "succeeded and
+    found nothing" -- the existing function swallows that distinction into
+    a bare `[]`, which is fine for validate_gaps() but not for
+    gap_challenger.py's Search Coverage Score (04-ai-research-
+    architecture.md §5.2), which needs "did the provider respond" as an
+    input separate from "how many results." A new function, not a changed
+    signature on the existing one, so validate_gaps() is untouched (Epic
+    3.4, 2026-08-22)."""
+    headers = {"x-api-key": api_key} if api_key else {}
+    try:
+        data = _fetch_semantic_scholar(query, limit, headers)
+    except Exception:
+        return [], False
+    papers = data.get("data", [])
+    results = []
+    for p in papers:
+        results.append({
+            "title": p.get("title", ""),
+            "year": p.get("year"),
+            "abstract": (p.get("abstract") or "")[:300],
+            "citations": p.get("citationCount", 0),
+            "authors": [a.get("name", "") for a in (p.get("authors") or [])[:3]],
+            "source": "Semantic Scholar",
+        })
+    return results, True
+
+
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential_jitter(initial=1, max=10),
@@ -142,6 +171,38 @@ def _search_arxiv(query: str, limit: int = 3) -> list:
                 "source": "arXiv",
             })
     return results
+
+
+def _search_arxiv_with_status(query: str, limit: int = 3) -> tuple[list, bool]:
+    """Status-aware counterpart to _search_arxiv() -- see
+    _search_semantic_scholar_with_status()'s docstring for why (Epic 3.4,
+    2026-08-22). A new function, existing _search_arxiv() untouched."""
+    try:
+        params = {
+            "search_query": _build_arxiv_query(query),
+            "start": 0,
+            "max_results": limit,
+            "sortBy": "relevance",
+            "sortOrder": "descending",
+        }
+        content = _fetch_arxiv(params)
+    except Exception:
+        return [], False
+    entries = re.findall(r'<entry>(.*?)</entry>', content, re.DOTALL)
+    results = []
+    for entry in entries:
+        title_match = re.search(r'<title>(.*?)</title>', entry, re.DOTALL)
+        year_match = re.search(r'<published>(\d{4})', entry)
+        summary_match = re.search(r'<summary>(.*?)</summary>', entry, re.DOTALL)
+        if title_match:
+            results.append({
+                "title": title_match.group(1).strip().replace("\n", " "),
+                "year": int(year_match.group(1)) if year_match else None,
+                "abstract": (summary_match.group(1).strip()[:300] if summary_match else ""),
+                "citations": None,
+                "source": "arXiv",
+            })
+    return results, True
 
 
 def _truncate_at_word_boundary(text: str, max_len: int) -> str:
