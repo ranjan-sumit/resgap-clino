@@ -7,6 +7,7 @@ import json
 import re
 from domain_config import inject_domain_into_gap_prompt
 from utils.azure_client import unwrap
+from pipeline.agent_config import GAP_GENERATOR
 
 
 class GapDetectionError(Exception):
@@ -163,11 +164,17 @@ Prioritize gaps aligned with the researcher's domain: {context.get('domain', 'Ge
     # single retry has real recovery value. If both attempts fail to parse,
     # raise explicitly rather than silently returning [] -- a parse failure
     # must never be indistinguishable from "the LLM found zero gaps."
-    raw = unwrap(client.chat_json(prompt_system, user_prompt, max_tokens=4000))
+    raw = unwrap(client.chat_json(
+        prompt_system, user_prompt, max_tokens=GAP_GENERATOR.max_tokens,
+        timeout_seconds=GAP_GENERATOR.timeout_seconds, max_retries=GAP_GENERATOR.max_retries,
+    ))
     gaps, parse_failed = _parse_gaps_response(raw)
 
     if parse_failed:
-        raw_retry = unwrap(client.chat_json(prompt_system, user_prompt, max_tokens=4000))
+        raw_retry = unwrap(client.chat_json(
+            prompt_system, user_prompt, max_tokens=GAP_GENERATOR.max_tokens,
+            timeout_seconds=GAP_GENERATOR.timeout_seconds, max_retries=GAP_GENERATOR.max_retries,
+        ))
         gaps, parse_failed = _parse_gaps_response(raw_retry)
         if parse_failed:
             preview = (raw_retry or raw or "")[:1000]

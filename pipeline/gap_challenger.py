@@ -44,6 +44,7 @@ from pipeline.academic_search import (
     _truncate_at_word_boundary, _strip_negation_framing,
 )
 from pipeline.relevance_ranking import rerank_candidates
+from pipeline.agent_config import GAP_CHALLENGER
 
 GAP_CHALLENGER_STAGE_VERSION = 1
 
@@ -335,7 +336,10 @@ def judge_candidates(gap: dict, candidates: list, client, max_candidates: int = 
     )
 
     try:
-        raw = unwrap(client.chat_json(system_prompt, user_prompt, max_tokens=2000))
+        raw = unwrap(client.chat_json(
+            system_prompt, user_prompt, max_tokens=GAP_CHALLENGER.max_tokens,
+            timeout_seconds=GAP_CHALLENGER.timeout_seconds, max_retries=GAP_CHALLENGER.max_retries,
+        ))
     except Exception:
         raw = None
 

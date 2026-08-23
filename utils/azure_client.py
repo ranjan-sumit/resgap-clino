@@ -100,13 +100,27 @@ def _classify_error(err: str) -> Literal["timeout", "rate_limit", "api_error"]:
     return "api_error"
 
 
-def _collect_stream(stream) -> str:
+def _collect_stream(stream, deadline: float = None) -> str:
     """
     Collect streaming response from NVIDIA NIM.
     Skips reasoning_content (chain-of-thought) and returns only final content.
-    """
+
+    `deadline` (a time.monotonic() value, Epic 3.6) is checked between
+    chunks and raises TimeoutError if exceeded. Real bug found live
+    (2026-08-22): the openai SDK's `timeout=` kwarg passed to
+    `.create()` does NOT reliably bound TOTAL streaming duration -- a
+    real call made with `timeout_seconds=1` completed successfully in
+    47.3s, because NVIDIA NIM keeps sending periodic chunks that each
+    individually complete well under httpx's own per-read timeout, even
+    though the cumulative stream takes far longer. This loop-level
+    wall-clock check is what makes AgentConfig's `timeout_seconds`
+    (pipeline/agent_config.py) a real, enforced bound instead of a
+    parameter that gets silently ignored for streaming responses."""
+    import time
     parts = []
     for chunk in stream:
+        if deadline is not None and time.monotonic() > deadline:
+            raise TimeoutError("Stream exceeded its timeout mid-read (deadline check, not the SDK's own timeout=)")
         if not getattr(chunk, "choices", None):
             continue
         delta = chunk.choices[0].delta
@@ -139,6 +153,7 @@ class AzureOpenAIClient:
 
     def chat(self, system: str, user: str,
              temperature: float = 0.3, max_tokens: int = 4096,
+             timeout_seconds: int = None, max_retries: int = None,
              _retry: int = 0, _model: str | None = None) -> Result[str]:
         """Streaming chat with timeout and up to two automatic retries on failure.
         B10 fix: previously no timeout — one hung call blocked Streamlit indefinitely.
@@ -146,10 +161,18 @@ class AzureOpenAIClient:
         (a sentinel-value anti-pattern) — now returns Success/Failure explicitly.
         B22 fix: after this model's own retries are exhausted on a retryable
         error, try once (no further retries) on self.fallback_model before
-        giving up -- see FALLBACK_MODEL's module-level comment for why."""
+        giving up -- see FALLBACK_MODEL's module-level comment for why.
+
+        Epic 3.6 (2026-08-22): `timeout_seconds`/`max_retries` are now real
+        per-call overrides (previously hardcoded module constants every
+        caller shared identically) -- this is what makes AgentConfig's
+        `timeout_seconds`/`max_requests` fields (pipeline/agent_config.py)
+        genuinely enforceable per agent role, not just documented. Omitting
+        either keeps the exact prior defaults (120s, 2 retries), so every
+        existing caller's behavior is unchanged."""
         import time
-        MAX_RETRIES = 2
-        TIMEOUT_SECS = 120   # 2 minutes max per call
+        MAX_RETRIES = max_retries if max_retries is not None else 2
+        TIMEOUT_SECS = timeout_seconds if timeout_seconds is not None else 120   # 2 minutes max per call, unless overridden
         model = _model or self.model
 
         try:
@@ -165,14 +188,20 @@ class AzureOpenAIClient:
                 stream=True,
                 timeout=TIMEOUT_SECS,
             )
-            return Success(_collect_stream(stream))
+            # See _collect_stream()'s docstring: the SDK's own `timeout=`
+            # above does not reliably bound total streaming duration, so
+            # a real wall-clock deadline is enforced across the read loop.
+            deadline = time.monotonic() + TIMEOUT_SECS
+            return Success(_collect_stream(stream, deadline=deadline))
         except Exception as e:
             err = str(e)
             kind = _classify_error(err)
             if _retry < MAX_RETRIES and kind in ("rate_limit", "timeout"):
                 wait = 2 ** _retry   # exponential back-off: 1s, 2s
                 time.sleep(wait)
-                return self.chat(system, user, temperature, max_tokens, _retry=_retry + 1, _model=model)
+                return self.chat(system, user, temperature, max_tokens,
+                                  timeout_seconds=timeout_seconds, max_retries=max_retries,
+                                  _retry=_retry + 1, _model=model)
             # Retries on `model` are exhausted. If this was the primary
             # model failing with a retryable-class error, try exactly once
             # (no further retries -- _retry=MAX_RETRIES makes the recursive
@@ -184,10 +213,12 @@ class AzureOpenAIClient:
             # a genuine API/auth/malformed-request error.
             if model == self.model and self.fallback_model and kind in ("rate_limit", "timeout"):
                 return self.chat(system, user, temperature, max_tokens,
+                                  timeout_seconds=timeout_seconds, max_retries=max_retries,
                                   _retry=MAX_RETRIES, _model=self.fallback_model)
             return Failure(ErrorInfo(kind=kind, detail=err))
 
-    def chat_json(self, system: str, user: str, max_tokens: int = 4096) -> Result[str]:
+    def chat_json(self, system: str, user: str, max_tokens: int = 4096,
+                  timeout_seconds: int = None, max_retries: int = None) -> Result[str]:
         """Chat that instructs the model to return only valid JSON."""
         system_json = (
             system
@@ -195,7 +226,8 @@ class AzureOpenAIClient:
             "No markdown fences, no preamble, no explanation. "
             "Start directly with { or [ and end with } or ]."
         )
-        return self.chat(system_json, user, temperature=0.1, max_tokens=max_tokens)
+        return self.chat(system_json, user, temperature=0.1, max_tokens=max_tokens,
+                          timeout_seconds=timeout_seconds, max_retries=max_retries)
 
     def vision(self, system: str, user_text: str,
                image_bytes: bytes, max_tokens: int = 2048, _retry: int = 0) -> Result[str]:
@@ -238,7 +270,10 @@ class AzureOpenAIClient:
                 stream=True,
                 timeout=120,
             )
-            return Success(_collect_stream(stream))
+            # Same real-wall-clock-deadline fix as chat() -- see
+            # _collect_stream()'s docstring.
+            deadline = time.monotonic() + 120
+            return Success(_collect_stream(stream, deadline=deadline))
         except Exception as e:
             err = str(e)
             kind = _classify_error(err)

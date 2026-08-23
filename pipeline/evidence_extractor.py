@@ -33,6 +33,7 @@ import re
 
 from utils.azure_client import unwrap, LLMCallError
 from utils.database import get_cached_evidence_objects, save_cached_evidence_objects
+from pipeline.agent_config import EVIDENCE_EXTRACTOR
 from packages.research_schemas.evidence_object import (
     EvidenceObject, Provenance, validate_evidence_dict, to_dict,
 )
@@ -172,7 +173,8 @@ def extract_deterministic_evidence(paper_id: str, wiki_page: dict, docling_resul
     return objects, diagnostics
 
 
-def extract_llm_evidence(paper_id: str, wiki_page: dict, docling_result: dict, client, max_tokens: int = 1500):
+def extract_llm_evidence(paper_id: str, wiki_page: dict, docling_result: dict, client,
+                          max_tokens: int = EVIDENCE_EXTRACTOR.max_tokens):
     """Story 2.1.3 (LLM half, scoped to the 7 types nothing else captures).
     Returns (list[EvidenceObject], diagnostics). Never silently returns []
     on a parse/call failure without flagging it -- mirrors gap_detector.py's
@@ -180,7 +182,10 @@ def extract_llm_evidence(paper_id: str, wiki_page: dict, docling_result: dict, c
     of this type exists"). max_tokens raised 800->1500 (2026-08-21) to fit
     up to ~15 items (3x each for InterventionModel/ComparatorBaseline/
     Metric/Finding + 1x each for ResearchQuestion/Problem/StudyDesign)
-    without truncation."""
+    without truncation. Default now sourced from pipeline/agent_config.py's
+    EVIDENCE_EXTRACTOR (Epic 3.6) -- the literal value is unchanged, just
+    no longer a bare inline number disconnected from the rest of that
+    agent's real, typed budget/timeout."""
     mapped_segments = _build_section_map((docling_result or {}).get("text_segments", []))
 
     context = {
@@ -195,7 +200,11 @@ def extract_llm_evidence(paper_id: str, wiki_page: dict, docling_result: dict, c
                     "provenance_resolved": 0, "llm_call_failed": False}
 
     try:
-        raw = unwrap(client.chat_json(_EVIDENCE_LLM_SYSTEM_PROMPT, user_prompt, max_tokens=max_tokens))
+        raw = unwrap(client.chat_json(
+            _EVIDENCE_LLM_SYSTEM_PROMPT, user_prompt, max_tokens=max_tokens,
+            timeout_seconds=EVIDENCE_EXTRACTOR.timeout_seconds,
+            max_retries=EVIDENCE_EXTRACTOR.max_retries,
+        ))
     except LLMCallError:
         diagnostics["llm_call_failed"] = True
         return [], diagnostics

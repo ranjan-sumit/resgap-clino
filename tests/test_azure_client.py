@@ -42,6 +42,69 @@ class ChatResultTests(unittest.TestCase):
         self.assertIsInstance(result, Success)
         self.assertEqual(result.value, "Hello, world!")
 
+    def test_default_timeout_is_120_when_not_overridden(self):
+        # Epic 3.6: timeout_seconds is now a real per-call override -- this
+        # locks in that omitting it preserves the exact prior hardcoded
+        # default, so every pre-Epic-3.6 caller's behavior is unchanged.
+        self.mock_client.chat.completions.create.return_value = _fake_stream("ok")
+        self.client.chat("system", "user")
+        call = self.mock_client.chat.completions.create.call_args
+        self.assertEqual(call.kwargs["timeout"], 120)
+
+    def test_timeout_seconds_override_is_passed_through(self):
+        self.mock_client.chat.completions.create.return_value = _fake_stream("ok")
+        self.client.chat("system", "user", timeout_seconds=30)
+        call = self.mock_client.chat.completions.create.call_args
+        self.assertEqual(call.kwargs["timeout"], 30)
+
+    @patch("time.sleep", return_value=None)
+    def test_max_retries_override_is_respected(self, _sleep):
+        # Default is 2 retries + 1 fallback attempt = 4 total. An explicit
+        # max_retries=0 should mean 1 primary attempt + 1 fallback attempt,
+        # no retries at all on the primary model.
+        self.mock_client.chat.completions.create.side_effect = Exception("429 Too Many Requests")
+        result = self.client.chat("system", "user", max_retries=0)
+        self.assertIsInstance(result, Failure)
+        self.assertEqual(self.mock_client.chat.completions.create.call_count, 2)  # 1 primary + 1 fallback
+
+    def test_chat_json_passes_through_timeout_and_retries(self):
+        self.mock_client.chat.completions.create.return_value = _fake_stream('{"a": 1}')
+        self.client.chat_json("system", "user", timeout_seconds=45, max_retries=1)
+        call = self.mock_client.chat.completions.create.call_args
+        self.assertEqual(call.kwargs["timeout"], 45)
+
+    def test_deadline_is_enforced_mid_stream_not_just_passed_to_the_sdk(self):
+        # Real bug found live (2026-08-22): the openai SDK's `timeout=`
+        # kwarg does NOT reliably bound total streaming duration -- a real
+        # call with timeout_seconds=1 completed successfully in 47.3s,
+        # because NVIDIA NIM's periodic chunks each individually complete
+        # under httpx's own per-read timeout. Simulates that shape here: a
+        # generator that yields chunks slowly enough to cross a short
+        # deadline between them, with no single read taking long -- the
+        # loop-level deadline check (not the SDK timeout=) must catch it.
+        import time as time_module
+
+        # Real chunk objects with a real time.sleep between yields, so the
+        # deadline is crossed BETWEEN chunks, not during a single read.
+        def gen():
+            c1 = list(_fake_stream("first chunk "))[0]
+            yield c1
+            time_module.sleep(0.05)
+            c2 = list(_fake_stream("second chunk"))[0]
+            yield c2
+
+        # fallback_model=None: a fallback retry would consume the same
+        # (already-exhausted) generator and mask the real assertion behind
+        # an unrelated empty-stream Success -- irrelevant to what this test
+        # checks, so disabled here the same way the live reproduction was.
+        with patch("utils.azure_client.make_nvidia_client") as mock_make:
+            mock_client = mock_make.return_value
+            client = AzureOpenAIClient(api_key="fake-key", fallback_model=None)
+        mock_client.chat.completions.create.return_value = gen()
+        result = client.chat("system", "user", timeout_seconds=0, max_retries=0)
+        self.assertIsInstance(result, Failure)
+        self.assertEqual(result.error.kind, "timeout")
+
     @patch("time.sleep", return_value=None)
     def test_chat_rate_limit_exhaustion_returns_failure(self, _sleep):
         # B22 fix: after the primary model's 3 attempts are exhausted, one
