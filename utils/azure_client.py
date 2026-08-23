@@ -136,20 +136,53 @@ def make_nvidia_client(api_key: str) -> OpenAI:
 
 class AzureOpenAIClient:
     """
-    Master pipeline client using openai/gpt-oss-20b via NVIDIA NIM, with
-    openai/gpt-oss-120b as the one-shot fallback on a retryable failure
-    (see MASTER_MODEL/FALLBACK_MODEL above -- B25 swapped which model
-    plays which role, 2026-08-22).
+    Master pipeline client, defaulting to openai/gpt-oss-20b via NVIDIA NIM
+    with openai/gpt-oss-120b as the one-shot fallback on a retryable
+    failure (see MASTER_MODEL/FALLBACK_MODEL above -- B25 swapped which
+    model plays which role, 2026-08-22).
     Name kept for backward compatibility — all pipeline imports unchanged.
-    """
 
-    def __init__(self, api_key: str, fallback_model: str | None = FALLBACK_MODEL, **kwargs):
-        self.client  = make_nvidia_client(api_key)
+    Model-selector feature (2026-08-23): `base_url`/`model` are now real
+    constructor overrides, not hardcoded -- every provider in
+    utils/model_providers.py's registry speaks the same OpenAI-API-
+    compatible /chat/completions shape (confirmed per-provider, not
+    assumed), so this one class covers all of them. Omitting both keeps
+    the exact prior NVIDIA defaults -- every existing caller's behavior is
+    unchanged."""
+
+    # Sentinel so __init__ can tell "caller didn't pass fallback_model" apart
+    # from "caller explicitly passed FALLBACK_MODEL" -- needed because the
+    # right default depends on `base_url` (see below), not a single constant.
+    _FALLBACK_UNSET = object()
+
+    def __init__(self, api_key: str, fallback_model=_FALLBACK_UNSET,
+                 base_url: str = NVIDIA_BASE_URL, model: str = MASTER_MODEL,
+                 top_p: float = 1.0, **kwargs):
+        # NVIDIA (the default) still goes through make_nvidia_client() --
+        # unchanged code path, same mockable seam existing tests rely on.
+        # A different base_url (another provider) builds a plain OpenAI
+        # client directly against it.
+        self.client  = make_nvidia_client(api_key) if base_url == NVIDIA_BASE_URL \
+            else OpenAI(base_url=base_url, api_key=api_key)
         self.api_key = api_key
-        self.model   = MASTER_MODEL
+        self.model   = model
+        # Real bug found live (2026-08-23): moonshotai/kimi-k3 (NVIDIA NIM)
+        # rejects the previously-hardcoded top_p=1 with a 400 -- that
+        # model's top_p is fixed at 0.95 server-side. top_p is otherwise a
+        # per-model quirk, not a per-provider one (every other model this
+        # app uses accepts 1), so it's a constructor override here, not a
+        # new field on utils.model_providers.ProviderConfig.
+        self.top_p = top_p
         # B22 fix: pass fallback_model=None to disable (e.g. a caller that
         # wants strict single-model behavior for reproducibility testing).
-        self.fallback_model = fallback_model
+        # If the caller didn't pass anything, default to FALLBACK_MODEL only
+        # for the NVIDIA base_url (its correct historical behavior) -- for
+        # any other provider, FALLBACK_MODEL ("openai/gpt-oss-120b") would
+        # be a meaningless model string from the wrong catalog, so None.
+        if fallback_model is self._FALLBACK_UNSET:
+            self.fallback_model = FALLBACK_MODEL if base_url == NVIDIA_BASE_URL else None
+        else:
+            self.fallback_model = fallback_model
 
     def chat(self, system: str, user: str,
              temperature: float = 0.3, max_tokens: int = 4096,
@@ -183,7 +216,7 @@ class AzureOpenAIClient:
                     {"role": "user",   "content": user},
                 ],
                 temperature=temperature,
-                top_p=1,
+                top_p=self.top_p,
                 max_tokens=max_tokens,
                 stream=True,
                 timeout=TIMEOUT_SECS,

@@ -36,6 +36,35 @@ class ChatResultTests(unittest.TestCase):
     def test_constructor_passes_api_key_to_make_nvidia_client(self):
         self.mock_make_client.assert_called_once_with("fake-key")
 
+    def test_default_model_and_base_url_are_nvidia(self):
+        from utils.azure_client import MASTER_MODEL, NVIDIA_BASE_URL, FALLBACK_MODEL
+        self.assertEqual(self.client.model, MASTER_MODEL)
+        self.assertEqual(self.client.fallback_model, FALLBACK_MODEL)
+
+    def test_custom_base_url_and_model_are_used(self):
+        with patch("utils.azure_client.OpenAI") as mock_openai_cls:
+            client = AzureOpenAIClient(
+                api_key="other-key", base_url="https://api.openai.com/v1", model="gpt-5.6-luna",
+            )
+        mock_openai_cls.assert_called_once_with(base_url="https://api.openai.com/v1", api_key="other-key")
+        self.assertEqual(client.model, "gpt-5.6-luna")
+
+    def test_non_nvidia_base_url_defaults_fallback_to_none(self):
+        # A caller not explicitly passing fallback_model, on a non-NVIDIA
+        # base_url, must not inherit NVIDIA's FALLBACK_MODEL string --
+        # that model doesn't exist in a different provider's catalog.
+        with patch("utils.azure_client.OpenAI"):
+            client = AzureOpenAIClient(api_key="k", base_url="https://api.openai.com/v1", model="gpt-5.6-luna")
+        self.assertIsNone(client.fallback_model)
+
+    def test_non_nvidia_base_url_respects_explicit_fallback_model(self):
+        with patch("utils.azure_client.OpenAI"):
+            client = AzureOpenAIClient(
+                api_key="k", base_url="https://api.openai.com/v1", model="gpt-5.6-luna",
+                fallback_model="gpt-5.6-terra",
+            )
+        self.assertEqual(client.fallback_model, "gpt-5.6-terra")
+
     def test_chat_success_returns_success(self):
         self.mock_client.chat.completions.create.return_value = _fake_stream("Hello, ", "world!")
         result = self.client.chat("system", "user")

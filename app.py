@@ -553,6 +553,7 @@ import tempfile, os, json, traceback
 from datetime import datetime
 
 from utils.azure_client import AzureOpenAIClient, MASTER_MODEL, FALLBACK_MODEL
+from utils.model_providers import PROVIDER_REGISTRY, DEFAULT_PROVIDER_KEY, build_client
 from utils.export import (
     to_json, to_markdown_report, to_pdf_report,
     generate_report_narrative, to_enterprise_html_report,
@@ -572,6 +573,7 @@ from pipeline.graph_structural_gaps import detect_graph_structural_gaps
 from pipeline.graph_quality import score_graph_quality, apply_graph_quality_to_gaps
 from pipeline.gap_challenger import run_challenge, GAP_CHALLENGER_STAGE_VERSION
 from pipeline.repeatability_score import compute_repeatability_score
+from pipeline.run_compare import compare_runs
 from pipeline.graph_persistence import (
     connect_ok as arcadedb_connect_ok, save_graph_snapshot, load_graph_snapshot,
     list_graph_snapshots, diff_graph_snapshots, GRAPH_PERSISTENCE_VERSION,
@@ -708,6 +710,40 @@ with st.sidebar:
     st.markdown('<div style="font-family:\'DM Mono\',monospace;font-size:0.62rem;color:#55708f;">'
                 '🔗 <a href="https://www.semanticscholar.org/product/api" target="_blank" style="color:#0066cc;">'
                 'Get key → semanticscholar.org/product/api</a></div>', unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.markdown("##### Model Provider")
+    # Model selector (2026-08-23): NVIDIA stays the default -- selecting it
+    # changes nothing about existing behavior. The other three read their
+    # key straight from .env (OPENAI_API_KEY/GEMINI_API_KEY/DASHSCOPE_API_KEY),
+    # same convention as ARCADEDB_*/POSTGRES_* -- no sidebar re-entry, since
+    # these aren't the primary always-visible credential the NVIDIA field is.
+    _provider_keys = list(PROVIDER_REGISTRY.keys())
+    selected_provider_key = st.selectbox(
+        "Provider", options=_provider_keys,
+        index=_provider_keys.index(DEFAULT_PROVIDER_KEY),
+        format_func=lambda k: PROVIDER_REGISTRY[k].label,
+        help="NVIDIA NIM is the current default. The others are structurally "
+             "wired in but unverified against the real service this session "
+             "-- see utils/model_providers.py's own docstring.",
+    )
+    _selected_cfg = PROVIDER_REGISTRY[selected_provider_key]
+    if not _selected_cfg.verified_live:
+        st.caption(f"⚠️ {_selected_cfg.label} is not yet live-verified in this app.")
+
+    _model_options = list(_selected_cfg.known_models) + ["Custom…"]
+    _model_choice = st.selectbox("Model", options=_model_options, index=0)
+    selected_model = (
+        st.text_input("Custom model ID", value=_selected_cfg.default_model)
+        if _model_choice == "Custom…" else _model_choice
+    )
+
+    if selected_provider_key == "nvidia":
+        provider_api_key = api_key
+    else:
+        provider_api_key = os.environ.get(_selected_cfg.api_key_env, "").strip()
+        if not provider_api_key:
+            st.caption(f"⚠️ No key found -- add {_selected_cfg.api_key_env} to .env to use {_selected_cfg.label}.")
 
     st.markdown("---")
 
@@ -919,6 +955,78 @@ with st.sidebar:
                         except Exception as e:
                             st.error(f"Diff failed: {e}")
 
+        # Clinova Phase 4, Epic 4.4's motivating slice (FR-28) -- unlike
+        # Repeatability Check (aggregate stability metrics across N runs)
+        # or Graph History (ArcadeDB-persisted graphs only), this diffs
+        # any two saved runs directly, in full: papers, evidence counts,
+        # graph entities/relationships, gaps (with confidence changes),
+        # proposals, and the model/pipeline-version each run actually
+        # used -- the real answer to "did switching models change the
+        # result," not just a guess. Reads only already-saved data
+        # (pipeline/run_compare.py), no new LLM calls.
+        with st.expander("🔀 Compare Runs (what changed between two runs)"):
+            compare_options = {f"{r['name'][:30]} ({r['id'][:8]}, {r['n_gaps']}g)": r["id"] for r in runs}
+            compare_labels = st.multiselect(
+                "Pick exactly 2 saved runs to compare",
+                options=list(compare_options.keys()),
+                key="compare_runs_select",
+            )
+            if st.button("Compare Runs", key="compare_runs_button",
+                         disabled=len(compare_labels) != 2):
+                id_a, id_b = [compare_options[lbl] for lbl in compare_labels]
+                try:
+                    cmp = compare_runs(id_a, id_b)
+                    m = cmp["manifest"]
+                    st.markdown(
+                        f"**Model:** `{m['model_bundle_version_a'] or 'unknown'}` → "
+                        f"`{m['model_bundle_version_b'] or 'unknown'}`  \n"
+                        f"**Duration:** {m['run_duration_seconds_a'] or '?'}s → "
+                        f"{m['run_duration_seconds_b'] or '?'}s  \n"
+                        f"**Quality gate:** {m['quality_gate_results_a'] or 'unknown'} → "
+                        f"{m['quality_gate_results_b'] or 'unknown'}"
+                    )
+                    st.markdown("")
+                    p = cmp["papers"]
+                    st.markdown(f"**Papers:** {p['common_count']} common · "
+                                f"{len(p['added'])} added · {len(p['removed'])} removed")
+                    e = cmp["evidence"]
+                    st.markdown(f"**Evidence objects:** {e['count_a']} → {e['count_b']} "
+                                f"({'+' if e['delta'] >= 0 else ''}{e['delta']})")
+                    g = cmp["graph"]
+                    st.markdown(
+                        f"**Graph entities:** {g['entities_common_count']} common · "
+                        f"{len(g['entities_added'])} added · {len(g['entities_removed'])} removed  \n"
+                        f"**Graph relationships:** {g['relationships_common_count']} common · "
+                        f"{len(g['relationships_added'])} added · {len(g['relationships_removed'])} removed"
+                    )
+                    gp = cmp["gaps"]
+                    st.markdown(
+                        f"**Gaps:** {gp['common_count']} common · "
+                        f"{len(gp['added'])} new · {len(gp['removed'])} no longer generated · "
+                        f"{len(gp['confidence_changes'])} confidence change(s)"
+                    )
+                    pr = cmp["proposals"]
+                    st.markdown(f"**Proposals:** {pr['common_count']} common · "
+                                f"{pr['added_count']} added · {pr['removed_count']} removed")
+
+                    if gp["added"]:
+                        st.markdown("")
+                        _section_label(f"New gaps in {id_b[:8]}")
+                        for t in gp["added"][:15]:
+                            _item(f"🆕 {t}")
+                    if gp["removed"]:
+                        st.markdown("")
+                        _section_label(f"Gaps no longer generated (present in {id_a[:8]} only)")
+                        for t in gp["removed"][:15]:
+                            _item(f"➖ {t}")
+                    if gp["confidence_changes"]:
+                        st.markdown("")
+                        _section_label("Confidence changes")
+                        for c in gp["confidence_changes"][:15]:
+                            _item(f"🔀 {c['title']}: {c['confidence_a']} → {c['confidence_b']}")
+                except ValueError as e:
+                    st.error(str(e))
+
         if st.button("🗑 Clear all history", key="clear_history"):
             for r in runs:
                 delete_run(r["id"])
@@ -975,8 +1083,15 @@ with name_col:
 
 # ── Main Pipeline ─────────────────────────────────────────────────────────────
 if run_btn and uploaded_files:
-    if not api_key:
-        st.error("Please enter your NVIDIA API key.")
+    # provider_api_key == api_key when NVIDIA (the default) is selected --
+    # this one check correctly covers both "no NVIDIA key entered" and "no
+    # key configured for the selected non-NVIDIA provider," rather than two
+    # separate checks that could disagree.
+    if not provider_api_key:
+        st.error(f"No API key configured for {_selected_cfg.label}. "
+                 + (f"Add {_selected_cfg.api_key_env} to .env, or switch the sidebar's "
+                    "Model Provider back to NVIDIA."
+                    if selected_provider_key != "nvidia" else "Please enter your NVIDIA API key."))
         st.stop()
     if len(uploaded_files) < 2:
         st.warning("Upload at least 2 papers.")
@@ -986,7 +1101,7 @@ if run_btn and uploaded_files:
     st.session_state.pipeline_trace = []
     st.session_state.loaded_run_id  = None
 
-    client  = AzureOpenAIClient(api_key=api_key.strip())
+    client  = build_client(selected_provider_key, provider_api_key, model=selected_model)
     context = {
         "domain":   selected_domain,
         "interest": interest or "General research",
@@ -1414,6 +1529,10 @@ if run_btn and uploaded_files:
                     "docling": DOCLING_STAGE_VERSION if enable_quality_engine else None,
                 },
                 reference_resolver_version=str(REFERENCE_STAGE_VERSION),
+                # Clinova model selector (2026-08-23): the real provider:model
+                # this run actually used -- was always None before this
+                # feature existed, since only one model was ever in play.
+                model_bundle_version=f"{selected_provider_key}:{selected_model}",
                 embedding_model_version=EMBEDDING_MODEL if enable_gap_challenger else None,
                 reranker_version=RERANK_MODEL if enable_gap_challenger else None,
                 graph_version=str(GRAPH_PERSISTENCE_VERSION) if enable_graph_persistence else None,
@@ -2012,7 +2131,7 @@ if st.session_state.results:
                 comp_stat.markdown(_card("Computational Lab", f"⟳ {msg}"),
                                    unsafe_allow_html=True)
             try:
-                client = AzureOpenAIClient(api_key=api_key.strip())
+                client = build_client(selected_provider_key, provider_api_key, model=selected_model)
 
                 # Stage 8A: Tier 1 parameter extraction
                 papers_raw = [
@@ -2377,7 +2496,10 @@ if st.session_state.results:
 
         if generate_report:
             try:
-                report_client = AzureOpenAIClient(api_key=api_key.strip()) if (use_llm_report and api_key) else None
+                report_client = (
+                    build_client(selected_provider_key, provider_api_key, model=selected_model)
+                    if (use_llm_report and provider_api_key) else None
+                )
                 narrative = generate_report_narrative(res, context, client=report_client)
                 html_report = to_enterprise_html_report(res, context, narrative=narrative)
                 pdf_report = to_enterprise_pdf_report(res, context, narrative=narrative)
