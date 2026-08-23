@@ -29,6 +29,25 @@ def _load_dotenv(path: Path) -> None:
 
 _load_dotenv(Path(__file__).parent / ".env")
 
+
+# Clinova Phase 4, Epic 4.2 (Run Manifest, FR-23's `git_commit` field).
+# Computed once per process, not per run -- the commit doesn't change
+# mid-session. Honest None (not a fake value) if git isn't on PATH or this
+# isn't a git checkout, rather than a placeholder that looks like a hash.
+def _git_commit() -> str | None:
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=Path(__file__).parent,
+            capture_output=True, text=True, timeout=5,
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
+    except Exception:
+        return None
+
+
+_GIT_COMMIT = _git_commit()
+
 # Clinova Phase 1, Story 1.4.2: product name/tagline live in the branding
 # config layer (03-system-architecture.md AD-3), not hardcoded here -- the
 # product identity can change without touching this file. Falls back to the
@@ -539,7 +558,10 @@ from utils.export import (
     generate_report_narrative, to_enterprise_html_report,
     to_enterprise_pdf_report,
 )
-from utils.database import init_db, save_run, list_runs, load_run, delete_run
+from utils.database import (
+    init_db, save_run, list_runs, load_run, delete_run,
+    record_artifact, record_run_manifest,
+)
 from pipeline.pdf_parser import parse_pdf
 from pipeline.page_index import build_tree, tree_to_summary
 from pipeline.wiki_compiler import build_wiki
@@ -548,12 +570,13 @@ from pipeline.gap_detector import detect_gaps
 from pipeline.deterministic_gap_patterns import detect_deterministic_gaps
 from pipeline.graph_structural_gaps import detect_graph_structural_gaps
 from pipeline.graph_quality import score_graph_quality, apply_graph_quality_to_gaps
-from pipeline.gap_challenger import run_challenge
+from pipeline.gap_challenger import run_challenge, GAP_CHALLENGER_STAGE_VERSION
 from pipeline.repeatability_score import compute_repeatability_score
 from pipeline.graph_persistence import (
     connect_ok as arcadedb_connect_ok, save_graph_snapshot, load_graph_snapshot,
-    list_graph_snapshots, diff_graph_snapshots,
+    list_graph_snapshots, diff_graph_snapshots, GRAPH_PERSISTENCE_VERSION,
 )
+from pipeline.relevance_ranking import EMBEDDING_MODEL, RERANK_MODEL
 from pipeline.academic_search import validate_gaps
 from pipeline.proposal_generator import generate_proposals
 from pipeline.param_extractor import (
@@ -561,7 +584,7 @@ from pipeline.param_extractor import (
     check_sufficiency, params_to_csv, group_params_by_category,
 )
 from pipeline.reference_extractor import (
-    extract_and_enrich_references, summarise_reference_corpus,
+    extract_and_enrich_references, summarise_reference_corpus, REFERENCE_STAGE_VERSION,
 )
 from pipeline.paper_manager import (
     assign_tiers, corpus_stats, compile_tier2_batch,
@@ -579,7 +602,7 @@ from domain_config import get_domain_display_options, parse_domain_selection, ge
 # ~86s/paper, evals/benchmarks/baseline/docling-resource-measurement.md),
 # so this stays behind the "enable_quality_engine" sidebar toggle rather
 # than silently adding that cost to every run.
-from pipeline.docling_parser import extract_with_docling
+from pipeline.docling_parser import extract_with_docling, DOCLING_STAGE_VERSION
 from pipeline.extraction_reconciler import reconcile_paper
 from pipeline.corpus_quality import (
     score_paper_completeness, compute_corpus_quality, enforce_quality_gate,
@@ -971,6 +994,10 @@ if run_btn and uploaded_files:
     }
     name = run_name.strip() or f"{selected_domain[:20]} — {datetime.now().strftime('%H:%M')}"
 
+    # Clinova Phase 4, Epic 4.2 -- real wall-clock start, used for
+    # RunManifest.run_duration_seconds below.
+    _run_start_time = time.time()
+
     prog = st.progress(0)
     stat = st.empty()
     def upd(msg, pct):
@@ -1361,6 +1388,56 @@ if run_btn and uploaded_files:
                     st.warning(f"⚠️ Graph persistence failed (run itself completed normally): {e}")
             else:
                 st.warning(f"⚠️ Graph not persisted -- {msg}")
+
+        # Clinova Phase 4, Epic 4.1/4.2 -- records this run as a
+        # ResearchArtifact (artifact_type="pipeline") and its full
+        # RunManifest (FR-22/FR-23). Always attempted, gate-blocked runs
+        # included -- a FAIL-gated run is itself a real, worth-recording
+        # research event, not a non-event. Failure here degrades to a
+        # warning, same convention as graph persistence above -- the run
+        # itself has already completed and saved successfully by this
+        # point, so a registry-write failure must never look like the run
+        # failed.
+        try:
+            record_artifact(
+                artifact_id=f"pipeline:{saved_id}", artifact_type="pipeline",
+                artifact_version=f"pipeline:{saved_id}",
+                project_id=context.get("domain") or "default",
+                content_hash=saved_id, run_id=saved_id,
+            )
+            record_run_manifest(
+                run_id=saved_id,
+                project_id=context.get("domain") or "default",
+                git_commit=_GIT_COMMIT,
+                parser_versions={
+                    "pymupdf": None,  # no formal version constant exists for this stage yet
+                    "docling": DOCLING_STAGE_VERSION if enable_quality_engine else None,
+                },
+                reference_resolver_version=str(REFERENCE_STAGE_VERSION),
+                embedding_model_version=EMBEDDING_MODEL if enable_gap_challenger else None,
+                reranker_version=RERANK_MODEL if enable_gap_challenger else None,
+                graph_version=str(GRAPH_PERSISTENCE_VERSION) if enable_graph_persistence else None,
+                search_strategy_version=str(GAP_CHALLENGER_STAGE_VERSION) if enable_gap_challenger else None,
+                academic_search_date=datetime.now().date().isoformat(),
+                search_providers=["semantic_scholar", "arxiv"],
+                # Per-artifact-type registration (graph/gap_set/proposal_set
+                # each as their own ResearchArtifact row) is real, separate
+                # future wiring -- not attempted in this pass. Honest empty
+                # list, not a fabricated reference.
+                output_artifacts=[],
+                warnings=gate_block_reasons if gate_blocked else [],
+                quality_gate_results={
+                    "corpus": corpus_quality_metrics.get("quality_gate") if corpus_quality_metrics else None,
+                    "graph": graph_quality.get("build_status") if graph_quality else None,
+                },
+                run_duration_seconds=round(time.time() - _run_start_time, 1),
+                # token_usage: no call site in this pipeline counts tokens
+                # yet -- omitted (stored NULL), never fabricated. See
+                # pipeline/agent_config.py's Epic 3.6 docstring for the same
+                # honest-gap treatment already applied elsewhere.
+            )
+        except Exception as e:
+            st.warning(f"⚠️ Run Manifest not recorded (run itself completed normally): {e}")
 
         prog.progress(80)
         prog.empty(); stat.empty()

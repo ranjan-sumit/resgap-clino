@@ -1,106 +1,101 @@
 """
-SQLite Run History Database
-Saves every pipeline run so results persist across page refreshes.
-Users can click any past run to restore its full results instantly.
+Postgres Run History + Research Artifact Registry (Clinova Phase 4, Epic
+4.1/4.2). Replaces the pre-Phase-4 SQLite backend entirely -- every public
+function below keeps its exact pre-migration signature (save_run, load_run,
+list_runs, delete_run, get_run_papers, the six get_cached_X/save_cached_X
+pairs, compute_cache_key), so no call site anywhere else in the pipeline
+needed to change (confirmed: utils/database.py was the only module touching
+SQLite directly).
 
-Schema:
-  runs   — one row per run (metadata + compressed JSON blob)
-  papers — one row per paper per run (for quick listing)
+Requires a local PostgreSQL server running -- no Docker, no admin rights
+(portable EnterpriseDB ZIP binaries, same no-installer pattern as
+ArcadeDB/JDK; see amendments/2026-08-20-environment-constraints.md and
+POSTGRES_* in .env). Migrations live in migrations/*.sql, applied
+idempotently and in order by _apply_migrations() -- forward-only, per
+ADR-005/FR-21: nothing here drops or rewrites a prior migration in place.
+
+One real, deliberate change from the SQLite schema, not just a port: `runs.
+results_gz BLOB` (manually gzip-compressed JSON) became `runs.results_json
+JSONB` (native). Postgres TOAST-compresses large JSONB internally, so the
+manual gzip step was no longer doing useful work -- see migrations/
+0001_initial_schema.sql's own comment.
 """
-import sqlite3
 import json
-import gzip
 import os
 import hashlib
 from datetime import datetime
 from pathlib import Path
 
-# Database lives next to the app so it persists across restarts
-DB_DIR  = Path(__file__).parent.parent / "data"
-DB_PATH = DB_DIR / "run_history.db"
+import psycopg
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
+
+MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
+
+# Test isolation hook (Epic 4.1): tests/pg_test_utils.py monkeypatches this
+# to a throwaway schema name via patch.object(db, "_SCHEMA", ...), giving
+# each test class its own fully-isolated set of tables -- the same
+# isolation the pre-migration tests got from a fresh tmpdir SQLite file
+# per test class, just via a Postgres schema instead of a separate file.
+# None (the default) means "use Postgres's normal 'public' schema," i.e.
+# real production behavior is completely unaffected by this hook existing.
+_SCHEMA: str | None = None
 
 
-def _get_conn() -> sqlite3.Connection:
-    DB_DIR.mkdir(exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+def _config() -> dict:
+    return {
+        "host_and_port": os.environ.get("POSTGRES_URL", "postgresql://localhost:5433")
+                          .removeprefix("postgresql://"),
+        "user": os.environ.get("POSTGRES_USER", "clinova_app"),
+        "password": os.environ.get("POSTGRES_PASSWORD", ""),
+        "database": os.environ.get("POSTGRES_DATABASE", "clinova"),
+    }
+
+
+def _get_conn() -> psycopg.Connection:
+    c = _config()
+    kwargs = {"row_factory": dict_row}
+    if _SCHEMA:
+        kwargs["options"] = f"-c search_path={_SCHEMA}"
+    return psycopg.connect(
+        f"postgresql://{c['user']}:{c['password']}@{c['host_and_port']}/{c['database']}",
+        **kwargs,
+    )
+
+
+def _apply_migrations(conn: psycopg.Connection) -> None:
+    """Idempotent, forward-only, in filename order. Safe to call every time
+    init_db() runs -- an already-applied migration is a no-op, matching the
+    same discipline as pipeline/graph_persistence.py's ensure_schema()."""
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version    TEXT PRIMARY KEY,
+            applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+    """)
+    conn.commit()
+
+    cur.execute("SELECT version FROM schema_migrations")
+    applied = {row["version"] for row in cur.fetchall()}
+
+    for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        version = path.name
+        if version in applied:
+            continue
+        sql = path.read_text(encoding="utf-8")
+        cur.execute(sql)
+        cur.execute("INSERT INTO schema_migrations (version) VALUES (%s)", (version,))
+        conn.commit()
 
 
 def init_db() -> None:
-    """Create tables if they don't exist. Safe to call multiple times."""
+    """Create/upgrade tables if needed. Safe to call multiple times."""
     conn = _get_conn()
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS runs (
-            id          TEXT PRIMARY KEY,
-            name        TEXT NOT NULL,
-            created_at  TEXT NOT NULL,
-            domain      TEXT,
-            interest    TEXT,
-            n_papers    INTEGER,
-            n_gaps      INTEGER,
-            n_proposals INTEGER,
-            has_comp    INTEGER DEFAULT 0,
-            results_gz  BLOB NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS papers (
-            run_id    TEXT NOT NULL,
-            filename  TEXT,
-            title     TEXT,
-            tier      INTEGER DEFAULT 1,
-            FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS wiki_pages (
-            cache_key           TEXT PRIMARY KEY,
-            content_hash        TEXT,
-            domain_hash         TEXT,
-            stage_logic_version INTEGER,
-            wiki_json           TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS parameters (
-            cache_key           TEXT PRIMARY KEY,
-            content_hash        TEXT,
-            stage_logic_version INTEGER,
-            params_json         TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS docling_extractions (
-            cache_key           TEXT PRIMARY KEY,
-            content_hash        TEXT,
-            stage_logic_version INTEGER,
-            extraction_json     TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS evidence_objects (
-            cache_key           TEXT PRIMARY KEY,
-            content_hash        TEXT,
-            stage_logic_version INTEGER,
-            evidence_json       TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS "references" (
-            cache_key           TEXT PRIMARY KEY,
-            doi_or_title_hash   TEXT,
-            stage_logic_version INTEGER,
-            enriched_json       TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS gap_validations (
-            cache_key           TEXT PRIMARY KEY,
-            gap_hash            TEXT,
-            domain_hash         TEXT,
-            stage_logic_version INTEGER,
-            validation_json     TEXT
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_runs_created ON runs(created_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_papers_run   ON papers(run_id);
-    """)
-    conn.commit()
-    conn.close()
+    try:
+        _apply_migrations(conn)
+    finally:
+        conn.close()
 
 
 def compute_cache_key(
@@ -113,12 +108,14 @@ def compute_cache_key(
     Shared cache-key computation for all Epic 2 cache tables (AD-3).
     Returns (cache_key, content_hash, domain_hash).
 
-    domain_hash is only meaningful for domain-conditioned stages: pass the
-    exact subset of domain_config keys that actually affect that stage's
-    prompt (e.g. ["wiki_focus", "wiki_entity_examples"] for wiki compilation)
-    so an unrelated domain_config change doesn't cause a spurious cache miss.
-    Pass an empty relevant_domain_keys for a domain-invariant stage —
-    domain_hash will be the literal string "none" regardless of domain_config.
+    Unchanged by the Phase 4 migration -- pure hashing logic, no database
+    dependency. domain_hash is only meaningful for domain-conditioned
+    stages: pass the exact subset of domain_config keys that actually
+    affect that stage's prompt (e.g. ["wiki_focus", "wiki_entity_examples"]
+    for wiki compilation) so an unrelated domain_config change doesn't
+    cause a spurious cache miss. Pass an empty relevant_domain_keys for a
+    domain-invariant stage -- domain_hash will be the literal string "none"
+    regardless of domain_config.
 
     content=None/"" is not special-cased here (it hashes like any other
     string) — callers whose content can legitimately be empty (e.g. a paper
@@ -154,15 +151,15 @@ def get_cached_wiki_page(cache_key: str) -> dict | None:
     letting a storage-layer problem crash the caller)."""
     init_db()
     conn = _get_conn()
-    row = conn.execute(
-        "SELECT wiki_json FROM wiki_pages WHERE cache_key = ?", (cache_key,)
-    ).fetchone()
+    cur = conn.cursor()
+    cur.execute("SELECT wiki_json FROM wiki_pages WHERE cache_key = %s", (cache_key,))
+    row = cur.fetchone()
     conn.close()
     if not row:
         return None
     try:
         return json.loads(row["wiki_json"])
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, TypeError):
         return None
 
 
@@ -175,10 +172,16 @@ def save_cached_wiki_page(
     stub (see Story 2.1 Dev Notes)."""
     init_db()
     conn = _get_conn()
-    conn.execute(
-        """INSERT OR REPLACE INTO wiki_pages
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT INTO wiki_pages
            (cache_key, content_hash, domain_hash, stage_logic_version, wiki_json)
-           VALUES (?,?,?,?,?)""",
+           VALUES (%s,%s,%s,%s,%s)
+           ON CONFLICT (cache_key) DO UPDATE SET
+               content_hash = EXCLUDED.content_hash,
+               domain_hash = EXCLUDED.domain_hash,
+               stage_logic_version = EXCLUDED.stage_logic_version,
+               wiki_json = EXCLUDED.wiki_json""",
         (cache_key, content_hash, domain_hash, stage_logic_version,
          json.dumps(wiki_json, default=str)),
     )
@@ -192,9 +195,9 @@ def get_cached_parameters(cache_key: str) -> list | None:
     JSON parsed but isn't actually a list)."""
     init_db()
     conn = _get_conn()
-    row = conn.execute(
-        "SELECT params_json FROM parameters WHERE cache_key = ?", (cache_key,)
-    ).fetchone()
+    cur = conn.cursor()
+    cur.execute("SELECT params_json FROM parameters WHERE cache_key = %s", (cache_key,))
+    row = cur.fetchone()
     conn.close()
     if not row:
         return None
@@ -213,10 +216,14 @@ def save_cached_parameters(
     Success result — never for an LLMCallError path (see Story 2.2 Dev Notes)."""
     init_db()
     conn = _get_conn()
-    conn.execute(
-        """INSERT OR REPLACE INTO parameters
-           (cache_key, content_hash, stage_logic_version, params_json)
-           VALUES (?,?,?,?)""",
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT INTO parameters (cache_key, content_hash, stage_logic_version, params_json)
+           VALUES (%s,%s,%s,%s)
+           ON CONFLICT (cache_key) DO UPDATE SET
+               content_hash = EXCLUDED.content_hash,
+               stage_logic_version = EXCLUDED.stage_logic_version,
+               params_json = EXCLUDED.params_json""",
         (cache_key, content_hash, stage_logic_version, json.dumps(params_json, default=str)),
     )
     conn.commit()
@@ -231,9 +238,9 @@ def get_cached_docling_extraction(cache_key: str) -> dict | None:
     a binding requirement, not an optimization, at that cost."""
     init_db()
     conn = _get_conn()
-    row = conn.execute(
-        "SELECT extraction_json FROM docling_extractions WHERE cache_key = ?", (cache_key,)
-    ).fetchone()
+    cur = conn.cursor()
+    cur.execute("SELECT extraction_json FROM docling_extractions WHERE cache_key = %s", (cache_key,))
+    row = cur.fetchone()
     conn.close()
     if not row:
         return None
@@ -251,10 +258,14 @@ def save_cached_docling_extraction(
     structural extraction is domain-invariant, same as `parameters`."""
     init_db()
     conn = _get_conn()
-    conn.execute(
-        """INSERT OR REPLACE INTO docling_extractions
-           (cache_key, content_hash, stage_logic_version, extraction_json)
-           VALUES (?,?,?,?)""",
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT INTO docling_extractions (cache_key, content_hash, stage_logic_version, extraction_json)
+           VALUES (%s,%s,%s,%s)
+           ON CONFLICT (cache_key) DO UPDATE SET
+               content_hash = EXCLUDED.content_hash,
+               stage_logic_version = EXCLUDED.stage_logic_version,
+               extraction_json = EXCLUDED.extraction_json""",
         (cache_key, content_hash, stage_logic_version, json.dumps(extraction_json, default=str)),
     )
     conn.commit()
@@ -267,9 +278,9 @@ def get_cached_evidence_objects(cache_key: str) -> list | None:
     parsed but isn't actually a list). Clinova Phase 2, Story 2.2.1."""
     init_db()
     conn = _get_conn()
-    row = conn.execute(
-        "SELECT evidence_json FROM evidence_objects WHERE cache_key = ?", (cache_key,)
-    ).fetchone()
+    cur = conn.cursor()
+    cur.execute("SELECT evidence_json FROM evidence_objects WHERE cache_key = %s", (cache_key,))
+    row = cur.fetchone()
     conn.close()
     if not row:
         return None
@@ -288,10 +299,14 @@ def save_cached_evidence_objects(
     fields, not domain_config), same reasoning as `parameters`."""
     init_db()
     conn = _get_conn()
-    conn.execute(
-        """INSERT OR REPLACE INTO evidence_objects
-           (cache_key, content_hash, stage_logic_version, evidence_json)
-           VALUES (?,?,?,?)""",
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT INTO evidence_objects (cache_key, content_hash, stage_logic_version, evidence_json)
+           VALUES (%s,%s,%s,%s)
+           ON CONFLICT (cache_key) DO UPDATE SET
+               content_hash = EXCLUDED.content_hash,
+               stage_logic_version = EXCLUDED.stage_logic_version,
+               evidence_json = EXCLUDED.evidence_json""",
         (cache_key, content_hash, stage_logic_version, json.dumps(evidence_json, default=str)),
     )
     conn.commit()
@@ -304,9 +319,9 @@ def get_cached_reference(cache_key: str) -> dict | None:
     whose JSON parsed but isn't actually a dict)."""
     init_db()
     conn = _get_conn()
-    row = conn.execute(
-        'SELECT enriched_json FROM "references" WHERE cache_key = ?', (cache_key,)
-    ).fetchone()
+    cur = conn.cursor()
+    cur.execute('SELECT enriched_json FROM "references" WHERE cache_key = %s', (cache_key,))
+    row = cur.fetchone()
     conn.close()
     if not row:
         return None
@@ -326,10 +341,14 @@ def save_cached_reference(
     fallback (see Story 2.3 Dev Notes)."""
     init_db()
     conn = _get_conn()
-    conn.execute(
-        """INSERT OR REPLACE INTO "references"
-           (cache_key, doi_or_title_hash, stage_logic_version, enriched_json)
-           VALUES (?,?,?,?)""",
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT INTO "references" (cache_key, doi_or_title_hash, stage_logic_version, enriched_json)
+           VALUES (%s,%s,%s,%s)
+           ON CONFLICT (cache_key) DO UPDATE SET
+               doi_or_title_hash = EXCLUDED.doi_or_title_hash,
+               stage_logic_version = EXCLUDED.stage_logic_version,
+               enriched_json = EXCLUDED.enriched_json""",
         (cache_key, doi_or_title_hash, stage_logic_version, json.dumps(enriched_json, default=str)),
     )
     conn.commit()
@@ -349,9 +368,9 @@ def get_cached_gap_validation(cache_key: str) -> dict | None:
     degrade to a miss, not crash the caller)."""
     init_db()
     conn = _get_conn()
-    row = conn.execute(
-        "SELECT validation_json FROM gap_validations WHERE cache_key = ?", (cache_key,)
-    ).fetchone()
+    cur = conn.cursor()
+    cur.execute("SELECT validation_json FROM gap_validations WHERE cache_key = %s", (cache_key,))
+    row = cur.fetchone()
     conn.close()
     if not row:
         return None
@@ -373,22 +392,20 @@ def save_cached_gap_validation(
     Dev Notes)."""
     init_db()
     conn = _get_conn()
-    conn.execute(
-        """INSERT OR REPLACE INTO gap_validations
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT INTO gap_validations
            (cache_key, gap_hash, domain_hash, stage_logic_version, validation_json)
-           VALUES (?,?,?,?,?)""",
+           VALUES (%s,%s,%s,%s,%s)
+           ON CONFLICT (cache_key) DO UPDATE SET
+               gap_hash = EXCLUDED.gap_hash,
+               domain_hash = EXCLUDED.domain_hash,
+               stage_logic_version = EXCLUDED.stage_logic_version,
+               validation_json = EXCLUDED.validation_json""",
         (cache_key, gap_hash, domain_hash, stage_logic_version, json.dumps(validation_json, default=str)),
     )
     conn.commit()
     conn.close()
-
-
-def _compress(data: dict) -> bytes:
-    return gzip.compress(json.dumps(data, default=str).encode())
-
-
-def _decompress(blob: bytes) -> dict:
-    return json.loads(gzip.decompress(blob).decode())
 
 
 def _run_id(name: str, ts: str) -> str:
@@ -413,19 +430,26 @@ def save_run(
     proposals   = results.get("proposals", [])
     papers_list = results.get("papers", [])
 
-    # Pack everything into one blob
+    # Pack everything into one JSONB value -- native, no manual gzip (see
+    # migrations/0001_initial_schema.sql's comment for why).
     blob_data = {"results": results}
     if comp_results:
         blob_data["comp_results"] = comp_results
-    compressed = _compress(blob_data)
 
     conn = _get_conn()
     try:
-        conn.execute(
-            """INSERT OR REPLACE INTO runs
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO runs
                (id, name, created_at, domain, interest, n_papers, n_gaps,
-                n_proposals, has_comp, results_gz)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                n_proposals, has_comp, results_json)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (id) DO UPDATE SET
+                   name = EXCLUDED.name, created_at = EXCLUDED.created_at,
+                   domain = EXCLUDED.domain, interest = EXCLUDED.interest,
+                   n_papers = EXCLUDED.n_papers, n_gaps = EXCLUDED.n_gaps,
+                   n_proposals = EXCLUDED.n_proposals, has_comp = EXCLUDED.has_comp,
+                   results_json = EXCLUDED.results_json""",
             (
                 rid, name, ts,
                 context.get("domain", ""),
@@ -434,14 +458,17 @@ def save_run(
                 len(gaps),
                 len(proposals),
                 1 if comp_results else 0,
-                compressed,
+                Jsonb(json.loads(json.dumps(blob_data, default=str))),
             ),
         )
+        # Idempotent re-save (same run_id): clear any prior papers rows
+        # before re-inserting, same intent as SQLite's INSERT OR REPLACE.
+        cur.execute("DELETE FROM papers WHERE run_id = %s", (rid,))
         for p in papers_list:
             wiki  = p.get("wiki", {})
             title = wiki.get("title") or p.get("filename", "")
-            conn.execute(
-                "INSERT INTO papers (run_id, filename, title, tier) VALUES (?,?,?,?)",
+            cur.execute(
+                "INSERT INTO papers (run_id, filename, title, tier) VALUES (%s,%s,%s,%s)",
                 (rid, p.get("filename", ""), title, p.get("tier", 1)),
             )
         conn.commit()
@@ -455,12 +482,14 @@ def list_runs(limit: int = 20) -> list[dict]:
     """Return recent runs (metadata only, no blob)."""
     init_db()
     conn = _get_conn()
-    rows = conn.execute(
+    cur = conn.cursor()
+    cur.execute(
         """SELECT id, name, created_at, domain, n_papers, n_gaps,
                   n_proposals, has_comp
-           FROM runs ORDER BY created_at DESC LIMIT ?""",
+           FROM runs ORDER BY created_at DESC LIMIT %s""",
         (limit,),
-    ).fetchall()
+    )
+    rows = cur.fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -472,20 +501,25 @@ def load_run(run_id: str) -> dict:
     """
     init_db()
     conn = _get_conn()
-    row = conn.execute(
-        "SELECT results_gz FROM runs WHERE id = ?", (run_id,)
-    ).fetchone()
+    cur = conn.cursor()
+    cur.execute("SELECT results_json FROM runs WHERE id = %s", (run_id,))
+    row = cur.fetchone()
     conn.close()
     if not row:
         return {}
-    return _decompress(row["results_gz"])
+    return row["results_json"]
 
 
 def delete_run(run_id: str) -> None:
     init_db()
     conn = _get_conn()
-    conn.execute("DELETE FROM papers WHERE run_id = ?", (run_id,))
-    conn.execute("DELETE FROM runs    WHERE id     = ?", (run_id,))
+    cur = conn.cursor()
+    # Postgres enforces the papers.run_id FK (ON DELETE CASCADE) for real,
+    # unlike SQLite -- this manual delete is now defensive-but-redundant,
+    # kept for clarity/symmetry with the pre-migration behavior rather than
+    # relying solely on the cascade.
+    cur.execute("DELETE FROM papers WHERE run_id = %s", (run_id,))
+    cur.execute("DELETE FROM runs   WHERE id     = %s", (run_id,))
     conn.commit()
     conn.close()
 
@@ -493,8 +527,177 @@ def delete_run(run_id: str) -> None:
 def get_run_papers(run_id: str) -> list[dict]:
     init_db()
     conn = _get_conn()
-    rows = conn.execute(
-        "SELECT filename, title, tier FROM papers WHERE run_id = ?", (run_id,)
-    ).fetchall()
+    cur = conn.cursor()
+    cur.execute("SELECT filename, title, tier FROM papers WHERE run_id = %s", (run_id,))
+    rows = cur.fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ── Research Artifact Registry (Clinova Phase 4, Epic 4.1, FR-22) ───────────
+# Exact schema: migrations/0002_artifact_registry.sql /
+# 06-versioning-lineage-architecture.md §2. New this pass -- no pre-Phase-4
+# equivalent existed.
+
+_ARTIFACT_STATUS_ORDER = ["EXPERIMENTAL", "CANDIDATE", "CHAMPION", "ARCHIVED"]
+# Legal transitions per §2's lifecycle diagram: EXPERIMENTAL -> CANDIDATE ->
+# CHAMPION, and either CANDIDATE or CHAMPION -> ARCHIVED. No transition
+# skips a step forward (EXPERIMENTAL cannot jump straight to CHAMPION), and
+# nothing leaves ARCHIVED (terminal).
+_ARTIFACT_LEGAL_TRANSITIONS = {
+    "EXPERIMENTAL": {"CANDIDATE"},
+    "CANDIDATE": {"CHAMPION", "ARCHIVED"},
+    "CHAMPION": {"ARCHIVED"},
+    "ARCHIVED": set(),
+}
+
+
+class InvalidArtifactTransitionError(Exception):
+    """Raised by promote_artifact() on an illegal status transition -- the
+    lifecycle in 06-versioning-lineage-architecture.md §2 is a hard
+    constraint, not just documentation (mirrors pipeline/graph_quality.py's
+    "a degraded score must actually matter" discipline: an invalid
+    transition must be rejected, not silently applied)."""
+
+    def __init__(self, from_status: str, to_status: str):
+        self.from_status = from_status
+        self.to_status = to_status
+        super().__init__(f"Cannot transition artifact from {from_status} to {to_status}")
+
+
+def record_artifact(
+    artifact_id: str, artifact_type: str, artifact_version: str, project_id: str,
+    content_hash: str, schema_version: str = None, parent_artifact: str = None,
+    run_id: str = None, storage_uri: str = None, status: str = "EXPERIMENTAL",
+    metadata: dict = None,
+) -> str:
+    """Records one ResearchArtifact row. Idempotent per artifact_id (a
+    content-addressed SHA-256 id naturally re-saving identical content is a
+    no-op update, not a duplicate). Returns artifact_id."""
+    init_db()
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT INTO research_artifacts
+           (artifact_id, artifact_type, artifact_version, schema_version,
+            parent_artifact, project_id, run_id, content_hash, storage_uri,
+            status, metadata)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+           ON CONFLICT (artifact_id) DO UPDATE SET
+               artifact_version = EXCLUDED.artifact_version,
+               schema_version = EXCLUDED.schema_version,
+               parent_artifact = EXCLUDED.parent_artifact,
+               project_id = EXCLUDED.project_id, run_id = EXCLUDED.run_id,
+               content_hash = EXCLUDED.content_hash, storage_uri = EXCLUDED.storage_uri,
+               status = EXCLUDED.status, metadata = EXCLUDED.metadata""",
+        (artifact_id, artifact_type, artifact_version, schema_version,
+         parent_artifact, project_id, run_id, content_hash, storage_uri,
+         status, Jsonb(metadata) if metadata is not None else None),
+    )
+    conn.commit()
+    conn.close()
+    return artifact_id
+
+
+def get_artifact(artifact_id: str) -> dict | None:
+    init_db()
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM research_artifacts WHERE artifact_id = %s", (artifact_id,))
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def list_artifacts(artifact_type: str = None, project_id: str = None, status: str = None) -> list[dict]:
+    init_db()
+    conn = _get_conn()
+    cur = conn.cursor()
+    clauses, params = [], []
+    if artifact_type:
+        clauses.append("artifact_type = %s"); params.append(artifact_type)
+    if project_id:
+        clauses.append("project_id = %s"); params.append(project_id)
+    if status:
+        clauses.append("status = %s"); params.append(status)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    cur.execute(f"SELECT * FROM research_artifacts {where} ORDER BY created_at DESC", params)
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def promote_artifact(artifact_id: str, new_status: str) -> dict:
+    """Transitions an artifact's status per §2's lifecycle. Raises
+    InvalidArtifactTransitionError on an illegal transition (e.g.
+    EXPERIMENTAL -> CHAMPION directly) -- never silently applies it."""
+    if new_status not in _ARTIFACT_STATUS_ORDER:
+        raise ValueError(f"Unknown artifact status: {new_status}")
+    init_db()
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT status FROM research_artifacts WHERE artifact_id = %s", (artifact_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        raise ValueError(f"No artifact found with id {artifact_id}")
+    current = row["status"]
+    if new_status not in _ARTIFACT_LEGAL_TRANSITIONS.get(current, set()):
+        conn.close()
+        raise InvalidArtifactTransitionError(current, new_status)
+    cur.execute(
+        "UPDATE research_artifacts SET status = %s WHERE artifact_id = %s RETURNING *",
+        (new_status, artifact_id),
+    )
+    updated = cur.fetchone()
+    conn.commit()
+    conn.close()
+    return dict(updated)
+
+
+# ── Run Manifest (Clinova Phase 4, Epic 4.2, FR-23) ─────────────────────────
+# Exact field list: migrations/0003_run_manifest.sql /
+# 06-versioning-lineage-architecture.md §3. New this pass.
+
+def record_run_manifest(run_id: str, project_id: str, **fields) -> str:
+    """Records one immutable RunManifest row. `fields` accepts any subset
+    of the schema's optional columns (input_corpus_version, pipeline_version,
+    git_commit, parser_versions, reference_resolver_version,
+    embedding_model_version, reranker_version, graph_builder_version,
+    graph_version, prompt_bundle_version, model_bundle_version,
+    search_strategy_version, academic_search_date, search_providers,
+    output_artifacts, evaluation_metrics, warnings, quality_gate_results,
+    run_duration_seconds, token_usage) -- callers pass only what they
+    actually have; anything omitted is stored as NULL, never fabricated
+    (see module docstring on token_usage specifically)."""
+    init_db()
+    jsonb_fields = {"parser_versions", "search_providers", "output_artifacts",
+                     "evaluation_metrics", "warnings", "quality_gate_results", "token_usage"}
+    columns = ["run_id", "project_id"] + list(fields.keys())
+    values = [run_id, project_id] + [
+        Jsonb(v) if k in jsonb_fields and v is not None else v
+        for k, v in fields.items()
+    ]
+    placeholders = ", ".join(["%s"] * len(values))
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        f"""INSERT INTO run_manifests ({', '.join(columns)})
+            VALUES ({placeholders})
+            ON CONFLICT (run_id) DO UPDATE SET
+                {', '.join(f'{c} = EXCLUDED.{c}' for c in columns if c != 'run_id')}""",
+        values,
+    )
+    conn.commit()
+    conn.close()
+    return run_id
+
+
+def get_run_manifest(run_id: str) -> dict | None:
+    init_db()
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM run_manifests WHERE run_id = %s", (run_id,))
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None

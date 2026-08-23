@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import utils.database as db
 from pipeline import academic_search
 from pipeline.academic_search import _search_semantic_scholar, _search_arxiv, validate_gaps
+from tests.pg_test_utils import new_test_schema, drop_test_schema
 
 
 class _FakeResponse:
@@ -113,17 +114,14 @@ class ArxivResilienceTests(unittest.TestCase):
 
 class ValidateGapsApiKeyThreadingTests(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = Path(tempfile.mkdtemp())
-        self.dir_patcher = patch.object(db, "DB_DIR", self.tmpdir)
-        self.path_patcher = patch.object(db, "DB_PATH", self.tmpdir / "test.db")
-        self.dir_patcher.start()
-        self.path_patcher.start()
+        self.schema = new_test_schema()
+        self.patcher = patch.object(db, "_SCHEMA", self.schema)
+        self.patcher.start()
         db.init_db()
 
     def tearDown(self):
-        self.dir_patcher.stop()
-        self.path_patcher.stop()
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        self.patcher.stop()
+        drop_test_schema(self.schema)
 
     def test_ss_api_key_is_passed_through_to_search(self):
         client = MagicMock()

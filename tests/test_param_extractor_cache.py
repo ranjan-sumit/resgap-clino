@@ -17,6 +17,7 @@ import utils.database as db
 from utils.azure_client import Success, Failure, ErrorInfo
 from pipeline import param_extractor
 from pipeline.param_extractor import extract_parameters
+from tests.pg_test_utils import new_test_schema, drop_test_schema
 
 
 def _page(title="Paper One", key_findings=("finding a",)):
@@ -33,17 +34,14 @@ def _paper(filename="paper.pdf"):
 
 class ExtractParametersCacheTests(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = Path(tempfile.mkdtemp())
-        self.dir_patcher = patch.object(db, "DB_DIR", self.tmpdir)
-        self.path_patcher = patch.object(db, "DB_PATH", self.tmpdir / "test.db")
-        self.dir_patcher.start()
-        self.path_patcher.start()
+        self.schema = new_test_schema()
+        self.patcher = patch.object(db, "_SCHEMA", self.schema)
+        self.patcher.start()
         db.init_db()
 
     def tearDown(self):
-        self.dir_patcher.stop()
-        self.path_patcher.stop()
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        self.patcher.stop()
+        drop_test_schema(self.schema)
 
     def test_cache_miss_then_hit_skips_second_llm_call(self):
         client = MagicMock()

@@ -1,12 +1,15 @@
 """
 Tests for Story 2.1: the shared compute_cache_key() helper (AD-3) and the
-wiki_pages cache table's read/write functions in utils/database.py.
+cache tables' read/write functions in utils/database.py. Runs against a
+real, isolated Postgres schema per test class (see tests/pg_test_utils.py)
+-- Epic 4.1 (Phase 4) replaced the SQLite backend entirely, and the
+pre-migration version of this file always tested against a real (if
+temporary SQLite-file) database rather than mocks, so this keeps that same
+real-database-testing convention, just on the new backend.
 """
 import hashlib
 import json
-import shutil
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -14,6 +17,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import utils.database as db
+from tests.pg_test_utils import new_test_schema, drop_test_schema
 
 
 class ComputeCacheKeyTests(unittest.TestCase):
@@ -66,20 +70,22 @@ class ComputeCacheKeyTests(unittest.TestCase):
         self.assertEqual(content_hash, hashlib.sha256(b"").hexdigest())
 
 
-class WikiPagesCacheTests(unittest.TestCase):
+class _IsolatedSchemaTestCase(unittest.TestCase):
+    """Shared setUp/tearDown for every cache-table test class below: a
+    fresh Postgres schema per test class, dropped afterward."""
+
     def setUp(self):
-        self.tmpdir = Path(tempfile.mkdtemp())
-        self.dir_patcher = patch.object(db, "DB_DIR", self.tmpdir)
-        self.path_patcher = patch.object(db, "DB_PATH", self.tmpdir / "test.db")
-        self.dir_patcher.start()
-        self.path_patcher.start()
+        self.schema = new_test_schema()
+        self.patcher = patch.object(db, "_SCHEMA", self.schema)
+        self.patcher.start()
         db.init_db()
 
     def tearDown(self):
-        self.dir_patcher.stop()
-        self.path_patcher.stop()
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        self.patcher.stop()
+        drop_test_schema(self.schema)
 
+
+class WikiPagesCacheTests(_IsolatedSchemaTestCase):
     def test_cache_miss_returns_none(self):
         self.assertIsNone(db.get_cached_wiki_page("does-not-exist"))
 
@@ -98,9 +104,10 @@ class WikiPagesCacheTests(unittest.TestCase):
         # A storage-layer problem (partial write, manual edit, future
         # migration bug) must degrade to "cache miss", not crash the caller.
         conn = db._get_conn()
-        conn.execute(
+        cur = conn.cursor()
+        cur.execute(
             "INSERT INTO wiki_pages (cache_key, content_hash, domain_hash, "
-            "stage_logic_version, wiki_json) VALUES (?,?,?,?,?)",
+            "stage_logic_version, wiki_json) VALUES (%s,%s,%s,%s,%s)",
             ("corrupt-key", "ch", "dh", 1, "{not valid json"),
         )
         conn.commit()
@@ -108,20 +115,7 @@ class WikiPagesCacheTests(unittest.TestCase):
         self.assertIsNone(db.get_cached_wiki_page("corrupt-key"))
 
 
-class ParametersCacheTests(unittest.TestCase):
-    def setUp(self):
-        self.tmpdir = Path(tempfile.mkdtemp())
-        self.dir_patcher = patch.object(db, "DB_DIR", self.tmpdir)
-        self.path_patcher = patch.object(db, "DB_PATH", self.tmpdir / "test.db")
-        self.dir_patcher.start()
-        self.path_patcher.start()
-        db.init_db()
-
-    def tearDown(self):
-        self.dir_patcher.stop()
-        self.path_patcher.stop()
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
+class ParametersCacheTests(_IsolatedSchemaTestCase):
     def test_cache_miss_returns_none(self):
         self.assertIsNone(db.get_cached_parameters("does-not-exist"))
 
@@ -139,9 +133,10 @@ class ParametersCacheTests(unittest.TestCase):
 
     def test_corrupted_row_is_treated_as_a_miss_not_a_crash(self):
         conn = db._get_conn()
-        conn.execute(
+        cur = conn.cursor()
+        cur.execute(
             "INSERT INTO parameters (cache_key, content_hash, stage_logic_version, params_json) "
-            "VALUES (?,?,?,?)",
+            "VALUES (%s,%s,%s,%s)",
             ("corrupt-key", "ch", 1, "[not valid json"),
         )
         conn.commit()
@@ -149,20 +144,7 @@ class ParametersCacheTests(unittest.TestCase):
         self.assertIsNone(db.get_cached_parameters("corrupt-key"))
 
 
-class ReferencesCacheTests(unittest.TestCase):
-    def setUp(self):
-        self.tmpdir = Path(tempfile.mkdtemp())
-        self.dir_patcher = patch.object(db, "DB_DIR", self.tmpdir)
-        self.path_patcher = patch.object(db, "DB_PATH", self.tmpdir / "test.db")
-        self.dir_patcher.start()
-        self.path_patcher.start()
-        db.init_db()
-
-    def tearDown(self):
-        self.dir_patcher.stop()
-        self.path_patcher.stop()
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
+class ReferencesCacheTests(_IsolatedSchemaTestCase):
     def test_cache_miss_returns_none(self):
         self.assertIsNone(db.get_cached_reference("does-not-exist"))
 
@@ -180,9 +162,10 @@ class ReferencesCacheTests(unittest.TestCase):
 
     def test_corrupted_row_is_treated_as_a_miss_not_a_crash(self):
         conn = db._get_conn()
-        conn.execute(
+        cur = conn.cursor()
+        cur.execute(
             'INSERT INTO "references" (cache_key, doi_or_title_hash, stage_logic_version, enriched_json) '
-            "VALUES (?,?,?,?)",
+            "VALUES (%s,%s,%s,%s)",
             ("corrupt-key", "ch", 1, "{not valid json"),
         )
         conn.commit()
@@ -191,9 +174,10 @@ class ReferencesCacheTests(unittest.TestCase):
 
     def test_null_row_is_treated_as_a_miss_not_a_crash(self):
         conn = db._get_conn()
-        conn.execute(
+        cur = conn.cursor()
+        cur.execute(
             'INSERT INTO "references" (cache_key, doi_or_title_hash, stage_logic_version, enriched_json) '
-            "VALUES (?,?,?,?)",
+            "VALUES (%s,%s,%s,%s)",
             ("null-key", "ch", 1, None),
         )
         conn.commit()
@@ -202,9 +186,10 @@ class ReferencesCacheTests(unittest.TestCase):
 
     def test_non_dict_json_is_treated_as_a_miss_not_a_crash(self):
         conn = db._get_conn()
-        conn.execute(
+        cur = conn.cursor()
+        cur.execute(
             'INSERT INTO "references" (cache_key, doi_or_title_hash, stage_logic_version, enriched_json) '
-            "VALUES (?,?,?,?)",
+            "VALUES (%s,%s,%s,%s)",
             ("list-key", "ch", 1, "[1, 2, 3]"),
         )
         conn.commit()
@@ -212,20 +197,7 @@ class ReferencesCacheTests(unittest.TestCase):
         self.assertIsNone(db.get_cached_reference("list-key"))
 
 
-class GapValidationsCacheTests(unittest.TestCase):
-    def setUp(self):
-        self.tmpdir = Path(tempfile.mkdtemp())
-        self.dir_patcher = patch.object(db, "DB_DIR", self.tmpdir)
-        self.path_patcher = patch.object(db, "DB_PATH", self.tmpdir / "test.db")
-        self.dir_patcher.start()
-        self.path_patcher.start()
-        db.init_db()
-
-    def tearDown(self):
-        self.dir_patcher.stop()
-        self.path_patcher.stop()
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
+class GapValidationsCacheTests(_IsolatedSchemaTestCase):
     def test_cache_miss_returns_none(self):
         self.assertIsNone(db.get_cached_gap_validation("does-not-exist"))
 
@@ -245,9 +217,10 @@ class GapValidationsCacheTests(unittest.TestCase):
 
     def test_row_missing_a_required_key_is_treated_as_a_miss_not_a_crash(self):
         conn = db._get_conn()
-        conn.execute(
+        cur = conn.cursor()
+        cur.execute(
             "INSERT INTO gap_validations (cache_key, gap_hash, domain_hash, "
-            "stage_logic_version, validation_json) VALUES (?,?,?,?,?)",
+            "stage_logic_version, validation_json) VALUES (%s,%s,%s,%s,%s)",
             ("incomplete-key", "gh", "dh", 1, json.dumps({"validation_status": "open"})),
         )
         conn.commit()
@@ -256,9 +229,10 @@ class GapValidationsCacheTests(unittest.TestCase):
 
     def test_corrupted_row_is_treated_as_a_miss_not_a_crash(self):
         conn = db._get_conn()
-        conn.execute(
+        cur = conn.cursor()
+        cur.execute(
             "INSERT INTO gap_validations (cache_key, gap_hash, domain_hash, "
-            "stage_logic_version, validation_json) VALUES (?,?,?,?,?)",
+            "stage_logic_version, validation_json) VALUES (%s,%s,%s,%s,%s)",
             ("corrupt-key", "gh", "dh", 1, "{not valid json"),
         )
         conn.commit()
@@ -267,9 +241,10 @@ class GapValidationsCacheTests(unittest.TestCase):
 
     def test_null_row_is_treated_as_a_miss_not_a_crash(self):
         conn = db._get_conn()
-        conn.execute(
+        cur = conn.cursor()
+        cur.execute(
             "INSERT INTO gap_validations (cache_key, gap_hash, domain_hash, "
-            "stage_logic_version, validation_json) VALUES (?,?,?,?,?)",
+            "stage_logic_version, validation_json) VALUES (%s,%s,%s,%s,%s)",
             ("null-key", "gh", "dh", 1, None),
         )
         conn.commit()
@@ -278,9 +253,10 @@ class GapValidationsCacheTests(unittest.TestCase):
 
     def test_non_dict_json_is_treated_as_a_miss_not_a_crash(self):
         conn = db._get_conn()
-        conn.execute(
+        cur = conn.cursor()
+        cur.execute(
             "INSERT INTO gap_validations (cache_key, gap_hash, domain_hash, "
-            "stage_logic_version, validation_json) VALUES (?,?,?,?,?)",
+            "stage_logic_version, validation_json) VALUES (%s,%s,%s,%s,%s)",
             ("list-key", "gh", "dh", 1, "[1, 2, 3]"),
         )
         conn.commit()
