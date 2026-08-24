@@ -1,0 +1,28 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Clinova Phase 5: desktop-first, fixed light theme (per
+   02-ux-specification.md §1's "clean, clinical, calm" design intent --
+   no automatic dark-mode switching for this premium research
+   instrument). Min-width matches the plan's ≥1280px desktop-only scope. */
+html,
+body {
+  height: 100%;
+  background: theme("colors.background");
+  color: theme("colors.neutral");
+}
+
+body {
+  min-width: 1280px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+a {
+  color: inherit;
+}

@@ -494,6 +494,25 @@ def list_runs(limit: int = 20) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_run_row(run_id: str) -> dict | None:
+    """Clinova Phase 5, Epic 5.1: the single-run counterpart to
+    list_runs() -- load_run() only returns the results_json blob, not the
+    row's own name/created_at/domain columns, and apps/api's Run Detail
+    endpoint needs both. Additive; no existing caller's signature changed."""
+    init_db()
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT id, name, created_at, domain, n_papers, n_gaps,
+                  n_proposals, has_comp
+           FROM runs WHERE id = %s""",
+        (run_id,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def load_run(run_id: str) -> dict:
     """
     Load full results for one run.

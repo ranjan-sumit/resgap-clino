@@ -3,3 +3,8 @@
 # stays the exact baseline the original ResGap app depends on.
 -r requirements.txt
 docling>=2.121.0
+
+# Phase 5, Epic 5.1 (apps/api) -- FastAPI thin wrapper over pipeline/utils.
+# pydantic arrives transitively with fastapi; not pinned separately.
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0

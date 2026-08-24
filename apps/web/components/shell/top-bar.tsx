@@ -1,0 +1,79 @@
+"use client";
+
+import { Bell, Search, User } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import type { ProjectSummary } from "@/lib/api";
+
+export function TopBar({ projects }: { projects: ProjectSummary[] }) {
+  return (
+    <header className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-white px-6">
+      <div className="flex items-center gap-4">
+        {projects.length > 0 ? (
+          <Select defaultValue={projects[0].project_id}>
+            <SelectTrigger className="h-8 w-[220px] text-sm">
+              <SelectValue placeholder="Select project" />
+            </SelectTrigger>
+            <SelectContent>
+              {projects.map((p) => (
+                <SelectItem key={p.project_id} value={p.project_id}>
+                  {p.label} ({p.n_runs} runs)
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ) : (
+          <span className="text-sm italic text-neutral">No projects yet</span>
+        )}
+        <span className="text-neutral/40">|</span>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="cursor-help font-mono text-xs italic text-neutral">Corpus: Not recorded</span>
+          </TooltipTrigger>
+          <TooltipContent>This pipeline does not version its input corpus yet.</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="cursor-help font-mono text-xs italic text-neutral">Pipeline: Not recorded</span>
+          </TooltipTrigger>
+          <TooltipContent>No pipeline version constant is recorded by app.py&apos;s manifest write.</TooltipContent>
+        </Tooltip>
+      </div>
+
+      <div className="flex items-center gap-3">
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="flex h-8 w-8 cursor-not-allowed items-center justify-center rounded-md text-neutral/40">
+              <Search className="h-4 w-4" aria-hidden />
+            </span>
+          </TooltipTrigger>
+          <TooltipContent>Search arrives with the Corpus and Evidence screens.</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="flex h-8 w-8 cursor-not-allowed items-center justify-center rounded-md text-neutral/40">
+              <Bell className="h-4 w-4" aria-hidden />
+            </span>
+          </TooltipTrigger>
+          <TooltipContent>Notifications are not built in this slice yet.</TooltipContent>
+        </Tooltip>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button className="flex h-8 w-8 items-center justify-center rounded-full bg-secondary text-clinova-deep">
+              <User className="h-4 w-4" aria-hidden />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem disabled>Local workspace — authentication arrives in Phase 6</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    </header>
+  );
+}
