@@ -8,6 +8,7 @@ import { StatusBadge } from "@/components/data/status-badge";
 import { VersionFieldView } from "@/components/data/version-field";
 import { EmptyState } from "@/components/data/empty-state";
 import { ErrorState } from "@/components/data/error-state";
+import { PageHero } from "@/components/shell/page-hero";
 import { formatDuration } from "@/lib/format";
 import { api, ApiError, type RunManifestView } from "@/lib/api";
 
@@ -16,7 +17,7 @@ function ManifestPanel({ manifest }: { manifest: RunManifestView }) {
     <div className="space-y-8">
       <section>
         <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-neutral">Versions</h2>
-        <div className="max-w-md divide-y divide-border rounded-lg border border-border bg-card px-4 shadow-card">
+        <div className="max-w-md divide-y divide-border/60 rounded-lg border border-border/60 bg-card px-4 shadow-card">
           {manifest.versions.map((v) => (
             <VersionFieldView key={v.key} field={v} />
           ))}
@@ -35,7 +36,7 @@ function ManifestPanel({ manifest }: { manifest: RunManifestView }) {
       <section>
         <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-neutral">Token usage</h2>
         {manifest.token_usage.recorded ? (
-          <div className="rounded-lg border border-border bg-card p-4 shadow-card">
+          <div className="rounded-lg border border-border/60 bg-card p-4 shadow-card transition-all hover:-translate-y-0.5 hover:shadow-card-hover">
             <p className="font-display text-2xl text-clinova-deep">
               {manifest.token_usage.total?.toLocaleString()} tokens
             </p>
@@ -109,23 +110,33 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
   return (
     <div className="mx-auto max-w-6xl space-y-6">
       <div>
-        <Link href="/runs" className="text-sm text-neutral hover:underline">
+        <Link href="/runs" className="text-sm text-neutral hover:text-clinova-deep hover:underline">
           &larr; All runs
         </Link>
-        <div className="mt-2 flex flex-wrap items-center gap-3">
-          <h1 className="font-display text-3xl text-clinova-deep">{run.name}</h1>
-          <StatusBadge chip={run.status} />
-        </div>
-        <p className="mt-1 font-mono text-xs text-neutral">
-          {run.run_id} · {run.created_at}
-        </p>
-        <Link
-          href={`/runs/${run.run_id}/lineage`}
-          className="mt-2 inline-block text-sm text-clinova-deep hover:underline"
-        >
-          View lineage &rarr;
-        </Link>
       </div>
+
+      <PageHero
+        eyebrow="Run Detail"
+        title={
+          <span className="flex flex-wrap items-center gap-3">
+            {run.name}
+            <StatusBadge chip={run.status} onDark />
+          </span>
+        }
+        description={
+          <span className="font-mono text-xs text-white/60">
+            {run.run_id} · {run.created_at}
+          </span>
+        }
+        actions={
+          <Link
+            href={`/runs/${run.run_id}/lineage`}
+            className="rounded-md border border-white/20 bg-white/5 px-3 py-1.5 text-sm text-white hover:bg-white/10"
+          >
+            View lineage &rarr;
+          </Link>
+        }
+      />
 
       {run.gate_blocked && (
         <Alert className="border-semantic-critical/30 bg-semantic-critical/5">
@@ -181,7 +192,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
           </section>
           <section>
             <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-neutral">Versions</h2>
-            <div className="max-w-md divide-y divide-border rounded-lg border border-border bg-card px-4 shadow-card">
+            <div className="max-w-md divide-y divide-border/60 rounded-lg border border-border/60 bg-card px-4 shadow-card">
               {run.versions.map((v) => (
                 <VersionFieldView key={v.key} field={v} />
               ))}
@@ -209,7 +220,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
           ) : (
             <ol className="space-y-3 border-l border-border pl-4">
               {run.trace.map((t) => (
-                <li key={t.index} className="relative rounded-lg border border-border bg-card p-4 shadow-card">
+                <li key={t.index} className="relative rounded-lg border border-border/60 bg-card p-4 shadow-card transition-all hover:-translate-y-0.5 hover:shadow-card-hover">
                   <span className="absolute -left-[21px] top-5 h-2 w-2 rounded-full bg-clinova-blue" />
                   <div className="flex items-center justify-between gap-3">
                     <p className="font-medium text-clinova-deep">{t.stage}</p>
@@ -233,7 +244,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
           ) : (
             <ul className="space-y-3">
               {run.gaps.map((g, i) => (
-                <li key={g.gap_id ?? i} className="rounded-lg border border-border bg-card p-4 shadow-card">
+                <li key={g.gap_id ?? i} className="rounded-lg border border-border/60 bg-card p-4 shadow-card transition-all hover:-translate-y-0.5 hover:shadow-card-hover">
                   <p className="font-medium text-clinova-deep">{g.title}</p>
                   <div className="mt-2 flex flex-wrap items-center gap-2">
                     <StatusBadge chip={g.validation} size="sm" />
@@ -254,7 +265,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
           ) : (
             <ul className="space-y-2">
               {run.papers.map((p, i) => (
-                <li key={i} className="rounded-lg border border-border bg-card p-4 shadow-card">
+                <li key={i} className="rounded-lg border border-border/60 bg-card p-4 shadow-card transition-all hover:-translate-y-0.5 hover:shadow-card-hover">
                   <p className="font-medium text-clinova-deep">{p.title ?? p.filename}</p>
                   <p className="mt-1 font-mono text-xs text-neutral">
                     {p.filename} · {p.char_count.toLocaleString()} chars

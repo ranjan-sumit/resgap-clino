@@ -1,5 +1,6 @@
 import { RunsTable } from "@/components/runs/runs-table";
 import { EmptyState } from "@/components/data/empty-state";
+import { PageHero } from "@/components/shell/page-hero";
 import { api } from "@/lib/api";
 
 export default async function RunsPage() {
@@ -7,10 +8,11 @@ export default async function RunsPage() {
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
-      <div>
-        <h1 className="font-display text-3xl text-clinova-deep">Runs</h1>
-        <p className="mt-1 text-sm text-neutral">Every pipeline run recorded in the registry, newest first.</p>
-      </div>
+      <PageHero
+        eyebrow="Engineering"
+        title="Runs"
+        description="Every pipeline run recorded in the registry, newest first."
+      />
 
       {runs.length === 0 ? (
         <EmptyState

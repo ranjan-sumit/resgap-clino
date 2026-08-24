@@ -96,6 +96,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/runs/{run_id}/promote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Promote Run
+         * @description Promotes this run's own 'pipeline'-type artifact to `to_status`.
+         *     Real write path: rejects an illegal lifecycle transition (400) and a
+         *     run with no registered pipeline artifact (404) rather than silently
+         *     no-op'ing -- see Compare's PromotionGateView.can_evaluate for the
+         *     read-side gate a UI button should check before calling this.
+         */
+        post: operations["promote_run_api_runs__run_id__promote_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/config/branding": {
         parameters: {
             query?: never;
@@ -198,6 +222,108 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/projects/{project_id}/corpus": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Project Corpus */
+        get: operations["project_corpus_api_projects__project_id__corpus_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/projects/{project_id}/evidence": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Project Evidence */
+        get: operations["project_evidence_api_projects__project_id__evidence_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/projects/{project_id}/graph": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Project Graph */
+        get: operations["project_graph_api_projects__project_id__graph_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/projects/{project_id}/challenger": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Project Challenger */
+        get: operations["project_challenger_api_projects__project_id__challenger_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/projects/{project_id}/council": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Project Council */
+        get: operations["project_council_api_projects__project_id__council_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/artifacts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Artifacts */
+        get: operations["get_artifacts_api_artifacts_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -215,6 +341,74 @@ export interface components {
             /** Href */
             href: string;
         };
+        /** ArtifactListResponse */
+        ArtifactListResponse: {
+            /** Artifacts */
+            artifacts: components["schemas"]["ArtifactView"][];
+            /** Empty Reason */
+            empty_reason?: string | null;
+        };
+        /** ArtifactView */
+        ArtifactView: {
+            /** Artifact Id */
+            artifact_id: string;
+            /** Artifact Type */
+            artifact_type: string;
+            /** Artifact Version */
+            artifact_version: string;
+            status: components["schemas"]["StatusChip"];
+            /** Project Id */
+            project_id: string;
+            /** Run Id */
+            run_id: string | null;
+            /** Parent Artifact */
+            parent_artifact: string | null;
+            /** Created At */
+            created_at: string;
+            /** Next Legal Statuses */
+            next_legal_statuses: ("EXPERIMENTAL" | "CANDIDATE" | "CHAMPION" | "ARCHIVED")[];
+        };
+        /** ChallengeFunnelView */
+        ChallengeFunnelView: {
+            /** Query Families */
+            query_families: string[];
+            /** Providers Queried */
+            providers_queried: string[];
+            /** Provider Success */
+            provider_success: {
+                [key: string]: boolean;
+            };
+            /** Candidate Count */
+            candidate_count: number;
+            /** Post Dedup Count */
+            post_dedup_count: number;
+            /** Post Metadata Filter Count */
+            post_metadata_filter_count: number;
+            /** Post Rerank Count */
+            post_rerank_count: number;
+            /** Rerank Used */
+            rerank_used: boolean;
+            /** Search Coverage Score */
+            search_coverage_score: number | null;
+            /** Relevant Count */
+            relevant_count: number;
+            /** Contradiction Count */
+            contradiction_count: number;
+            /** Converging Count */
+            converging_count: number;
+            /** Judged Candidates */
+            judged_candidates: components["schemas"]["JudgedCandidateView"][];
+        };
+        /** ChallengerView */
+        ChallengerView: {
+            run: components["schemas"]["RunRef"] | null;
+            /** Basis Note */
+            basis_note: string;
+            /** Gaps */
+            gaps: components["schemas"]["GapChallengeView"][];
+            /** Empty Reason */
+            empty_reason?: string | null;
+        };
         /** ConfidenceChange */
         ConfidenceChange: {
             /** Title */
@@ -225,6 +419,39 @@ export interface components {
             confidence_candidate: string | null;
             /** Explanation */
             explanation: string;
+        };
+        /** CorpusView */
+        CorpusView: {
+            /** Project Id */
+            project_id: string;
+            basis_run: components["schemas"]["RunRef"] | null;
+            /** Basis Note */
+            basis_note: string;
+            /** Papers */
+            papers: components["schemas"]["PaperRef"][];
+            corpus_confidence: components["schemas"]["Measure"];
+            quality_gate: components["schemas"]["StatusChip"] | null;
+            /** Quality Gate Reasons */
+            quality_gate_reasons: string[];
+            /** Reference Funnel */
+            reference_funnel: components["schemas"]["ReferenceFunnelStage"][];
+            /** Doi Resolution Rate */
+            doi_resolution_rate: number | null;
+            /** Abstract Availability */
+            abstract_availability: number | null;
+            /** Empty Reason */
+            empty_reason?: string | null;
+        };
+        /** CouncilAgentResponse */
+        CouncilAgentResponse: {
+            /** Agent */
+            agent: string;
+            /** Role */
+            role: string;
+            /** Model */
+            model: string;
+            /** Response */
+            response: string;
         };
         /** CountStat */
         CountStat: {
@@ -280,6 +507,23 @@ export interface components {
             /** Delta */
             delta: number;
         };
+        /** EvidenceItemView */
+        EvidenceItemView: {
+            /** Evidence Id */
+            evidence_id: string;
+            /** Evidence Type */
+            evidence_type: string;
+            /** Paper Filename */
+            paper_filename: string;
+            /** Text */
+            text: string;
+            /** Page */
+            page: number | null;
+            /** Section */
+            section: string | null;
+            /** Confidence */
+            confidence: string;
+        };
         /** EvidenceRef */
         EvidenceRef: {
             /** Evidence Id */
@@ -294,6 +538,21 @@ export interface components {
             section: string | null;
             /** Confidence */
             confidence: string | null;
+        };
+        /** EvidenceView */
+        EvidenceView: {
+            run: components["schemas"]["RunRef"] | null;
+            /** Basis Note */
+            basis_note: string;
+            /** Items */
+            items: components["schemas"]["EvidenceItemView"][];
+            /** By Type Counts */
+            by_type_counts: {
+                [key: string]: number;
+            };
+            confidence: components["schemas"]["Measure"];
+            /** Empty Reason */
+            empty_reason?: string | null;
         };
         /** GapChain */
         GapChain: {
@@ -317,6 +576,19 @@ export interface components {
             unresolved: components["schemas"]["UnresolvedRefs"];
             /** Unresolved Note */
             unresolved_note: string | null;
+        };
+        /** GapChallengeView */
+        GapChallengeView: {
+            /** Gap Id */
+            gap_id: string | null;
+            /** Title */
+            title: string;
+            /** Challenger State */
+            challenger_state: string | null;
+            status: components["schemas"]["StatusChip"];
+            /** Reason */
+            reason: string | null;
+            funnel: components["schemas"]["ChallengeFunnelView"] | null;
         };
         /** GapDiff */
         GapDiff: {
@@ -359,6 +631,19 @@ export interface components {
             challenge: components["schemas"]["StatusChip"];
             confidence: components["schemas"]["Measure"];
         };
+        /** GraphCommunityView */
+        GraphCommunityView: {
+            /** Id */
+            id: string;
+            /** Theme */
+            theme: string;
+            /** Entities */
+            entities: string[];
+            /** Summary */
+            summary: string;
+            /** Gap Signal */
+            gap_signal: string | null;
+        };
         /** GraphDiff */
         GraphDiff: {
             /** Entities Added */
@@ -374,6 +659,49 @@ export interface components {
             /** Relationships Common Count */
             relationships_common_count: number;
         };
+        /** GraphEntityView */
+        GraphEntityView: {
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /** Type */
+            type: string;
+            /** Papers */
+            papers: string[];
+            /** Importance */
+            importance: string;
+        };
+        /** GraphRelationshipView */
+        GraphRelationshipView: {
+            /** Source */
+            source: string;
+            /** Target */
+            target: string;
+            /** Relation */
+            relation: string;
+            /** Paper */
+            paper: string | null;
+            /** Evidence */
+            evidence: string | null;
+        };
+        /** GraphView */
+        GraphView: {
+            run: components["schemas"]["RunRef"] | null;
+            /** Basis Note */
+            basis_note: string;
+            /** Entities */
+            entities: components["schemas"]["GraphEntityView"][];
+            /** Relationships */
+            relationships: components["schemas"]["GraphRelationshipView"][];
+            /** Communities */
+            communities: components["schemas"]["GraphCommunityView"][];
+            /** Counts */
+            counts: components["schemas"]["CountStat"][];
+            confidence: components["schemas"]["Measure"];
+            /** Empty Reason */
+            empty_reason?: string | null;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -387,6 +715,19 @@ export interface components {
             database: string;
             /** Git Commit */
             git_commit: string | null;
+        };
+        /** JudgedCandidateView */
+        JudgedCandidateView: {
+            /** Title */
+            title: string;
+            /** Relevant */
+            relevant: boolean;
+            /** Relevance Type */
+            relevance_type: string | null;
+            /** Contradicts Gap */
+            contradicts_gap: boolean;
+            /** Confidence */
+            confidence: string | null;
         };
         /** LineageEdge */
         LineageEdge: {
@@ -485,6 +826,38 @@ export interface components {
             /** Tolerance */
             tolerance: number | null;
         };
+        /** ModelSelectionView */
+        ModelSelectionView: {
+            /** Selected Model */
+            selected_model: string | null;
+            /** Rationale */
+            rationale: string | null;
+            /** Confidence */
+            confidence: string | null;
+        };
+        /** NovelFindingView */
+        NovelFindingView: {
+            /** Title */
+            title: string;
+            /** Claim */
+            claim: string;
+            /** What Makes It New */
+            what_makes_it_new: string;
+            /** Evidence Chain */
+            evidence_chain: string[];
+            /** Mechanism */
+            mechanism: string;
+            /** Validation Study */
+            validation_study: string;
+            /** Clinical Opportunity */
+            clinical_opportunity: string;
+            /** Commercial Opportunity */
+            commercial_opportunity: string;
+            /** Confidence */
+            confidence: string;
+            /** Confidence Reasoning */
+            confidence_reasoning: string;
+        };
         /** PaperRef */
         PaperRef: {
             /** Filename */
@@ -560,6 +933,44 @@ export interface components {
             addresses_gap_id: string | null;
             /** Addresses Gap Id Resolution */
             addresses_gap_id_resolution: string | null;
+            /** Problem Statement */
+            problem_statement?: string | null;
+            /** Methodology */
+            methodology?: string | null;
+            /** Novelty */
+            novelty?: string | null;
+            /**
+             * Builds On
+             * @default []
+             */
+            builds_on: string[];
+            /** Expected Contribution */
+            expected_contribution?: string | null;
+            /**
+             * Suggested Experiments
+             * @default []
+             */
+            suggested_experiments: string[];
+            /**
+             * Potential Datasets
+             * @default []
+             */
+            potential_datasets: string[];
+            /** Confidence */
+            confidence?: string | null;
+            /** Effort Estimate */
+            effort_estimate?: string | null;
+            /** Risk */
+            risk?: string | null;
+        };
+        /** ReferenceFunnelStage */
+        ReferenceFunnelStage: {
+            /** Key */
+            key: string;
+            /** Label */
+            label: string;
+            /** Count */
+            count: number;
         };
         /** RelationshipRef */
         RelationshipRef: {
@@ -573,6 +984,36 @@ export interface components {
             relation: string | null;
             /** Paper */
             paper: string | null;
+        };
+        /** ResearchCouncilView */
+        ResearchCouncilView: {
+            run: components["schemas"]["RunRef"] | null;
+            /** Basis Note */
+            basis_note: string;
+            /** Params Summary */
+            params_summary: components["schemas"]["CountStat"][];
+            model_selection: components["schemas"]["ModelSelectionView"] | null;
+            novel_finding: components["schemas"]["NovelFindingView"] | null;
+            /** Clinical Insights */
+            clinical_insights: string[];
+            /** Research Insights */
+            research_insights: string[];
+            /** Key Uncertainties */
+            key_uncertainties: string[];
+            /** Actionable Next Steps */
+            actionable_next_steps: string[];
+            /** Limitations */
+            limitations: string[];
+            /** Overall Confidence */
+            overall_confidence: string | null;
+            /** Insight Agents */
+            insight_agents: components["schemas"]["CouncilAgentResponse"][];
+            /** Sim Headline Numbers */
+            sim_headline_numbers: {
+                [key: string]: number | string;
+            };
+            /** Empty Reason */
+            empty_reason?: string | null;
         };
         /** RunComparison */
         RunComparison: {
@@ -978,6 +1419,39 @@ export interface operations {
             };
         };
     };
+    promote_run_api_runs__run_id__promote_post: {
+        parameters: {
+            query: {
+                to_status: "CANDIDATE" | "CHAMPION" | "ARCHIVED";
+            };
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArtifactView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_branding_api_config_branding_get: {
         parameters: {
             query?: never;
@@ -1143,6 +1617,181 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    project_corpus_api_projects__project_id__corpus_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CorpusView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    project_evidence_api_projects__project_id__evidence_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvidenceView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    project_graph_api_projects__project_id__graph_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GraphView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    project_challenger_api_projects__project_id__challenger_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChallengerView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    project_council_api_projects__project_id__council_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResearchCouncilView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_artifacts_api_artifacts_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArtifactListResponse"];
                 };
             };
         };

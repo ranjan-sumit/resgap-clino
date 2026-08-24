@@ -1,13 +1,15 @@
 import Link from "next/link";
+import { ShieldCheck } from "lucide-react";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
-import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/data/status-badge";
 import { MetricDelta } from "@/components/data/metric-delta";
 import { EmptyState } from "@/components/data/empty-state";
 import { ErrorState } from "@/components/data/error-state";
 import { ComparePicker } from "@/components/runs/compare-picker";
+import { PromoteCandidateButton } from "@/components/runs/promote-candidate-button";
+import { PageHero } from "@/components/shell/page-hero";
 import { api, ApiError, type RunComparison } from "@/lib/api";
 
 function DiffList({ title, items }: { title: string; items: string[] }) {
@@ -36,43 +38,44 @@ function ComparisonView({ comparison }: { comparison: RunComparison }) {
 
   return (
     <div className="space-y-8">
-      <section className="rounded-lg border border-border bg-card p-5 shadow-card">
-        <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-neutral">Promotion gate</h2>
-        <div className="flex flex-wrap items-center gap-3">
-          <StatusBadge chip={promotion.status} />
-          {promotion.candidate_artifact_id && (
-            <span className="font-mono text-xs text-neutral">{promotion.candidate_artifact_id}</span>
-          )}
-        </div>
-        {(promotion.blocking_reasons.length > 0 || !promotion.can_evaluate) && (
-          <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-neutral">
-            {!promotion.can_evaluate && <li>{promotion.status.reason}</li>}
-            {promotion.blocking_reasons.map((r, i) => (
-              <li key={i}>{r}</li>
-            ))}
-          </ul>
-        )}
-        {promotion.warnings.length > 0 && (
-          <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-semantic-warning">
-            {promotion.warnings.map((w, i) => (
-              <li key={i}>{w}</li>
-            ))}
-          </ul>
-        )}
-        <div className="mt-4">
-          <Button disabled title="Promotion is not wired to a write action in this slice.">
-            Promote candidate
-          </Button>
-          <p className="mt-1.5 text-xs text-neutral">
-            Promotion is read-only in this slice — no write endpoint has been built yet.
-          </p>
+      <section className="relative overflow-hidden rounded-xl border border-border/60 bg-card p-6 shadow-raised">
+        <div className="pointer-events-none absolute -right-10 -top-10 h-40 w-40 rounded-full bg-clinova-cyan/10 blur-2xl" aria-hidden />
+        <div className="relative flex items-start gap-4">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-clinova-deep to-clinova-blue text-white shadow-glow-sm">
+            <ShieldCheck className="h-5 w-5" aria-hidden />
+          </div>
+          <div className="flex-1">
+            <h2 className="mb-2 text-xs font-semibold uppercase tracking-wider text-neutral">Promotion gate</h2>
+            <div className="flex flex-wrap items-center gap-3">
+              <StatusBadge chip={promotion.status} />
+              {promotion.candidate_artifact_id && (
+                <span className="font-mono text-xs text-neutral">{promotion.candidate_artifact_id}</span>
+              )}
+            </div>
+            {(promotion.blocking_reasons.length > 0 || !promotion.can_evaluate) && (
+              <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-neutral">
+                {!promotion.can_evaluate && <li>{promotion.status.reason}</li>}
+                {promotion.blocking_reasons.map((r, i) => (
+                  <li key={i}>{r}</li>
+                ))}
+              </ul>
+            )}
+            {promotion.warnings.length > 0 && (
+              <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-semantic-warning">
+                {promotion.warnings.map((w, i) => (
+                  <li key={i}>{w}</li>
+                ))}
+              </ul>
+            )}
+            <PromoteCandidateButton candidateRunId={comparison.candidate.run_id} promotion={promotion} />
+          </div>
         </div>
       </section>
 
       <section>
         <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-neutral">Evaluation metrics</h2>
         {comparison.metrics_note && <p className="mb-3 text-sm italic text-neutral">{comparison.metrics_note}</p>}
-        <div className="overflow-hidden rounded-lg border border-border bg-card shadow-card">
+        <div className="overflow-hidden rounded-lg border border-border/60 bg-card shadow-card">
           <Table>
             <TableHeader>
               <TableRow>
@@ -101,7 +104,7 @@ function ComparisonView({ comparison }: { comparison: RunComparison }) {
       <section>
         <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-neutral">Content diffs</h2>
         <div className="grid grid-cols-2 gap-4">
-          <div className="rounded-lg border border-border bg-card p-5 shadow-card">
+          <div className="rounded-lg border border-border/60 bg-card p-5 shadow-card">
             <p className="mb-3 font-medium text-clinova-deep">Papers</p>
             <p className="mb-3 text-xs text-neutral">
               {comparison.papers.summary} · {comparison.papers.common_count} unchanged
@@ -112,7 +115,7 @@ function ComparisonView({ comparison }: { comparison: RunComparison }) {
             </div>
           </div>
 
-          <div className="rounded-lg border border-border bg-card p-5 shadow-card">
+          <div className="rounded-lg border border-border/60 bg-card p-5 shadow-card">
             <p className="mb-3 font-medium text-clinova-deep">Evidence objects</p>
             <p className="text-sm text-neutral">
               {comparison.evidence.count_baseline} → {comparison.evidence.count_candidate}{" "}
@@ -121,7 +124,7 @@ function ComparisonView({ comparison }: { comparison: RunComparison }) {
             </p>
           </div>
 
-          <div className="rounded-lg border border-border bg-card p-5 shadow-card">
+          <div className="rounded-lg border border-border/60 bg-card p-5 shadow-card">
             <p className="mb-3 font-medium text-clinova-deep">Knowledge graph</p>
             <p className="mb-3 text-xs text-neutral">
               {comparison.graph.entities_common_count} entities and{" "}
@@ -143,7 +146,7 @@ function ComparisonView({ comparison }: { comparison: RunComparison }) {
             </div>
           </div>
 
-          <div className="rounded-lg border border-border bg-card p-5 shadow-card">
+          <div className="rounded-lg border border-border/60 bg-card p-5 shadow-card">
             <p className="mb-3 font-medium text-clinova-deep">Proposals</p>
             <p className="text-sm text-neutral">
               {comparison.proposals.summary} · {comparison.proposals.common_count} unchanged
@@ -154,7 +157,7 @@ function ComparisonView({ comparison }: { comparison: RunComparison }) {
 
       <section>
         <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-neutral">Research gaps</h2>
-        <div className="rounded-lg border border-border bg-card p-5 shadow-card">
+        <div className="rounded-lg border border-border/60 bg-card p-5 shadow-card">
           <p className="mb-3 text-xs text-neutral">{comparison.gaps.common_count} gaps unchanged</p>
           <div className="grid grid-cols-2 gap-4">
             <DiffList title="Added" items={comparison.gaps.added} />
@@ -179,7 +182,7 @@ function ComparisonView({ comparison }: { comparison: RunComparison }) {
 
       <section>
         <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-neutral">Manifest diff</h2>
-        <div className="overflow-hidden rounded-lg border border-border bg-card shadow-card">
+        <div className="overflow-hidden rounded-lg border border-border/60 bg-card shadow-card">
           <Table>
             <TableHeader>
               <TableRow>
@@ -225,12 +228,11 @@ export default async function ComparePage({
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
-      <div>
-        <h1 className="font-display text-3xl text-clinova-deep">Compare</h1>
-        <p className="mt-1 text-sm text-neutral">
-          Compare a baseline and a candidate run across metrics, content, and the promotion gate.
-        </p>
-      </div>
+      <PageHero
+        eyebrow="Engineering"
+        title="Compare"
+        description="Compare a baseline and a candidate run across metrics, content, and the promotion gate."
+      />
 
       {runs.length < 2 ? (
         <EmptyState

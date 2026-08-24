@@ -13,11 +13,12 @@ import type { ProjectSummary } from "@/lib/api";
 
 export function TopBar({ projects }: { projects: ProjectSummary[] }) {
   return (
-    <header className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-white px-6">
+    <header className="relative flex h-16 shrink-0 items-center justify-between border-b border-border/70 bg-white/80 px-8 backdrop-blur-sm">
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-accent-line opacity-40" aria-hidden />
       <div className="flex items-center gap-4">
         {projects.length > 0 ? (
           <Select defaultValue={projects[0].project_id}>
-            <SelectTrigger className="h-8 w-[220px] text-sm">
+            <SelectTrigger className="h-8 w-[220px] border-border/70 text-sm shadow-sm">
               <SelectValue placeholder="Select project" />
             </SelectTrigger>
             <SelectContent>
@@ -31,7 +32,7 @@ export function TopBar({ projects }: { projects: ProjectSummary[] }) {
         ) : (
           <span className="text-sm italic text-neutral">No projects yet</span>
         )}
-        <span className="text-neutral/40">|</span>
+        <span className="h-4 w-px bg-border" />
         <Tooltip>
           <TooltipTrigger asChild>
             <span className="cursor-help font-mono text-xs italic text-neutral">Corpus: Not recorded</span>
@@ -65,7 +66,7 @@ export function TopBar({ projects }: { projects: ProjectSummary[] }) {
         </Tooltip>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <button className="flex h-8 w-8 items-center justify-center rounded-full bg-secondary text-clinova-deep">
+            <button className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-clinova-deep to-clinova-blue text-white shadow-glow-sm transition-transform hover:scale-105">
               <User className="h-4 w-4" aria-hidden />
             </button>
           </DropdownMenuTrigger>

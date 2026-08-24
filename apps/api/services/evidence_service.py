@@ -1,0 +1,48 @@
+"""
+Evidence screen (Clinova Phase 5, Epic 5.2). Reads results["evidence_objects"]
+directly -- a dict keyed by paper filename -> list of Evidence Object dicts
+(packages/research_schemas/evidence_object.py's to_dict() shape), the same
+real structure evidence_confidence() already reads for the Dashboard tile.
+"""
+from apps.api.models.common import RunRef
+from apps.api.models.evidence import EvidenceItemView, EvidenceView
+from apps.api.services.measures import evidence_confidence
+from apps.api.services.project_runs import get_basis_run
+
+
+def get_project_evidence(project_id: str) -> EvidenceView:
+    basis_row, results = get_basis_run(project_id)
+    if basis_row is None:
+        return EvidenceView(
+            run=None, basis_note="No runs exist for this project yet.", items=[],
+            by_type_counts={}, confidence=evidence_confidence({}),
+            empty_reason="No runs in this project yet. Runs created in the Streamlit "
+                          "workspace appear here automatically.",
+        )
+
+    run = RunRef(run_id=basis_row["id"], name=basis_row["name"], created_at=str(basis_row["created_at"]))
+    basis_note = f"Evidence reflects run \"{basis_row['name']}\" ({basis_row['id'][:8]}) — the most recent run in this project."
+
+    evidence_objects = results.get("evidence_objects") or {}
+    items: list[EvidenceItemView] = []
+    by_type_counts: dict[str, int] = {}
+    for filename, objs in evidence_objects.items():
+        for e in objs:
+            provenance = e.get("provenance") or {}
+            items.append(EvidenceItemView(
+                evidence_id=e.get("evidence_id", ""), evidence_type=e.get("evidence_type", "Unknown"),
+                paper_filename=e.get("paper_id") or filename, text=e.get("text", ""),
+                page=provenance.get("page"), section=provenance.get("section"),
+                confidence=e.get("confidence", "low"),
+            ))
+            t = e.get("evidence_type", "Unknown")
+            by_type_counts[t] = by_type_counts.get(t, 0) + 1
+
+    empty_reason = None
+    if not items:
+        empty_reason = "No evidence objects were extracted for this run."
+
+    return EvidenceView(
+        run=run, basis_note=basis_note, items=items, by_type_counts=by_type_counts,
+        confidence=evidence_confidence(results), empty_reason=empty_reason,
+    )

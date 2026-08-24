@@ -1,9 +1,11 @@
 import Link from "next/link";
+import { ArrowUpRight } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { CountStatView } from "@/components/data/count-stat";
 import { ConfidenceStat } from "@/components/data/confidence-stat";
 import { StatusBadge } from "@/components/data/status-badge";
 import { EmptyState } from "@/components/data/empty-state";
+import { PageHero } from "@/components/shell/page-hero";
 import { api } from "@/lib/api";
 
 export default async function DashboardPage() {
@@ -33,19 +35,20 @@ export default async function DashboardPage() {
 
   return (
     <div className="mx-auto max-w-6xl space-y-10">
-      <div>
-        <h1 className="font-display text-3xl text-clinova-deep">{dashboard.project_label}</h1>
-        {dashboard.basis_run && (
-          <Alert className="mt-4 border-clinova-light/50 bg-clinova-light/10">
-            <AlertDescription className="text-sm text-clinova-deep">
+      <PageHero
+        eyebrow="Project Dashboard"
+        title={dashboard.project_label}
+        description={
+          dashboard.basis_run && (
+            <>
               {dashboard.basis_note}{" "}
-              <Link href={`/runs/${dashboard.basis_run.run_id}`} className="underline">
+              <Link href={`/runs/${dashboard.basis_run.run_id}`} className="text-clinova-cyan underline">
                 View run
               </Link>
-            </AlertDescription>
-          </Alert>
-        )}
-      </div>
+            </>
+          )
+        }
+      />
 
       <section>
         <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-neutral">Corpus at a glance</h2>
@@ -78,9 +81,16 @@ export default async function DashboardPage() {
           ) : (
             <ul className="space-y-2">
               {dashboard.top_opportunities.map((g) => (
-                <li key={g.gap_id ?? g.title} className="rounded-lg border border-border bg-card p-4 shadow-card">
-                  <Link href={`/runs/${g.run_id}`} className="font-medium text-clinova-deep hover:underline">
+                <li
+                  key={g.gap_id ?? g.title}
+                  className="group rounded-lg border border-border/60 bg-card p-4 shadow-card transition-all hover:-translate-y-0.5 hover:shadow-card-hover"
+                >
+                  <Link
+                    href={`/runs/${g.run_id}`}
+                    className="flex items-start justify-between gap-2 font-medium text-clinova-deep hover:underline"
+                  >
                     {g.title}
+                    <ArrowUpRight className="mt-0.5 h-4 w-4 shrink-0 text-clinova-cyan opacity-0 transition-opacity group-hover:opacity-100" />
                   </Link>
                   <div className="mt-2 flex flex-wrap items-center gap-2">
                     <StatusBadge chip={g.validation} size="sm" />
@@ -103,7 +113,10 @@ export default async function DashboardPage() {
           <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-neutral">Recent runs</h2>
           <ul className="space-y-2">
             {dashboard.recent_runs.map((r) => (
-              <li key={r.run_id} className="rounded-lg border border-border bg-card p-4 shadow-card">
+              <li
+                key={r.run_id}
+                className="group rounded-lg border border-border/60 bg-card p-4 shadow-card transition-all hover:-translate-y-0.5 hover:shadow-card-hover"
+              >
                 <div className="flex items-center justify-between">
                   <Link href={`/runs/${r.run_id}`} className="font-medium text-clinova-deep hover:underline">
                     {r.name}
@@ -121,10 +134,10 @@ export default async function DashboardPage() {
 
       <section>
         <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-neutral">Research activity</h2>
-        <ol className="space-y-3 border-l border-border pl-4">
+        <ol className="space-y-3 border-l-2 border-clinova-light/30 pl-4">
           {dashboard.activity.map((a, i) => (
             <li key={`${a.kind}-${i}`} className="relative">
-              <span className="absolute -left-[21px] top-1.5 h-2 w-2 rounded-full bg-clinova-blue" />
+              <span className="absolute -left-[21px] top-1.5 h-2.5 w-2.5 rounded-full bg-gradient-to-br from-clinova-cyan to-clinova-deep shadow-glow-sm" />
               <Link href={a.href} className="text-sm font-medium text-clinova-deep hover:underline">
                 {a.title}
               </Link>

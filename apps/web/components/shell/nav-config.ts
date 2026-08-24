@@ -26,18 +26,18 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     label: "Research",
     items: [
-      { label: "Corpus", status: "planned" },
-      { label: "Evidence", status: "planned" },
-      { label: "Knowledge Graph", status: "planned" },
+      { label: "Corpus", href: "/corpus", status: "live" },
+      { label: "Evidence", href: "/evidence", status: "live" },
+      { label: "Knowledge Graph", href: "/knowledge-graph", status: "live" },
     ],
   },
   {
     label: "Intelligence",
     items: [
-      { label: "Research Gaps", status: "planned" },
-      { label: "Gap Challenger", status: "planned" },
-      { label: "Research Council", status: "planned" },
-      { label: "Proposals", status: "planned" },
+      { label: "Research Gaps", href: "/gaps", status: "live" },
+      { label: "Gap Challenger", href: "/gap-challenger", status: "live" },
+      { label: "Research Council", href: "/council", status: "live" },
+      { label: "Proposals", href: "/proposals", status: "live" },
     ],
   },
   {
@@ -45,7 +45,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { label: "Runs", href: "/runs", status: "live" },
       { label: "Compare", href: "/runs/compare", status: "live" },
-      { label: "Versions", status: "planned" },
+      { label: "Versions", href: "/versions", status: "live" },
       { label: "Experiments", status: "planned" },
       { label: "Lineage", href: "/runs/lineage", status: "live" },
     ],
@@ -64,6 +64,6 @@ export const NAV_GROUPS: NavGroup[] = [
   },
   {
     label: "Settings",
-    items: [{ label: "Settings", status: "planned" }],
+    items: [{ label: "Settings", href: "/settings", status: "live" }],
   },
 ];

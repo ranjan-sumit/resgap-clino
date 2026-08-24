@@ -16,8 +16,10 @@ export function ErrorState({
   retryHref?: string;
 }) {
   return (
-    <div className="flex flex-col items-center gap-3 rounded-lg border border-semantic-critical/30 bg-semantic-critical/5 px-10 py-16 text-center">
-      <AlertOctagon aria-hidden className="h-8 w-8 text-semantic-critical" />
+    <div className="flex flex-col items-center gap-3 rounded-xl border border-semantic-critical/20 bg-white px-10 py-16 text-center shadow-card">
+      <div className="flex h-14 w-14 items-center justify-center rounded-full bg-semantic-critical/[0.08]">
+        <AlertOctagon aria-hidden className="h-6 w-6 text-semantic-critical" />
+      </div>
       <p className="font-display text-xl text-clinova-deep">{title}</p>
       <p className="max-w-lg text-sm text-neutral">{detail}</p>
       {retryHref && (

@@ -14,7 +14,11 @@ from fastapi.responses import JSONResponse
 
 from apps.api import settings
 from apps.api.errors import DatabaseUnavailableError, NotFoundError
-from apps.api.routers import compare, config, health, lineage, projects, runs
+from apps.api.routers import (
+    artifacts, challenger, compare, config, corpus, council, evidence, graph, health, lineage,
+    projects, runs,
+)
+from utils.database import InvalidArtifactTransitionError
 
 
 def create_app() -> FastAPI:
@@ -48,12 +52,18 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(ValueError)
     async def _value_error(_request: Request, exc: ValueError):
-        # pipeline/run_compare.py::compare_runs() and
-        # pipeline/lineage.py::get_scientific_lineage() both raise a
-        # real, already-human-readable ValueError on an unknown run_id
-        # ("Run 'X' was not found -- cannot compare.") -- surfaced as-is,
-        # not wrapped into a generic 500.
+        # pipeline/run_compare.py::compare_runs(), pipeline/lineage.py::
+        # get_scientific_lineage(), and utils/database.py::promote_artifact()
+        # all raise a real, already-human-readable ValueError on an unknown
+        # id ("Run 'X' was not found...", "No artifact found with id X") --
+        # surfaced as-is, not wrapped into a generic 500.
         return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(InvalidArtifactTransitionError)
+    async def _invalid_transition(_request: Request, exc: InvalidArtifactTransitionError):
+        # A real lifecycle-rule rejection (e.g. EXPERIMENTAL -> CHAMPION
+        # directly), not a "not found" -- 400, not 404.
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
 
     app.include_router(health.router, prefix="/api")
     app.include_router(runs.router, prefix="/api")
@@ -61,6 +71,12 @@ def create_app() -> FastAPI:
     app.include_router(projects.router, prefix="/api")
     app.include_router(compare.router, prefix="/api")
     app.include_router(lineage.router, prefix="/api")
+    app.include_router(corpus.router, prefix="/api")
+    app.include_router(evidence.router, prefix="/api")
+    app.include_router(graph.router, prefix="/api")
+    app.include_router(challenger.router, prefix="/api")
+    app.include_router(council.router, prefix="/api")
+    app.include_router(artifacts.router, prefix="/api")
 
     return app
 

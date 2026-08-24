@@ -70,7 +70,7 @@ export function TechnicalDiagram({ lineage }: { lineage: TechnicalLineage }) {
         </Alert>
       )}
 
-      <div className="overflow-x-auto rounded-lg border border-border bg-card p-4 shadow-card">
+      <div className="overflow-x-auto rounded-lg border border-border/60 bg-card p-4 shadow-card">
         <div className="relative" style={{ width, height }}>
           {stageIndices.map((si) => (
             <div
@@ -133,7 +133,7 @@ export function TechnicalDiagram({ lineage }: { lineage: TechnicalLineage }) {
                 key={node.artifact_id}
                 className={
                   "absolute flex flex-col justify-center gap-1 rounded-lg border bg-white px-3 py-2 shadow-card " +
-                  (isRoot ? "border-clinova-blue ring-1 ring-clinova-blue" : "border-border")
+                  (isRoot ? "border-clinova-blue shadow-glow-sm" : "border-border/60 shadow-card")
                 }
                 style={{ left: p.x, top: p.y, width: NODE_WIDTH, height: NODE_HEIGHT }}
               >

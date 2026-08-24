@@ -8,6 +8,7 @@ const BRANDING_DIR = path.join(process.cwd(), "../../packages/branding");
 export interface BrandingTheme {
   product_name: string;
   tagline: string;
+  engine_codename: string;
   colors: Record<string, string>;
   fonts: Record<string, string>;
 }

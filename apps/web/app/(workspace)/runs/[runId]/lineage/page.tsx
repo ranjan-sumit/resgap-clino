@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { EmptyState } from "@/components/data/empty-state";
 import { ErrorState } from "@/components/data/error-state";
+import { PageHero } from "@/components/shell/page-hero";
 import { TechnicalDiagram } from "@/components/lineage/technical-diagram";
 import { GapChainCard } from "@/components/lineage/gap-chain";
 import { api, ApiError } from "@/lib/api";
@@ -25,12 +26,16 @@ export default async function LineagePage({ params }: { params: Promise<{ runId:
   return (
     <div className="mx-auto max-w-6xl space-y-6">
       <div>
-        <Link href={`/runs/${runId}`} className="text-sm text-neutral hover:underline">
+        <Link href={`/runs/${runId}`} className="text-sm text-neutral hover:text-clinova-deep hover:underline">
           &larr; Run detail
         </Link>
-        <h1 className="mt-2 font-display text-3xl text-clinova-deep">Lineage</h1>
-        <p className="mt-1 font-mono text-xs text-neutral">{runId}</p>
       </div>
+
+      <PageHero
+        eyebrow="Engineering"
+        title="Lineage"
+        description={<span className="font-mono text-xs text-white/60">{runId}</span>}
+      />
 
       <Tabs defaultValue="technical">
         <TabsList>

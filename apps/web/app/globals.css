@@ -26,3 +26,32 @@ body {
 a {
   color: inherit;
 }
+
+::selection {
+  background: theme("colors.clinova.cyan");
+  color: white;
+}
+
+/* A little life in every interactive surface -- the redesign's answer to
+   "nothing here moves except the hero canvas." Respects reduced-motion. */
+@media (prefers-reduced-motion: no-preference) {
+  a,
+  button,
+  [role="button"],
+  [role="tab"],
+  [role="checkbox"] {
+    transition:
+      color 150ms ease,
+      background-color 150ms ease,
+      border-color 150ms ease,
+      box-shadow 200ms ease,
+      transform 150ms ease;
+  }
+}
+
+.stat-gradient-text {
+  background-image: linear-gradient(135deg, theme("colors.clinova.deep") 0%, theme("colors.clinova.blue") 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}

@@ -7,7 +7,9 @@ export function VersionFieldView({ field }: { field: VersionField }) {
     <div className="flex items-center justify-between gap-3 py-1.5 text-sm">
       <span className="text-neutral">{field.label}</span>
       {field.recorded ? (
-        <span className="font-mono text-clinova-deep">{field.value}</span>
+        <span className="rounded-md bg-clinova-light/10 px-1.5 py-0.5 font-mono text-clinova-deep">
+          {field.value}
+        </span>
       ) : (
         <span className="flex items-center gap-1.5 italic text-neutral">
           Not recorded

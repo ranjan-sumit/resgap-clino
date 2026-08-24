@@ -1,7 +1,11 @@
+from typing import Literal
+
 from fastapi import APIRouter, Query
 
 from apps.api.errors import NotFoundError
+from apps.api.models.artifacts import ArtifactView
 from apps.api.models.runs import RunDetail, RunListResponse, TraceStep
+from apps.api.services.artifacts_service import promote_run_pipeline_artifact
 from apps.api.services.run_status import trace_status_chip
 from apps.api.services.runs_service import build_run_detail, list_run_summaries
 from utils.database import load_run
@@ -41,3 +45,16 @@ def get_run_trace(run_id: str) -> list[TraceStep]:
                   outputs=t.get("outputs", ""), status=trace_status_chip(t.get("status")))
         for i, t in enumerate(trace)
     ]
+
+
+@router.post("/runs/{run_id}/promote", response_model=ArtifactView)
+def promote_run(
+    run_id: str,
+    to_status: Literal["CANDIDATE", "CHAMPION", "ARCHIVED"] = Query(...),
+) -> ArtifactView:
+    """Promotes this run's own 'pipeline'-type artifact to `to_status`.
+    Real write path: rejects an illegal lifecycle transition (400) and a
+    run with no registered pipeline artifact (404) rather than silently
+    no-op'ing -- see Compare's PromotionGateView.can_evaluate for the
+    read-side gate a UI button should check before calling this."""
+    return promote_run_pipeline_artifact(run_id, to_status)

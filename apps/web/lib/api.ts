@@ -14,6 +14,13 @@ export type StatusChip = components["schemas"]["StatusChip"];
 export type Measure = components["schemas"]["Measure"];
 export type CountStat = components["schemas"]["CountStat"];
 export type VersionField = components["schemas"]["VersionField"];
+export type CorpusView = components["schemas"]["CorpusView"];
+export type EvidenceView = components["schemas"]["EvidenceView"];
+export type GraphView = components["schemas"]["GraphView"];
+export type ChallengerView = components["schemas"]["ChallengerView"];
+export type ResearchCouncilView = components["schemas"]["ResearchCouncilView"];
+export type ArtifactListResponse = components["schemas"]["ArtifactListResponse"];
+export type ArtifactView = components["schemas"]["ArtifactView"];
 
 export class ApiError extends Error {
   constructor(
@@ -60,4 +67,22 @@ export const api = {
     get<ScientificLineage>(
       `/api/runs/${encodeURIComponent(runId)}/lineage/scientific${gapId ? `?gap_id=${encodeURIComponent(gapId)}` : ""}`,
     ),
+  corpus: (projectId: string) => get<CorpusView>(`/api/projects/${encodeURIComponent(projectId)}/corpus`),
+  evidence: (projectId: string) => get<EvidenceView>(`/api/projects/${encodeURIComponent(projectId)}/evidence`),
+  graph: (projectId: string) => get<GraphView>(`/api/projects/${encodeURIComponent(projectId)}/graph`),
+  challenger: (projectId: string) =>
+    get<ChallengerView>(`/api/projects/${encodeURIComponent(projectId)}/challenger`),
+  council: (projectId: string) => get<ResearchCouncilView>(`/api/projects/${encodeURIComponent(projectId)}/council`),
+  artifacts: () => get<ArtifactListResponse>("/api/artifacts"),
+  promoteRun: async (runId: string, toStatus: "CANDIDATE" | "CHAMPION" | "ARCHIVED"): Promise<ArtifactView> => {
+    const res = await fetch(
+      `${BASE}/api/runs/${encodeURIComponent(runId)}/promote?to_status=${toStatus}`,
+      { method: "POST", cache: "no-store" },
+    );
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new ApiError(res.status, body.detail || `Promote failed with ${res.status}`);
+    }
+    return res.json();
+  },
 };

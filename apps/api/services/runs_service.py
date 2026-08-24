@@ -153,6 +153,12 @@ def _proposal_summary(p: dict) -> ProposalSummary:
     return ProposalSummary(
         title=p.get("title", ""), addresses_gap_id=p.get("addresses_gap_id"),
         addresses_gap_id_resolution=p.get("addresses_gap_id_resolution"),
+        problem_statement=p.get("problem_statement"), methodology=p.get("methodology"),
+        novelty=p.get("novelty"), builds_on=p.get("builds_on") or [],
+        expected_contribution=p.get("expected_contribution"),
+        suggested_experiments=p.get("suggested_experiments") or [],
+        potential_datasets=p.get("potential_datasets") or [],
+        confidence=p.get("confidence"), effort_estimate=p.get("effort_estimate"), risk=p.get("risk"),
     )
 
 

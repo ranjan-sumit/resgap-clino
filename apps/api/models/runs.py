@@ -53,6 +53,16 @@ class ProposalSummary(BaseModel):
     title: str
     addresses_gap_id: str | None
     addresses_gap_id_resolution: str | None
+    problem_statement: str | None = None
+    methodology: str | None = None
+    novelty: str | None = None
+    builds_on: list[str] = []
+    expected_contribution: str | None = None
+    suggested_experiments: list[str] = []
+    potential_datasets: list[str] = []
+    confidence: str | None = None
+    effort_estimate: str | None = None
+    risk: str | None = None
 
 
 class TokenUsageView(BaseModel):

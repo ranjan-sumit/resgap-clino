@@ -39,7 +39,7 @@ export function RunsTable({ runs }: { runs: RunSummary[] }) {
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between rounded-lg border border-border bg-card px-4 py-2.5 shadow-card">
+      <div className="flex items-center justify-between rounded-lg border border-border/60 bg-card px-4 py-2.5 shadow-card">
         <p className="text-sm text-neutral">
           {selected.length === 0 && "Select two runs to compare — the first selected is the baseline."}
           {selected.length === 1 && "Select one more run as the candidate."}
@@ -48,16 +48,17 @@ export function RunsTable({ runs }: { runs: RunSummary[] }) {
         <Button
           size="sm"
           disabled={!canCompare}
+          className="bg-gradient-to-r from-clinova-deep to-clinova-blue text-white shadow-glow-sm hover:opacity-90 disabled:opacity-40"
           onClick={() => compareHref && router.push(compareHref)}
         >
           Compare selected <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
         </Button>
       </div>
 
-      <div className="overflow-hidden rounded-lg border border-border bg-card shadow-card">
+      <div className="overflow-hidden rounded-lg border border-border/60 bg-card shadow-card">
         <Table>
           <TableHeader>
-            <TableRow>
+            <TableRow className="border-border/60 hover:bg-transparent">
               <TableHead className="w-10" />
               <TableHead>Run</TableHead>
               <TableHead>Status</TableHead>
@@ -74,7 +75,15 @@ export function RunsTable({ runs }: { runs: RunSummary[] }) {
               const isSelected = selected.includes(run.run_id);
               const isDisabled = !isSelected && selected.length >= 2;
               return (
-                <TableRow key={run.run_id} data-state={isSelected ? "selected" : undefined}>
+                <TableRow
+                  key={run.run_id}
+                  data-state={isSelected ? "selected" : undefined}
+                  className={
+                    isSelected
+                      ? "border-border/60 bg-clinova-cyan/[0.06] hover:bg-clinova-cyan/[0.08]"
+                      : "border-border/60 hover:bg-surface/60"
+                  }
+                >
                   <TableCell>
                     <Checkbox
                       checked={isSelected}

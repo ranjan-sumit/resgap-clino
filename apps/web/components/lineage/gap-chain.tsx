@@ -32,7 +32,7 @@ export function GapChainCard({ chain }: { chain: GapChainType }) {
   const [open, setOpen] = useState(false);
 
   return (
-    <Collapsible open={open} onOpenChange={setOpen} className="rounded-lg border border-border bg-card shadow-card">
+    <Collapsible open={open} onOpenChange={setOpen} className="rounded-lg border border-border/60 bg-card shadow-card transition-shadow hover:shadow-card-hover">
       <CollapsibleTrigger className="flex w-full items-start justify-between gap-3 p-4 text-left">
         <div>
           <p className="font-medium text-clinova-deep">{chain.title}</p>

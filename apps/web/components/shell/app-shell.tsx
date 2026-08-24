@@ -17,7 +17,7 @@ export function AppShell({
       <SideNav productName={productName} />
       <div className="flex min-h-screen flex-1 flex-col">
         <TopBar projects={projects} />
-        <main className="flex-1 bg-secondary/30 px-10 py-8">{children}</main>
+        <main className="flex-1 bg-surface px-10 py-10">{children}</main>
       </div>
     </div>
   );
