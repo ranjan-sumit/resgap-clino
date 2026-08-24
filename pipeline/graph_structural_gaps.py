@@ -42,6 +42,8 @@ sources merge into one list without special-casing:
    together").
 """
 
+from packages.research_schemas.gap_identity import attach_gap_identity
+
 GRAPH_STRUCTURAL_STAGE_VERSION = 1
 
 # Recognized opposite-meaning relation pairs, pooled across every domain's
@@ -103,8 +105,10 @@ def _resolve_ref(ref: str, entity_by_id: dict, entity_by_name: dict) -> dict | N
 
 def _make_gap(title: str, description: str, gap_type: str, why: str,
               supporting_papers: list, evidence_lines: list, signal_id: str,
-              confidence: str = "medium") -> dict:
-    return {
+              confidence: str = "medium", motivating_entity_ids: list = None,
+              motivating_relationship_ids: list = None,
+              motivating_evidence_ids: list = None) -> dict:
+    gap = {
         "title": title,
         "description": description,
         "gap_type": gap_type,
@@ -118,6 +122,20 @@ def _make_gap(title: str, description: str, gap_type: str, why: str,
         "source": "graph_structural",
         "pattern_id": signal_id,
     }
+    # Clinova Phase 4, Epic 4.4 (Scientific Lineage): motivating_evidence_ids
+    # is the discriminator between the two evidence_basis values -- only
+    # _conflicting_relationship_gaps has real evidence to cite (the
+    # conflicting relationships themselves, and whatever evidence backs
+    # them); the other 3 signals fire on an ABSENCE of structure (an orphan
+    # concept, a missing bridge, an untested combination), so honestly
+    # carry no evidence_id at all -- fabricating one here would defeat the
+    # purpose of adding real provenance.
+    gap["motivating_entity_ids"] = motivating_entity_ids or []
+    gap["motivating_relationship_ids"] = motivating_relationship_ids or []
+    gap["motivating_evidence_ids"] = motivating_evidence_ids or []
+    return attach_gap_identity(
+        gap, evidence_basis="positive_evidence" if gap["motivating_evidence_ids"] else "absence_of_evidence",
+    )
 
 
 def _orphan_gaps(orphan_concepts: list) -> list[dict]:
@@ -144,6 +162,7 @@ def _orphan_gaps(orphan_concepts: list) -> list[dict]:
             evidence_lines=[o.get("signal", "")],
             signal_id="graph_orphan_concept",
             confidence="low",
+            motivating_entity_ids=[_entity_key(entity)] if _entity_key(entity) else [],
         ))
     return gaps
 
@@ -170,7 +189,14 @@ def _conflicting_relationship_gaps(entities: list, relationships: list) -> list[
     entity_by_id = {_entity_key(e): e for e in entities}
     entity_by_name = {str(e.get("name", "")).lower(): e for e in entities}
 
-    # (frozenset({src_key, tgt_key})) -> list of (relation, paper) seen
+    # (frozenset({src_key, tgt_key})) -> list of (relation, paper, src_name,
+    # tgt_name, relationship_id, provenance_evidence_ids) seen. The last two
+    # fields are new (Clinova Phase 4, Epic 4.4): graph_builder.py now
+    # assigns relationship_id/provenance_evidence_ids to every relationship
+    # (post-hoc, deterministic -- see graph_builder.py's
+    # _assign_relationship_ids()); honestly empty when absent (e.g. a graph
+    # built before that change, or the LLM/fallback path produced a
+    # malformed relationship).
     pair_relations: dict = {}
     for rel in relationships:
         src = _resolve_ref(rel.get("source", ""), entity_by_id, entity_by_name)
@@ -181,9 +207,10 @@ def _conflicting_relationship_gaps(entities: list, relationships: list) -> list[
         if not relation:
             continue
         pair_key = frozenset({_entity_key(src), _entity_key(tgt)})
-        pair_relations.setdefault(pair_key, []).append(
-            (relation, rel.get("paper", ""), src.get("name", ""), tgt.get("name", ""))
-        )
+        pair_relations.setdefault(pair_key, []).append((
+            relation, rel.get("paper", ""), src.get("name", ""), tgt.get("name", ""),
+            rel.get("relationship_id"), rel.get("provenance_evidence_ids") or [],
+        ))
 
     gaps = []
     for pair_key, seen in pair_relations.items():
@@ -205,6 +232,9 @@ def _conflicting_relationship_gaps(entities: list, relationships: list) -> list[
         entries_b = [s for s in seen if s[0] == b]
         name_pair = f"{entries_a[0][2]} ↔ {entries_a[0][3]}"
         papers = sorted({s[1] for s in seen if s[1]})
+        conflicting_entries = entries_a + entries_b
+        motivating_relationship_ids = sorted({e[4] for e in conflicting_entries if e[4]})
+        motivating_evidence_ids = sorted({eid for e in conflicting_entries for eid in e[5]})
         gaps.append(_make_gap(
             title=f"Conflicting claims: {name_pair}",
             description=(f"This corpus's knowledge graph records both '{a}' and '{b}' between "
@@ -215,6 +245,9 @@ def _conflicting_relationship_gaps(entities: list, relationships: list) -> list[
             supporting_papers=papers,
             evidence_lines=[f"{a}: {e[1]}" for e in entries_a[:2]] + [f"{b}: {e[1]}" for e in entries_b[:2]],
             signal_id="graph_conflicting_relationship",
+            motivating_entity_ids=sorted(pair_key),
+            motivating_relationship_ids=motivating_relationship_ids,
+            motivating_evidence_ids=motivating_evidence_ids,
             confidence="medium",
         ))
         if len(gaps) >= _MAX_PER_SIGNAL:
@@ -271,6 +304,7 @@ def _untested_combination_gaps(entities: list, relationships: list) -> list[dict
                 ],
                 signal_id="graph_untested_combination",
                 confidence="low",
+                motivating_entity_ids=[k1, k2],
             ))
             if len(gaps) >= _MAX_PER_SIGNAL:
                 return gaps

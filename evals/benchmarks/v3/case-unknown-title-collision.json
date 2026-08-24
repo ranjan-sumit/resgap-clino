@@ -1,0 +1,18 @@
+{
+  "case_id": "unknown-title-collision",
+  "benchmark_version": "v3",
+  "created": "2026-08-24",
+  "source": "The 3 real 'Unknown'-titled, truncated-DOI records from evals/benchmarks/v1/case-truncated-doi.json's fixture_references, with the (already-garbage, truncated) DOI field additionally stripped to isolate the title-only collision risk specifically -- these are real extraction-loss instances from the real AuDHD_2.pdf corpus, not synthesized.",
+  "description": "Behavior-capture case (v1's own methodology: run it, record what the pipeline actually does, don't assert a bug before observing one). 3 genuinely DISTINCT real references, all under-extracted down to title='Unknown' with no author/year/DOI -- tests whether the identity-resolution layer incorrectly treats them as the SAME paper.",
+  "fixture_references": [
+    {"title": "Unknown", "year": null, "authors": [], "doi": "", "found_in_paper": "AuDHD_2.pdf", "source": "parsed_only"},
+    {"title": "Unknown", "year": null, "authors": [], "doi": "", "found_in_paper": "AuDHD_2.pdf", "source": "parsed_only"},
+    {"title": "Unknown", "year": null, "authors": [], "doi": "", "found_in_paper": "AuDHD_2.pdf", "source": "parsed_only"}
+  ],
+  "observed_behavior": {
+    "verified": "2026-08-24, directly against the real pipeline.canonical_resolver functions",
+    "merge_canonical_references": "Collapses all 3 into ONE canonical entry (identity_level=title_only_partial, status=QUARANTINED, provider_records length 3) -- a real title-collision: 3 genuinely distinct references (different underlying papers, per the original truncated-DOI values in case-truncated-doi.json) are merged as if they were one.",
+    "filter_and_dedupe_references": "Drops all 3 (status_counts={'VERIFIED':0,'ACCEPTED':0,'QUARANTINED':3,'UNRESOLVED':0}, trusted_count=0, duplicates_removed=0) -- since QUARANTINED entries are filtered out BEFORE the dedup-check runs, this specific collision never reaches app.py's actual reference list. The collision is real inside merge_canonical_references() (used by this project's own reference-resolution metric, evals/regression/metrics.py::compute_reference_resolution_doi_path()) but does not currently leak into the application-facing filtered output."
+  },
+  "expected_behavior": "Documents a real, narrow limitation for a future relevance/identity-disambiguation story: merge_canonical_references() alone is not safe to treat title_only_partial matches as genuinely-the-same-entity without the QUARANTINED-drop that filter_and_dedupe_references() already applies downstream. Not a production bug today (nothing in app.py calls merge_canonical_references() directly on unfiltered QUARANTINED data), but a real gap for any future caller of that function."
+}

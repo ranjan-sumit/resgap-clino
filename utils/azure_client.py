@@ -100,7 +100,7 @@ def _classify_error(err: str) -> Literal["timeout", "rate_limit", "api_error"]:
     return "api_error"
 
 
-def _collect_stream(stream, deadline: float = None) -> str:
+def _collect_stream(stream, deadline: float = None, usage_sink: dict = None) -> str:
     """
     Collect streaming response from NVIDIA NIM.
     Skips reasoning_content (chain-of-thought) and returns only final content.
@@ -115,12 +115,27 @@ def _collect_stream(stream, deadline: float = None) -> str:
     though the cumulative stream takes far longer. This loop-level
     wall-clock check is what makes AgentConfig's `timeout_seconds`
     (pipeline/agent_config.py) a real, enforced bound instead of a
-    parameter that gets silently ignored for streaming responses."""
+    parameter that gets silently ignored for streaming responses.
+
+    `usage_sink` (Clinova Phase 4, Epic 4.3 token instrumentation,
+    2026-08-24): an optional dict this function fills in place with
+    {"prompt_tokens", "completion_tokens", "total_tokens"} if the stream
+    carries a usage-bearing chunk (only sent when the caller requested
+    stream_options={"include_usage": True} -- see chat()). That chunk is
+    the OpenAI streaming protocol's terminal chunk and carries an empty
+    `choices` list, so this check runs BEFORE the existing
+    `if not chunk.choices: continue` skip below, which would otherwise
+    silently discard it."""
     import time
     parts = []
     for chunk in stream:
         if deadline is not None and time.monotonic() > deadline:
             raise TimeoutError("Stream exceeded its timeout mid-read (deadline check, not the SDK's own timeout=)")
+        usage = getattr(chunk, "usage", None)
+        if usage is not None and usage_sink is not None:
+            usage_sink["prompt_tokens"] = getattr(usage, "prompt_tokens", None)
+            usage_sink["completion_tokens"] = getattr(usage, "completion_tokens", None)
+            usage_sink["total_tokens"] = getattr(usage, "total_tokens", None)
         if not getattr(chunk, "choices", None):
             continue
         delta = chunk.choices[0].delta
@@ -128,6 +143,22 @@ def _collect_stream(stream, deadline: float = None) -> str:
         if content:
             parts.append(content)
     return "".join(parts).strip()
+
+
+# Clinova Phase 4, Epic 4.3 token instrumentation (2026-08-24): per-base_url
+# cache of whether stream_options={"include_usage": True} is actually
+# accepted by that provider -- probed lazily, only when a caller supplies a
+# TokenMeter (utils/token_meter.py), so this has zero effect on any
+# existing caller. A provider that rejects it degrades to token_usage=None
+# for that call, never a fabricated/estimated count, matching this
+# codebase's existing honest-None convention (see app.py's own comment on
+# why token_usage was NULL before this instrumentation existed).
+_STREAM_OPTIONS_SUPPORT: dict = {}
+
+
+def _stream_options_error(err: str) -> bool:
+    low = err.lower()
+    return "stream_options" in low or "include_usage" in low
 
 
 def make_nvidia_client(api_key: str) -> OpenAI:
@@ -157,7 +188,7 @@ class AzureOpenAIClient:
 
     def __init__(self, api_key: str, fallback_model=_FALLBACK_UNSET,
                  base_url: str = NVIDIA_BASE_URL, model: str = MASTER_MODEL,
-                 top_p: float = 1.0, **kwargs):
+                 top_p: float = 1.0, token_meter=None, **kwargs):
         # NVIDIA (the default) still goes through make_nvidia_client() --
         # unchanged code path, same mockable seam existing tests rely on.
         # A different base_url (another provider) builds a plain OpenAI
@@ -183,6 +214,20 @@ class AzureOpenAIClient:
             self.fallback_model = FALLBACK_MODEL if base_url == NVIDIA_BASE_URL else None
         else:
             self.fallback_model = fallback_model
+        # Clinova Phase 4, Epic 4.3 token instrumentation (2026-08-24):
+        # optional, additive -- every existing caller that doesn't pass
+        # token_meter gets byte-identical behavior to before this feature
+        # existed (no stream_options requested, no usage capture attempted).
+        self.token_meter = token_meter
+        self.current_stage = None
+        self._base_url = base_url
+
+    def set_stage(self, stage: str) -> None:
+        """Clinova Phase 4, Epic 4.3: callers (app.py) set this around each
+        pipeline stage so TokenMeter.record() can attribute usage to a real
+        stage name -- purely for the by_stage breakdown, never required for
+        the client to function."""
+        self.current_stage = stage
 
     def chat(self, system: str, user: str,
              temperature: float = 0.3, max_tokens: int = 4096,
@@ -208,27 +253,52 @@ class AzureOpenAIClient:
         TIMEOUT_SECS = timeout_seconds if timeout_seconds is not None else 120   # 2 minutes max per call, unless overridden
         model = _model or self.model
 
+        # Clinova Phase 4, Epic 4.3 token instrumentation (2026-08-24): only
+        # requested when a caller supplied a TokenMeter -- every existing
+        # caller (token_meter=None) sends the exact same request as before
+        # this feature existed. _STREAM_OPTIONS_SUPPORT.get(..., True)
+        # means "try it" until a real provider response says otherwise.
+        want_usage = self.token_meter is not None and _STREAM_OPTIONS_SUPPORT.get(self._base_url, True)
+        create_kwargs = dict(
+            model=model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user},
+            ],
+            temperature=temperature,
+            top_p=self.top_p,
+            max_tokens=max_tokens,
+            stream=True,
+            timeout=TIMEOUT_SECS,
+        )
+        if want_usage:
+            create_kwargs["stream_options"] = {"include_usage": True}
+
         try:
-            stream = self.client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user",   "content": user},
-                ],
-                temperature=temperature,
-                top_p=self.top_p,
-                max_tokens=max_tokens,
-                stream=True,
-                timeout=TIMEOUT_SECS,
-            )
+            stream = self.client.chat.completions.create(**create_kwargs)
             # See _collect_stream()'s docstring: the SDK's own `timeout=`
             # above does not reliably bound total streaming duration, so
             # a real wall-clock deadline is enforced across the read loop.
             deadline = time.monotonic() + TIMEOUT_SECS
-            return Success(_collect_stream(stream, deadline=deadline))
+            usage_sink = {} if want_usage else None
+            content = _collect_stream(stream, deadline=deadline, usage_sink=usage_sink)
+            if want_usage:
+                _STREAM_OPTIONS_SUPPORT.setdefault(self._base_url, True)
+                if usage_sink and self.token_meter is not None:
+                    self.token_meter.record(stage=self.current_stage, model=model, usage=usage_sink)
+            return Success(content)
         except Exception as e:
             err = str(e)
             kind = _classify_error(err)
+            # This provider rejected stream_options -- degrade once (never
+            # counted against MAX_RETRIES, since it isn't a transient
+            # failure) and remember for every future call to this base_url.
+            # token_usage simply stays None for this call, never estimated.
+            if want_usage and _stream_options_error(err) and self._base_url not in _STREAM_OPTIONS_SUPPORT:
+                _STREAM_OPTIONS_SUPPORT[self._base_url] = False
+                return self.chat(system, user, temperature, max_tokens,
+                                  timeout_seconds=timeout_seconds, max_retries=max_retries,
+                                  _retry=_retry, _model=_model)
             if _retry < MAX_RETRIES and kind in ("rate_limit", "timeout"):
                 wait = 2 ** _retry   # exponential back-off: 1s, 2s
                 time.sleep(wait)

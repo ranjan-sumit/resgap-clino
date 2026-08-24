@@ -30,11 +30,20 @@ from utils.azure_client import AzureOpenAIClient, MASTER_MODEL, FALLBACK_MODEL
 from utils.database import record_artifact, record_run_manifest
 
 from evals.regression.benchmark_registry import register_benchmark_version
-from evals.regression.metrics import compute_corpus_contamination_rate, compute_false_novelty_rate
+from evals.regression.metrics import (
+    compute_contradiction_recall,
+    compute_corpus_contamination_rate,
+    compute_evidence_coverage,
+    compute_extraction_completeness,
+    compute_false_novelty_rate,
+    compute_gap_precision,
+    compute_latency,
+    compute_reference_resolution_full_chain,
+)
 from evals.regression.promotion_gate import evaluate_promotion
 
 
-def _run_side(label: str, model: str, api_key: str, ss_api_key: str) -> dict:
+def _run_side(label: str, model: str, api_key: str, ss_api_key: str, run_id: str = None) -> dict:
     print(f"\n=== {label}: {model} ===")
     client = AzureOpenAIClient(api_key=api_key, model=model)
 
@@ -48,13 +57,62 @@ def _run_side(label: str, model: str, api_key: str, ss_api_key: str) -> dict:
     print(f"  Corpus Contamination Rate: {contamination['corpus_contamination_rate']} "
           f"({contamination['n_retained_contaminated']}/{contamination['n_cases_evaluated']} cases)")
 
-    return {
-        "model": model,
+    gap_precision = compute_gap_precision(client, ss_api_key=ss_api_key)
+    print(f"  Gap Precision: {gap_precision['gap_precision']} "
+          f"({gap_precision['n_reported_and_genuine']}/{gap_precision['n_reported']} reported"
+          f"{' -- LOW N' if gap_precision['low_n_warning'] else ''})")
+
+    contradiction = compute_contradiction_recall(client, ss_api_key=ss_api_key)
+    print(f"  Contradiction Recall: {contradiction['contradiction_recall']} "
+          f"(retrieval_recall={contradiction['retrieval_recall']}, "
+          f"{contradiction['n_pairs_retrieved']}/{contradiction['n_pairs_total']} pairs retrieved)")
+
+    # Fixture-based, zero LLM calls -- identical for both sides regardless
+    # of model (not yet a discriminating comparison, same honest framing
+    # as corpus contamination), reported anyway since the promotion gate
+    # still needs a real value on each side to compare.
+    extraction = compute_extraction_completeness()
+    print(f"  Extraction Completeness: {extraction['extraction_completeness']}")
+    ref_resolution = compute_reference_resolution_full_chain()
+    print(f"  Reference Resolution Precision/Recall: "
+          f"{ref_resolution['reference_resolution_precision']}/{ref_resolution['reference_recall']}")
+
+    metrics = {
         "false_novelty_rate": fnr["false_novelty_rate"],
         "corpus_contamination_rate": contamination["corpus_contamination_rate"],
-        "n_cases_evaluated_fnr": fnr["n_cases_evaluated"],
+        "gap_precision": gap_precision["gap_precision"],
+        "contradiction_recall": contradiction["contradiction_recall"],
+        "retrieval_recall": contradiction["retrieval_recall"],
+        "extraction_completeness": extraction["extraction_completeness"],
+        "reference_resolution_precision": ref_resolution["reference_resolution_precision"],
+        "reference_recall": ref_resolution["reference_recall"],
+    }
+
+    # Run-scoped metrics (genuinely differ per side): only computed when a
+    # real saved run_id is supplied for this side.
+    if run_id:
+        latency = compute_latency([run_id])
+        metrics["latency_seconds"] = latency["latency_seconds"]
+        print(f"  Latency: {latency['latency_seconds']} seconds (run {run_id[:8]})")
+        try:
+            coverage = compute_evidence_coverage(run_id)
+            metrics["evidence_coverage"] = coverage["evidence_coverage"]
+            print(f"  Evidence Coverage: {coverage['evidence_coverage']} "
+                  f"({coverage['n_covered']}/{coverage['n_positive_evidence_gaps']} gaps, "
+                  f"{coverage['n_absence_based']} absence-based excluded)")
+        except ValueError as e:
+            print(f"  Evidence Coverage: skipped -- {e}")
+
+    return {
+        "model": model,
+        "run_id": run_id,
+        "metrics": metrics,
         "fnr_detail": fnr,
         "contamination_detail": contamination,
+        "gap_precision_detail": gap_precision,
+        "contradiction_detail": contradiction,
+        "extraction_detail": extraction,
+        "reference_resolution_detail": ref_resolution,
     }
 
 
@@ -62,6 +120,11 @@ def main():
     parser = argparse.ArgumentParser(description="Epic 4.3 Champion/Challenger harness")
     parser.add_argument("--champion-model", default=MASTER_MODEL)
     parser.add_argument("--candidate-model", default=FALLBACK_MODEL)
+    parser.add_argument("--champion-run-id", default=None,
+                         help="A real saved run_id to compute run-scoped metrics "
+                              "(latency, evidence coverage) for the champion side.")
+    parser.add_argument("--candidate-run-id", default=None,
+                         help="Same, for the candidate side.")
     parser.add_argument("--project-id", default="default")
     parser.add_argument("--promote", action="store_true",
                          help="If eligible, actually call promote_artifact() -- "
@@ -76,17 +139,11 @@ def main():
     v2_id = register_benchmark_version("v2")
     print(f"\nRegistered benchmark artifacts: {v1_id}, {v2_id}")
 
-    champion_result = _run_side("CHAMPION", args.champion_model, api_key, ss_api_key)
-    candidate_result = _run_side("CANDIDATE", args.candidate_model, api_key, ss_api_key)
+    champion_result = _run_side("CHAMPION", args.champion_model, api_key, ss_api_key, run_id=args.champion_run_id)
+    candidate_result = _run_side("CANDIDATE", args.candidate_model, api_key, ss_api_key, run_id=args.candidate_run_id)
 
-    champion_metrics = {
-        "false_novelty_rate": champion_result["false_novelty_rate"],
-        "corpus_contamination_rate": champion_result["corpus_contamination_rate"],
-    }
-    candidate_metrics = {
-        "false_novelty_rate": candidate_result["false_novelty_rate"],
-        "corpus_contamination_rate": candidate_result["corpus_contamination_rate"],
-    }
+    champion_metrics = champion_result["metrics"]
+    candidate_metrics = candidate_result["metrics"]
 
     report = evaluate_promotion(champion_metrics, candidate_metrics)
 

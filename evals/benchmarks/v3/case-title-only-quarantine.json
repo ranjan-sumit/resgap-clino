@@ -1,0 +1,18 @@
+{
+  "case_id": "title-only-quarantine",
+  "benchmark_version": "v3",
+  "created": "2026-08-24",
+  "source": "Constructed from a real reference title pattern seen in the AuDHD corpus extraction (a title-only partial match with no DOI/author/year -- a realistic under-extracted reference, not a fabricated scientific claim).",
+  "description": "Exercises the title_only_partial identity level (Story 1.3's QUARANTINED path, pipeline/canonical_resolver.py's resolve_canonical_identity()) -- a real reference with a title but no DOI, no PMID, no authors, and no year to disambiguate it. Must resolve to QUARANTINED and be dropped from filter_and_dedupe_references()'s trusted output, but counted in status_counts, never silently discarded.",
+  "reference": {
+    "title": "Neuroimaging correlates of executive function in adult populations",
+    "year": null,
+    "authors": [],
+    "doi": "",
+    "found_in_paper": "AuDHD_3.pdf",
+    "source": "parsed_only"
+  },
+  "expected_identity_level": "title_only_partial",
+  "expected_status": "QUARANTINED",
+  "expected_in_trusted_output": false
+}

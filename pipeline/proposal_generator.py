@@ -3,9 +3,18 @@ Stage 7: Research Proposal Generator
 Generates 3-5 concrete, actionable research paper proposals
 from validated gaps. Each proposal is citation-grounded.
 """
+import difflib
 import json
+import re
 from domain_config import inject_domain_into_proposal_prompt
 from utils.azure_client import unwrap
+
+# How many leading hex chars of gap_id to expose to the LLM as a copyable
+# token (Clinova Phase 4, Epic 4.4). Full gap_id is 64 hex chars -- an LLM
+# copying a 12-char token verbatim is far more reliable than a full hash,
+# and prefix-uniqueness is trivially checkable for the <=6 gaps ever put
+# in one prompt (see GAP_REF_LEN's use in _resolve_addresses_gap()).
+GAP_REF_LEN = 12
 
 
 PROPOSAL_SYSTEM_PROMPT = """You are a senior research advisor helping generate concrete, fundable research paper proposals.
@@ -25,6 +34,7 @@ Return ONLY a JSON array:
     "novelty": "What makes this different from existing work (reference the gap evidence)",
     "builds_on": ["List of source paper titles this directly builds upon"],
     "addresses_gap": "Which gap (by title) this proposal addresses",
+    "addresses_gap_ref": "The gap_ref token, copied EXACTLY from the Validated Research Gaps list",
     "expected_contribution": "What the field gains if this paper succeeds",
     "suggested_experiments": ["3-4 specific experiments to validate the approach"],
     "potential_datasets": ["Datasets that could be used"],
@@ -33,6 +43,59 @@ Return ONLY a JSON array:
     "risk": "low|medium|high — technical risk assessment"
   }}
 ]"""
+
+
+def _normalize_title(text) -> str:
+    return re.sub(r"\s+", " ", str(text or "").strip().lower())
+
+
+TITLE_MATCH_RATIO = 0.6
+
+
+def _resolve_addresses_gap(proposals: list, actionable_gaps: list) -> None:
+    """Clinova Phase 4, Epic 4.4 (Scientific Lineage): turns the LLM's
+    free-text/copied gap reference into a validated foreign key. An LLM
+    copying a token correctly is never guaranteed, so this never trusts
+    the raw output alone -- three-way resolution, in order:
+      1. addresses_gap_ref exactly matches a real gap_id's prefix in this
+         run -> "llm_exact".
+      2. else addresses_gap (title text) matches a gap's title, normalized
+         exact first, then the best difflib ratio >= TITLE_MATCH_RATIO ->
+         "title_match".
+      3. else addresses_gap_id = None, resolution = "unresolved" -- the
+         failure mode is explicit and inspectable, never hidden by
+         silently picking the closest-sounding gap.
+    Mutates each proposal in place, adding addresses_gap_id/
+    addresses_gap_id_resolution."""
+    ref_by_prefix = {(g.get("gap_id") or "")[:GAP_REF_LEN]: g.get("gap_id")
+                      for g in actionable_gaps if g.get("gap_id")}
+    by_title = {_normalize_title(g.get("title")): g.get("gap_id")
+                for g in actionable_gaps if g.get("title") and g.get("gap_id")}
+
+    for p in proposals:
+        ref = str(p.get("addresses_gap_ref") or "").strip()
+        if ref and ref in ref_by_prefix:
+            p["addresses_gap_id"] = ref_by_prefix[ref]
+            p["addresses_gap_id_resolution"] = "llm_exact"
+            continue
+
+        title_norm = _normalize_title(p.get("addresses_gap"))
+        if title_norm and title_norm in by_title:
+            p["addresses_gap_id"] = by_title[title_norm]
+            p["addresses_gap_id_resolution"] = "title_match"
+            continue
+
+        best_ratio, best_gap_id = 0.0, None
+        for candidate_title, gap_id in by_title.items():
+            ratio = difflib.SequenceMatcher(None, title_norm, candidate_title).ratio()
+            if ratio > best_ratio:
+                best_ratio, best_gap_id = ratio, gap_id
+        if best_ratio >= TITLE_MATCH_RATIO:
+            p["addresses_gap_id"] = best_gap_id
+            p["addresses_gap_id_resolution"] = "title_match"
+        else:
+            p["addresses_gap_id"] = None
+            p["addresses_gap_id_resolution"] = "unresolved"
 
 
 def generate_proposals(gaps: list, wiki: dict, context: dict, client, domain_config: dict = None) -> list:
@@ -79,6 +142,10 @@ def generate_proposals(gaps: list, wiki: dict, context: dict, client, domain_con
             "validation_status": g.get("validation_status"),
             "missing_connection": g.get("missing_connection"),
             "why_important": g.get("why_important"),
+            # Clinova Phase 4, Epic 4.4 (Scientific Lineage): a copyable
+            # token for the resolver below -- None (never fabricated) for
+            # a gap predating Epic 4.4's identity fields.
+            "gap_ref": (g.get("gap_id") or "")[:GAP_REF_LEN] or None,
         }
         for g in actionable_gaps[:6]  # Cap at 6 gaps to keep prompt manageable
     ]
@@ -117,4 +184,5 @@ Make proposals specific enough that a researcher could begin working on them imm
         else:
             proposals = []
 
+    _resolve_addresses_gap(proposals, actionable_gaps)
     return proposals

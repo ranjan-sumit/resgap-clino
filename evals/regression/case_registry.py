@@ -31,8 +31,12 @@ CASE_TYPE_INDEX = {
         },
         "corpus-reference-duplicate-doi": {
             "case_type": "duplicate_references_same_paper_diff_providers",
-            "feeds": [],
+            "feeds": ["reference_resolution_precision", "reference_recall"],
             "filename": "case-reference-duplicate-doi.json",
+            # 3 real duplicate groups (fixture_duplicate_groups), 2 DOI-
+            # identical records each -- real implicit ground truth for
+            # reference-resolution precision/recall.
+            "duplicate_group_count": 3,
         },
         "corpus-truncated-doi": {
             "case_type": "malformed_citations",
@@ -41,7 +45,7 @@ CASE_TYPE_INDEX = {
         },
         "zero-gap-silent-fabrication": {
             "case_type": "intentionally_false_or_fabrication_robustness",
-            "feeds": [],
+            "feeds": ["extraction_completeness"],
             "filename": "case-zero-gap-silent-fabrication.json",
         },
     },
@@ -53,8 +57,64 @@ CASE_TYPE_INDEX = {
         },
         "known-open-asd-adhd-causal-mechanism": {
             "case_type": "known_genuine_research_gaps",
-            "feeds": [],
+            "feeds": ["gap_precision"],
             "filename": "case-known-open-asd-adhd-causal-mechanism.json",
+        },
+        # Epic 4.3 Bucket C (2026-08-24): 3 new real, cited, dated cases --
+        # see each file's own "verification" block for sources.
+        "fabricated-reelin-subplate-adhd-subtype": {
+            "case_type": "intentionally_false_or_fabrication_robustness",
+            "feeds": ["gap_precision"],
+            "filename": "case-fabricated-reelin-subplate-adhd-subtype.json",
+        },
+        "ambiguous-methylphenidate-response-comorbid-autism-adhd": {
+            "case_type": "ambiguous_gaps",
+            # Deliberately NOT wired into gap_precision: that metric's
+            # ground truth is a clean genuinely-novel/not-novel binary
+            # (see evals/regression/metrics.py's _GAP_PRECISION_GROUND_
+            # TRUTH), and a genuinely-contested question is neither --
+            # folding it in would silently conflate "not confirmed novel"
+            # with "confirmed fabricated," muddying what the number means.
+            # This case is a real, valuable regression fixture for the
+            # CONTESTED/PARTIALLY_OPEN recognition path itself; it just
+            # doesn't feed a numeric §3 metric yet.
+            "feeds": [],
+            "filename": "case-ambiguous-methylphenidate-response-comorbid-autism-adhd.json",
+        },
+        "contradictory-pair-amygdala-volume-autism": {
+            "case_type": "contradictory_research_pairs",
+            "feeds": ["contradiction_recall", "retrieval_recall"],
+            "filename": "case-contradictory-pair-amygdala-volume-autism.json",
+        },
+    },
+    # v3 (Epic 4.3 Bucket B, 2026-08-24): declared as v1's successor format
+    # -- v1's MANIFEST.json is immutable=true, so these new structural
+    # fixtures cannot be added there per 07-evaluation-architecture.md §2.
+    "v3": {
+        "title-author-year-fallback": {
+            "case_type": "duplicate_references_same_paper_diff_providers",
+            "feeds": ["reference_resolution_precision", "reference_recall"],
+            "filename": "case-title-author-year-fallback.json",
+        },
+        "title-only-quarantine": {
+            "case_type": "malformed_citations",
+            "feeds": [],
+            "filename": "case-title-only-quarantine.json",
+        },
+        "unknown-title-collision": {
+            "case_type": "unrelated_references_title_collision",
+            "feeds": [],
+            "filename": "case-unknown-title-collision.json",
+        },
+        "missing-abstract": {
+            "case_type": "missing_abstracts",
+            "feeds": [],
+            "filename": "case-missing-abstract.json",
+        },
+        "parser-failure": {
+            "case_type": "parser_failures",
+            "feeds": [],
+            "filename": "case-parser-failure.json",
         },
     },
 }

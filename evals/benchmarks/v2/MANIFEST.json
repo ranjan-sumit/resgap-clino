@@ -5,8 +5,11 @@
   "format_note": "Deliberately lightweight compared to v1's full wiki/graph fixtures: one gap object + a verified ground-truth status class + real citations. Run via evals/benchmarks/v2/run_gap_challenger_benchmark.py -- these are live-API cases (real search + LLM judgment calls), not part of the mocked `tests/` unittest suite, matching this project's existing convention that evals/benchmarks/ scripts are run by hand, not via pytest.",
   "cases": [
     "known-closed-adhd-heritability",
-    "known-open-asd-adhd-causal-mechanism"
+    "known-open-asd-adhd-causal-mechanism",
+    "fabricated-reelin-subplate-adhd-subtype",
+    "ambiguous-methylphenidate-response-comorbid-autism-adhd",
+    "contradictory-pair-amygdala-volume-autism"
   ],
   "immutable": false,
-  "note": "Unlike v1, NOT marked immutable -- this is the first case and the format itself may still need adjustment as known-open and ambiguous cases are added. Will be reconsidered once the case set stabilizes."
+  "note": "Unlike v1, NOT marked immutable -- the format itself may still need adjustment as new case classes are added. Epic 4.3 Bucket C (2026-08-24) added three new ground_truth_status_class values beyond closed_leaning/open_leaning: 'fabricated' (a constructed, literature-unsupported gap claim -- expected to expose a real pipeline weakness, not pass a test; see that case's expected_current_behavior field), 'ambiguous' (a real, currently-contested question with genuinely disagreeing sources, distinct from open_leaning's 'nobody has studied this yet'), and 'contradictory_pair' (a real, DOI-verified pair of papers reaching opposite conclusions, carrying an additional known_contradicting_pair field). run_gap_challenger_benchmark.py's _ACCEPTABLE_STATUSES and verdict logic were extended accordingly. Will be reconsidered once the case set stabilizes."
 }

@@ -113,14 +113,16 @@ def get_provider(provider_key: str) -> ProviderConfig:
     return PROVIDER_REGISTRY[provider_key]
 
 
-def build_client(provider_key: str, api_key: str, model: str = None):
+def build_client(provider_key: str, api_key: str, model: str = None, token_meter=None):
     """Returns a configured AzureOpenAIClient for the given provider/model
     -- the one factory app.py's three client-construction sites should
     call instead of constructing AzureOpenAIClient directly, so a model
     selection actually takes effect everywhere a run uses the LLM.
     `model=None` uses the provider's own default_model (NVIDIA's current
     gpt-oss-20b when provider_key="nvidia", preserving today's behavior
-    exactly)."""
+    exactly). `token_meter` (Clinova Phase 4, Epic 4.3 token
+    instrumentation) is optional and additive -- omitting it keeps every
+    existing caller's behavior unchanged."""
     # Local import -- avoids a circular import (azure_client.py doesn't
     # need to know about model_providers.py, only the reverse).
     from utils.azure_client import AzureOpenAIClient
@@ -133,4 +135,5 @@ def build_client(provider_key: str, api_key: str, model: str = None):
         model=resolved_model,
         fallback_model=cfg.fallback_model,
         top_p=_MODEL_TOP_P_OVERRIDES.get(resolved_model, 1.0),
+        token_meter=token_meter,
     )

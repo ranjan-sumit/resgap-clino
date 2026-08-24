@@ -8,6 +8,13 @@ import re
 from domain_config import inject_domain_into_gap_prompt
 from utils.azure_client import unwrap
 from pipeline.agent_config import GAP_GENERATOR
+from pipeline.evidence_linker import build_paper_index, match_evidence_ids, resolve_paper_id
+from packages.research_schemas.gap_identity import attach_gap_identity
+
+# LLM evidence lines follow "Paper X (Section: Limitations): quote" (per
+# GAP_DETECTION_PROMPT below) -- this extracts the leading paper reference
+# so it can be resolved to a real paper_id via evidence_linker.
+_EVIDENCE_LINE_PAPER_RE = re.compile(r'^\s*([^(:]+)')
 
 
 class GapDetectionError(Exception):
@@ -89,7 +96,27 @@ Return ONLY a JSON array of gaps:
 ]"""
 
 
-def detect_gaps(wiki: dict, graph: dict, context: dict, client, domain_config: dict = None) -> list:
+def _link_semantic_evidence(gaps: list, wiki: dict, evidence_objects: dict) -> None:
+    """Clinova Phase 4, Epic 4.4 (Scientific Lineage): walks each gap's
+    free-text `evidence` lines, resolves the leading paper reference, and
+    matches the quote against real Evidence Objects. Semantic gaps are
+    always positive_evidence (the prompt requires "Supported by evidence
+    from the papers") -- an empty motivating_evidence_ids here is a real,
+    meaningful signal (the LLM claimed evidence that couldn't be traced),
+    not hidden by falling back to absence_of_evidence."""
+    paper_index = build_paper_index(wiki)
+    for g in gaps:
+        motivating = []
+        for line in g.get("evidence", []) or []:
+            m = _EVIDENCE_LINE_PAPER_RE.match(line or "")
+            paper_ref = m.group(1).strip() if m else ""
+            resolved_paper_id = resolve_paper_id(paper_ref, paper_index)
+            motivating.extend(match_evidence_ids(line, resolved_paper_id, evidence_objects))
+        g["motivating_evidence_ids"] = sorted(set(motivating))
+
+
+def detect_gaps(wiki: dict, graph: dict, context: dict, client, domain_config: dict = None,
+                 evidence_objects: dict = None) -> list:
     """
     Main gap detection: uses wiki + graph + domain context to find research gaps.
     Every gap is grounded with citations.
@@ -195,5 +222,9 @@ Prioritize gaps aligned with the researcher's domain: {context.get('domain', 'Ge
         g["existing_papers"] = []
         g.setdefault("source", "semantic")
         g.setdefault("pattern_id", None)
+        attach_gap_identity(g, evidence_basis="positive_evidence")
+
+    if evidence_objects is not None:
+        _link_semantic_evidence(gaps, wiki, evidence_objects)
 
     return gaps

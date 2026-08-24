@@ -25,6 +25,8 @@ self-reported limitation is not something another paper could "cover").
 """
 import re
 
+from packages.research_schemas.gap_identity import attach_gap_identity
+
 # Bumped whenever PATTERNS' trigger logic or keyword lists change, so a gap
 # produced under an old pattern version can be distinguished if this output
 # is ever cached (mirrors this codebase's stage_logic_version convention,
@@ -317,7 +319,7 @@ def _make_gap(pattern: dict, all_paper_ids: list, evidence_refs: list[dict] = No
     evidence_lines = [f"Pattern check: {pattern['why']}"]
     for ref in (evidence_refs or [])[:5]:
         evidence_lines.append(f"{ref.get('paper_id', '?')} ({ref.get('evidence_type', '?')}): {ref.get('text', '')[:200]}")
-    return {
+    gap = {
         "title": pattern["name"],
         "description": pattern["why"],
         "gap_type": pattern["gap_type"],
@@ -331,6 +333,21 @@ def _make_gap(pattern: dict, all_paper_ids: list, evidence_refs: list[dict] = No
         "source": "deterministic",
         "pattern_id": pattern["id"],
     }
+    # Clinova Phase 4, Epic 4.4 (Scientific Lineage): evidence_refs already
+    # carries real evidence_id values (spread from real Evidence Objects in
+    # _matching_evidence()) -- wire them in rather than discarding them
+    # into the free-text evidence_lines above only. "absence"/"no_keyword"
+    # patterns pass no evidence_refs (the gap IS the absence of a match),
+    # so those honestly get evidence_basis="absence_of_evidence" and an
+    # empty motivating_evidence_ids -- never fabricated.
+    motivating_evidence_ids = [
+        ref["evidence_id"] for ref in (evidence_refs or []) if ref.get("evidence_id")
+    ]
+    gap["motivating_evidence_ids"] = motivating_evidence_ids
+    return attach_gap_identity(
+        gap,
+        evidence_basis="positive_evidence" if motivating_evidence_ids else "absence_of_evidence",
+    )
 
 
 def detect_deterministic_gaps(evidence_objects_by_paper: dict, domain: str) -> list[dict]:
@@ -398,7 +415,7 @@ def _detect_named_limitations(evidence_objects_by_paper: dict) -> list[dict]:
             if not text or key in seen_text:
                 continue
             seen_text.add(key)
-            gaps.append({
+            gap = {
                 "title": f"Self-reported limitation: {text[:80]}",
                 "description": text,
                 "gap_type": _guess_gap_type(text),
@@ -411,5 +428,10 @@ def _detect_named_limitations(evidence_objects_by_paper: dict) -> list[dict]:
                 "existing_papers": [],
                 "source": "deterministic",
                 "pattern_id": "named_limitation_self_reported",
-            })
+            }
+            # Real, always-present evidence_id: this pattern only ever
+            # fires on a real Evidence Object `o`, never an absence.
+            evidence_id = o.get("evidence_id")
+            gap["motivating_evidence_ids"] = [evidence_id] if evidence_id else []
+            gaps.append(attach_gap_identity(gap, evidence_basis="positive_evidence"))
     return gaps

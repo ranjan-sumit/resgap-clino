@@ -574,6 +574,8 @@ from pipeline.graph_quality import score_graph_quality, apply_graph_quality_to_g
 from pipeline.gap_challenger import run_challenge, GAP_CHALLENGER_STAGE_VERSION
 from pipeline.repeatability_score import compute_repeatability_score
 from pipeline.run_compare import compare_runs
+from pipeline.lineage import record_run_lineage, get_technical_lineage, get_scientific_lineage
+from utils.token_meter import TokenMeter
 from pipeline.graph_persistence import (
     connect_ok as arcadedb_connect_ok, save_graph_snapshot, load_graph_snapshot,
     list_graph_snapshots, diff_graph_snapshots, GRAPH_PERSISTENCE_VERSION,
@@ -1027,6 +1029,58 @@ with st.sidebar:
                 except ValueError as e:
                     st.error(str(e))
 
+        # Clinova Phase 4, Epic 4.4 (FR-24) -- Technical lineage is a real
+        # query over research_artifacts.parent_artifact (Epic 4.1's
+        # registry, now populated per-stage instead of one row per run);
+        # Scientific lineage is a pure in-memory join over one run's
+        # already-saved results, tracing each gap back to the real
+        # graph relationships/evidence objects that motivated it.
+        with st.expander("🧬 Lineage (technical + scientific)"):
+            lineage_options = {f"{r['name'][:30]} ({r['id'][:8]}, {r['n_gaps']}g)": r["id"] for r in runs}
+            lineage_label = st.selectbox(
+                "Pick a saved run", options=list(lineage_options.keys()),
+                key="lineage_run_select",
+            )
+            if st.button("Show Lineage", key="lineage_button") and lineage_label:
+                run_id = lineage_options[lineage_label]
+                try:
+                    tech = get_technical_lineage(run_id)
+                    _section_label("Technical lineage (artifact chain)")
+                    if tech["root"] is None:
+                        st.caption("No artifact chain recorded for this run (predates Epic 4.4).")
+                    else:
+                        by_id = {n["artifact_id"]: n for n in tech["nodes"]}
+                        for e in tech["edges"]:
+                            child = by_id.get(e["child"], {})
+                            _item(f"🔗 {e['parent']} → {e['child']} ({child.get('artifact_type','?')})")
+                        if tech["fan_in_edges"]:
+                            st.caption(f"{len(tech['fan_in_edges'])} fan-in edge(s) "
+                                       f"(e.g. N papers → 1 evidence set)")
+                        if tech["orphans"]:
+                            st.warning(f"⚠️ {len(tech['orphans'])} artifact(s) with an unresolved parent.")
+
+                    sci = get_scientific_lineage(run_id)
+                    st.markdown("")
+                    _section_label("Scientific lineage (per-gap chain)")
+                    if not sci["gaps"] and not sci["n_gaps_without_identity"]:
+                        st.caption("No gaps recorded for this run.")
+                    if sci["n_gaps_without_identity"]:
+                        st.caption(f"{sci['n_gaps_without_identity']} gap(s) on this run have no real gap_id "
+                                   f"(predates Epic 4.4's identity fields) and are excluded below.")
+                    for g in sci["gaps"][:10]:
+                        c = g["chain"]
+                        u = g["unresolved"]
+                        n_unresolved = (len(u["evidence_ids_not_found"]) + len(u["relationship_ids_not_found"])
+                                        + len(u["entity_ids_not_found"]))
+                        _item(
+                            f"🧩 {g['title']} [{g['source']}/{g['evidence_basis']}] — "
+                            f"{len(c['evidence'])} evidence · {len(c['relationships'])} relationships · "
+                            f"{len(c['proposals'])} proposal(s)"
+                            + (f" · ⚠️ {n_unresolved} unresolved id(s)" if n_unresolved else "")
+                        )
+                except ValueError as e:
+                    st.error(str(e))
+
         if st.button("🗑 Clear all history", key="clear_history"):
             for r in runs:
                 delete_run(r["id"])
@@ -1101,7 +1155,14 @@ if run_btn and uploaded_files:
     st.session_state.pipeline_trace = []
     st.session_state.loaded_run_id  = None
 
-    client  = build_client(selected_provider_key, provider_api_key, model=selected_model)
+    # Clinova Phase 4, Epic 4.3 token instrumentation (2026-08-24): real,
+    # not fabricated -- see utils/token_meter.py. Wired into every real
+    # pipeline run so run_manifests.token_usage gets its first non-NULL
+    # values, per provider/model support (a provider that rejects
+    # stream_options degrades honestly to no usage capture, never an
+    # estimate).
+    token_meter = TokenMeter()
+    client  = build_client(selected_provider_key, provider_api_key, model=selected_model, token_meter=token_meter)
     context = {
         "domain":   selected_domain,
         "interest": interest or "General research",
@@ -1200,6 +1261,7 @@ if run_btn and uploaded_files:
 
         # Stage 2: Wiki
         upd("Stage 2 — Compiling LLM Wiki pages…", 22)
+        client.set_stage("Stage 2 — LLM Wiki")
         wiki = build_wiki(all_papers, all_trees, client, domain_config=domain_cfg)
         _add_trace("Stage 2 — LLM Wiki",
                    f"{len(all_papers)} papers",
@@ -1337,7 +1399,9 @@ if run_btn and uploaded_files:
         if not gate_blocked:
             # Stage 3: Knowledge Graph
             upd("Stage 3 — Building knowledge graph (LazyGraphRAG)…", 36)
-            graph = build_knowledge_graph(wiki, client, domain_config=domain_cfg)
+            client.set_stage("Stage 3 — Knowledge Graph")
+            graph = build_knowledge_graph(wiki, client, domain_config=domain_cfg,
+                                          evidence_objects=evidence_objects)
             # Clinova Phase 3, Epic 3.1 (FR-7): every graph build is scored,
             # not just counted -- build_status/quality_score feed into the
             # gap confidence downgrade below (real success criterion: "a
@@ -1354,7 +1418,9 @@ if run_btn and uploaded_files:
 
             # Stage 4+5: Gaps + Validation
             upd("Stage 4 — Detecting research gaps…", 50)
-            gaps = detect_gaps(wiki, graph, context, client, domain_config=domain_cfg)
+            client.set_stage("Stage 4 — Gap Detection")
+            gaps = detect_gaps(wiki, graph, context, client, domain_config=domain_cfg,
+                               evidence_objects=evidence_objects)
             # Clinova Phase 3, Epic 3.2 (Hybrid Gap Engine): the deterministic
             # pattern library is a second, independent candidate-gap source,
             # evaluated directly against this run's real Evidence Objects
@@ -1381,6 +1447,7 @@ if run_btn and uploaded_files:
             # silently treated as equal-quality to a clean build.
             gaps = apply_graph_quality_to_gaps(gaps, graph_quality)
             upd("Stage 5 — Validating gaps (Semantic Scholar + arXiv)…", 58)
+            client.set_stage("Stage 5 — Gap Validation")
             validated_gaps = validate_gaps(gaps, client, domain_config=domain_cfg, ss_api_key=ss_api_key.strip())
             _add_trace("Stage 4-5 — Gaps",
                        "Wiki + graph + domain context"
@@ -1399,6 +1466,7 @@ if run_btn and uploaded_files:
             # existing per-paper-failure-isolation philosophy elsewhere.
             if enable_gap_challenger:
                 upd("Stage 5b — Gap Challenger (search coverage + terminal status)…", 62)
+                client.set_stage("Stage 5b — Gap Challenger")
                 for i, gap in enumerate(validated_gaps):
                     upd(f"Stage 5b — Challenging gap {i+1}/{len(validated_gaps)}…", 62)
                     try:
@@ -1420,6 +1488,7 @@ if run_btn and uploaded_files:
 
             # Stage 6: Proposals
             upd("Stage 6 — Generating proposals…", 68)
+            client.set_stage("Stage 6 — Proposals")
             proposals = generate_proposals(validated_gaps, wiki, context, client,
                                            domain_config=domain_cfg)
             _add_trace("Stage 6 — Proposals", f"{len(validated_gaps)} gaps",
@@ -1513,12 +1582,34 @@ if run_btn and uploaded_files:
         # itself has already completed and saved successfully by this
         # point, so a registry-write failure must never look like the run
         # failed.
+        lineage = {"artifact_ids": []}
         try:
             record_artifact(
                 artifact_id=f"pipeline:{saved_id}", artifact_type="pipeline",
                 artifact_version=f"pipeline:{saved_id}",
                 project_id=context.get("domain") or "default",
                 content_hash=saved_id, run_id=saved_id,
+            )
+            # Clinova Phase 4, Epic 4.4 (FR-24) -- writes the Technical
+            # Lineage spine (corpus -> paper_extraction -> evidence_set ->
+            # graph -> gap_set -> proposal_set) so the future Lineage view
+            # has real per-stage artifacts to walk, not just the one
+            # pipeline-level row above. Gate-blocked runs truncate the
+            # spine after evidence_set (see pipeline/lineage.py).
+            lineage = record_run_lineage(
+                run_id=saved_id,
+                project_id=context.get("domain") or "default",
+                papers=all_papers, wiki=wiki, ref_papers=ref_papers,
+                evidence_objects=evidence_objects,
+                graph=None if gate_blocked else graph,
+                gaps=None if gate_blocked else validated_gaps,
+                proposals=None if gate_blocked else proposals,
+                tooling={
+                    "graph_builder": str(GRAPH_PERSISTENCE_VERSION) if enable_graph_persistence else None,
+                    "embedding_model": EMBEDDING_MODEL if enable_gap_challenger else None,
+                    "model_bundle": f"{selected_provider_key}:{selected_model}",
+                },
+                gate_blocked=gate_blocked,
             )
             record_run_manifest(
                 run_id=saved_id,
@@ -1539,21 +1630,21 @@ if run_btn and uploaded_files:
                 search_strategy_version=str(GAP_CHALLENGER_STAGE_VERSION) if enable_gap_challenger else None,
                 academic_search_date=datetime.now().date().isoformat(),
                 search_providers=["semantic_scholar", "arxiv"],
-                # Per-artifact-type registration (graph/gap_set/proposal_set
-                # each as their own ResearchArtifact row) is real, separate
-                # future wiring -- not attempted in this pass. Honest empty
-                # list, not a fabricated reference.
-                output_artifacts=[],
+                # Now real: the Technical Lineage spine's artifact ids
+                # (Epic 4.4), not a fabricated reference.
+                output_artifacts=lineage["artifact_ids"],
                 warnings=gate_block_reasons if gate_blocked else [],
                 quality_gate_results={
                     "corpus": corpus_quality_metrics.get("quality_gate") if corpus_quality_metrics else None,
                     "graph": graph_quality.get("build_status") if graph_quality else None,
                 },
                 run_duration_seconds=round(time.time() - _run_start_time, 1),
-                # token_usage: no call site in this pipeline counts tokens
-                # yet -- omitted (stored NULL), never fabricated. See
-                # pipeline/agent_config.py's Epic 3.6 docstring for the same
-                # honest-gap treatment already applied elsewhere.
+                # Clinova Phase 4, Epic 4.3 token instrumentation
+                # (2026-08-24): real when the provider supports
+                # stream_options and at least one call's usage was
+                # captured; None (not a fabricated 0) otherwise -- see
+                # utils/token_meter.py::to_manifest_dict().
+                token_usage=token_meter.to_manifest_dict(),
             )
         except Exception as e:
             st.warning(f"⚠️ Run Manifest not recorded (run itself completed normally): {e}")

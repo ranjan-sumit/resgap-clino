@@ -422,7 +422,11 @@ def run_challenge(gap: dict, client, ss_api_key: str = "", domain_config: dict =
     Does NOT mutate `gap` -- returns a fresh dict the caller merges in,
     consistent with how deterministic_gap_patterns.py/graph_structural_
     gaps.py build new dicts rather than mutating shared state."""
-    result = {"challenger_stage_version": GAP_CHALLENGER_STAGE_VERSION}
+    # Clinova Phase 4, Epic 4.4 (Scientific Lineage): makes the challenge
+    # self-identifying -- gap.get("gap_id") is None only for a gap
+    # predating Epic 4.4's identity fields, never fabricated.
+    result = {"challenger_stage_version": GAP_CHALLENGER_STAGE_VERSION,
+              "challenged_gap_id": gap.get("gap_id")}
 
     if not check_evidence_supported(gap):
         result["challenger_state"] = "GENERATED"

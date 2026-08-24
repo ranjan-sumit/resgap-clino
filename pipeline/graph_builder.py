@@ -9,11 +9,13 @@ Fixed bugs:
       empty extraction, and no longer risks an uncaught crash from the
       community-detection call on any path (see B13 fix comments below)
 """
+import hashlib
 import json
 import re
 from collections import defaultdict
 from domain_config import inject_domain_into_graph_prompt
 from utils.azure_client import unwrap, LLMCallError
+from pipeline.evidence_linker import EVIDENCE_LINK_VERSION, build_paper_index, match_evidence_ids, resolve_paper_id
 
 ENTITY_EXTRACTION_PROMPT = """You are a knowledge graph builder for research papers.
 
@@ -164,6 +166,56 @@ IMPORTANT: Return ONLY valid JSON — no text before or after."""
         graph_data["relationships"] = []
 
     return graph_data
+
+
+def _assign_relationship_ids(graph_data: dict) -> None:
+    """Clinova Phase 4, Epic 4.4 (Scientific Lineage plumbing): no
+    relationship_id field exists in the LLM's schema (ENTITY_EXTRACTION_
+    PROMPT above is deliberately left byte-identical -- the B24 max_tokens/
+    reasoning-budget fix was live-measured against this exact prompt, and
+    asking the LLM to invent ids would produce non-deterministic,
+    unverifiable ones). Assigned post-hoc instead, deterministically, from
+    the relationship's own content -- covers both the LLM extraction path
+    and _fallback_graph_from_wiki() in one place, since this is called
+    after graph_data settles regardless of which path produced it.
+    Mutates graph_data["relationships"] in place."""
+    seen: dict = {}
+    for rel in graph_data.get("relationships", []):
+        base = hashlib.sha256(
+            f"{rel.get('source','')}:{rel.get('relation','')}:"
+            f"{rel.get('target','')}:{rel.get('paper','')}".encode("utf-8")
+        ).hexdigest()
+        n = seen.get(base, 0)
+        seen[base] = n + 1
+        rel["relationship_id"] = base if n == 0 else f"{base}:{n}"
+
+
+def _link_relationship_evidence(graph_data: dict, wiki: dict, evidence_objects: dict) -> dict:
+    """Clinova Phase 4, Epic 4.4: repairs the real units mismatch between
+    a relationship's "paper" field (an LLM-written paper TITLE) and
+    EvidenceObject.paper_id (a filename) -- build_paper_index()/
+    resolve_paper_id() are the translation layer. Each relationship gets
+    a real provenance_evidence_ids list (honestly [] when nothing
+    resolves, never a best-guess). Returns diagnostics counts."""
+    paper_index = build_paper_index(wiki)
+    relationships_with_evidence = 0
+    paper_titles_unresolved = 0
+    for rel in graph_data.get("relationships", []):
+        paper_ref = rel.get("paper", "")
+        resolved_paper_id = resolve_paper_id(paper_ref, paper_index)
+        if paper_ref and resolved_paper_id is None:
+            paper_titles_unresolved += 1
+        rel["provenance_evidence_ids"] = match_evidence_ids(
+            rel.get("evidence", ""), resolved_paper_id, evidence_objects,
+        )
+        if rel["provenance_evidence_ids"]:
+            relationships_with_evidence += 1
+    return {
+        "relationships_total": len(graph_data.get("relationships", [])),
+        "relationships_with_evidence": relationships_with_evidence,
+        "paper_titles_unresolved": paper_titles_unresolved,
+        "link_version": EVIDENCE_LINK_VERSION,
+    }
 
 
 def _slug(value: str, fallback: str) -> str:
@@ -363,12 +415,13 @@ def prepare_network_diagram_data(graph_data: dict) -> dict:
                 "relation":   rel.get("relation", ""),
                 "evidence":   rel.get("evidence", ""),
                 "paper":      rel.get("paper", ""),
+                "relationship_id": rel.get("relationship_id"),
             })
 
     return {"nodes": nodes, "edges": edges}
 
 
-def build_knowledge_graph(wiki: dict, client, domain_config: dict = None) -> dict:
+def build_knowledge_graph(wiki: dict, client, domain_config: dict = None, evidence_objects: dict = None) -> dict:
     # B13 fix: distinguish an outright failed LLM call from a genuine empty
     # extraction — see Story 1.3 / AD-4. Story 1.2 deliberately left
     # extract_entities_and_relations' LLMCallError uncaught for this to catch.
@@ -405,9 +458,23 @@ def build_knowledge_graph(wiki: dict, client, domain_config: dict = None) -> dic
     except LLMCallError:
         communities = []
 
+    # Clinova Phase 4, Epic 4.4 (Scientific Lineage): assigns relationship_id
+    # to every relationship (LLM path and fallback path both covered, since
+    # this runs after graph_data settles either way), and -- when the
+    # caller supplies this run's real evidence_objects (Stage 2C already
+    # runs before Stage 3, app.py) -- links each relationship's free-text
+    # "evidence" paraphrase to real Evidence Object ids.
+    _assign_relationship_ids(graph_data)
+    provenance_resolution = None
+    if evidence_objects is not None:
+        provenance_resolution = _link_relationship_evidence(graph_data, wiki, evidence_objects)
+
     orphans     = find_orphan_concepts(graph_data, wiki)
     bridges     = find_missing_bridges(graph_data, wiki)
     network     = prepare_network_diagram_data(graph_data)
+
+    if provenance_resolution is not None:
+        diagnostics["provenance_resolution"] = provenance_resolution
 
     return {
         "entities":       graph_data.get("entities", []),

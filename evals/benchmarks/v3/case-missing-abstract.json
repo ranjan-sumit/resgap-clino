@@ -1,0 +1,312 @@
+{
+  "case_id": "missing-abstract",
+  "benchmark_version": "v3",
+  "created": "2026-08-24",
+  "source": "Real paper AuDHD_1.pdf (Data-17072026/), parsed via the real pipeline.pdf_parser.parse_pdf(). The real abstract paragraph (verbatim text, 1503 chars, from 'Autism and Attention Deficit Hyperactivity Disorder (ADHD) are both linked to internalising problems...' through '...Keywords Autism, ADHD, Neurodevelopmental conditions, Anxiety, Depression, Internalising problems') was removed at the TEXT level from both sections['_header'] and full_text (char_count recomputed accordingly) -- not a PDF-byte edit. Both the real unablated and real ablated paper dicts were then run through the real pipeline.wiki_compiler.build_wiki() (live NVIDIA API calls) and pipeline.corpus_quality.score_paper_completeness().",
+  "description": "Exercises corpus completeness scoring when a paper's abstract content is missing. Notable pre-existing finding surfaced while building this fixture: pipeline/pdf_parser.py's _detect_section() never recognizes 'Abstract' as a section header for this real paper (Nature Scientific Reports format has no standalone 'Abstract' heading line), so title + authors + abstract + the entire Introduction all collapse into sections['_header'] undifferentiated -- there is no sections['Abstract'] key, and no wiki-schema 'abstract' field either (pipeline/wiki_compiler.py's WIKI_SYSTEM_PROMPT schema has no such field; contributions/key_findings/methods/datasets are the closest abstract-like summarizing fields). This case therefore ablates the abstract at the TEXT level using fixed, content-verified string markers rather than a structural section removal. Second real finding, from comparing the two live LLM runs' actual output (see observed_behavior.diff): pipeline.corpus_quality.score_paper_completeness()'s binary present/empty/not_extracted scoring was INSENSITIVE to this ablation on this run -- completeness_score stayed 0.25 for both, and no field's status changed (the remaining Methods/Results/Discussion sections gave the LLM enough to still populate every list-type field). But the actual field CONTENT genuinely degraded in quantitative specificity: key_findings items containing a digit (odds ratio, p-value, chi-square statistic, etc.) went from 3/5 non-ablated to 0/5 ablated, and datasets went from 2 entries non-ablated to 1 ablated. A real, narrow gap: the completeness metric measures field presence, not content quality, so it cannot detect this class of degradation.",
+  "ablation": {
+    "method": "marker-delimited substring removal from sections['_header'] and full_text",
+    "start_marker": "Autism and Attention Deficit Hyperactivity Disorder (ADHD) are both linked to internalising problems",
+    "end_marker": "Keywords Autism, ADHD, Neurodevelopmental conditions, Anxiety, Depression, Internalising problems",
+    "removed_char_count": 1503,
+    "removed_text_excerpt": "Autism and Attention Deficit Hyperactivity Disorder (ADHD) are both linked to internalising problems\n(e.g., anxiety, depression) but their frequent co-occurrence makes these relationships difficult to\ndisentangle. We, therefore, adopted a trait-based approach to examine the unique associations of\nau...",
+    "non_ablated_char_count": 53417,
+    "ablated_char_count": 51914
+  },
+  "observed_behavior": {
+    "verified": "2026-08-24, live run via evals/benchmarks/v3/seed_from_real_corpus.py against the real NVIDIA API (pipeline.wiki_compiler.build_wiki) and pipeline.corpus_quality.score_paper_completeness()",
+    "non_ablated": {
+      "wiki_page": {
+        "title": "Neurodiversity and mental health in adulthood: exploring the unique contributions of autism and ADHD to internalising problems",
+        "year": "2026",
+        "domain": "Psychiatry / Clinical Psychology",
+        "contributions": [
+          "Applied a trait‑based approach to disentangle the unique associations of autistic and ADHD traits with internalising problem diagnoses in a large adult population sample.",
+          "Replicated the trait‑based findings in a clinical sub‑sample using a case‑control design (autism, ADHD, neurotypical groups).",
+          "Demonstrated that ADHD traits are a stronger predictor of internalising diagnoses than autistic traits (higher odds ratios).",
+          "Identified differential links: ADHD diagnosis more closely associated with depression, whereas autism diagnosis more closely associated with anxiety.",
+          "Provided quantitative evidence (logistic regression, odds ratios, McFadden R²) to inform research and clinical practice regarding neurodevelopmental conditions."
+        ],
+        "methods": [
+          "Trait‑based correlational analysis using continuous autism and ADHD measures.",
+          "Logistic regression models predicting internalising problem diagnoses from trait scores and covariates (age, sex, education).",
+          "Case‑control design comparing odds of anxiety, depression, and overall internalising problems across autism, ADHD, and neurotypical groups.",
+          "Statistical tests: Pearson correlations, chi‑square goodness‑of‑fit, variance inflation factor (VIF) checks, Bayes factors."
+        ],
+        "datasets": [
+          "Openly accessible general‑population dataset of 4,996 adults from the United Kingdom and United States containing autism and ADHD trait measures.",
+          "Clinical sub‑sample (n = 292) comprising diagnosed autism (n = 73), diagnosed ADHD (n = 73), and neurotypical controls (n = 146)."
+        ],
+        "key_findings": [
+          "ADHD traits showed a stronger association with internalising problem diagnoses than autistic traits (OR 1.04 [1.04, 1.05] vs OR 1.02 [1.02, 1.03]; p < 0.001).",
+          "Both autistic and ADHD traits were significant predictors of internalising diagnoses after controlling for age, sex, and education (p < 0.001).",
+          "In the clinical case‑control sample, adults with autism and adults with ADHD each had significantly higher odds of anxiety, depression, and combined internalising problems compared with neurotypical adults.",
+          "ADHD diagnosis was more closely linked to depression, whereas autism diagnosis was more closely linked to anxiety.",
+          "Overall logistic model fit was significant (χ²(4990, N = 4996) = 462.69, p < 0.001) with McFadden R² = 0.07."
+        ],
+        "limitations": [],
+        "future_work": [],
+        "key_concepts": [
+          "Autism Spectrum Disorder (ASD)",
+          "Attention‑Deficit/Hyperactivity Disorder (ADHD)",
+          "Internalising problems",
+          "Trait‑based approach",
+          "Logistic regression",
+          "Odds ratio",
+          "Case‑control design",
+          "Comorbidity",
+          "McFadden R²",
+          "Neurodiversity",
+          "Generalised Anxiety Disorder (GAD)",
+          "Bayes factor"
+        ],
+        "evaluated_on": [
+          "Prediction of internalising problem diagnoses from autistic and ADHD trait scores",
+          "Association of traits with specific diagnoses: anxiety, depression, and combined internalising",
+          "Odds of internalising diagnoses in clinical autism, ADHD, and neurotypical groups"
+        ],
+        "comparison_gap": ""
+      },
+      "completeness_score": {
+        "fields": {
+          "authors": {
+            "status": "not_extracted",
+            "confidence": "low",
+            "reason": "no extraction path exists yet for this field"
+          },
+          "abstract": {
+            "status": "not_extracted",
+            "confidence": "low",
+            "reason": "no extraction path exists yet for this field"
+          },
+          "introduction": {
+            "status": "not_extracted",
+            "confidence": "low",
+            "reason": "no extraction path exists yet for this field"
+          },
+          "metrics": {
+            "status": "not_extracted",
+            "confidence": "low",
+            "reason": "no extraction path exists yet for this field"
+          },
+          "conclusion": {
+            "status": "not_extracted",
+            "confidence": "low",
+            "reason": "no extraction path exists yet for this field"
+          },
+          "title": {
+            "status": "present",
+            "confidence": "medium",
+            "source": "wiki_compiler (LLM)"
+          },
+          "doi": {
+            "status": "empty",
+            "confidence": "low",
+            "source": "none"
+          },
+          "methodology": {
+            "status": "present",
+            "confidence": "medium",
+            "source": "wiki_compiler (LLM)"
+          },
+          "dataset_population": {
+            "status": "present",
+            "confidence": "medium",
+            "source": "wiki_compiler (LLM)"
+          },
+          "results": {
+            "status": "present",
+            "confidence": "medium",
+            "source": "wiki_compiler (LLM)"
+          },
+          "limitations": {
+            "status": "empty",
+            "confidence": "low"
+          },
+          "future_work": {
+            "status": "empty",
+            "confidence": "low"
+          },
+          "models_interventions": {
+            "status": "not_extracted",
+            "confidence": "low",
+            "reason": "overlaps wiki.methods/contributions but has no distinct field"
+          },
+          "references": {
+            "status": "empty",
+            "confidence": "low"
+          },
+          "tables": {
+            "status": "empty",
+            "confidence": "low",
+            "source": "none"
+          },
+          "figures": {
+            "status": "empty",
+            "confidence": "low"
+          }
+        },
+        "present_count": 4,
+        "total_fields": 16,
+        "achievable_field_count": 11,
+        "completeness_score": 0.25,
+        "achievable_completeness_score": 0.364
+      }
+    },
+    "ablated": {
+      "wiki_page": {
+        "title": "Neurodiversity and mental health in adulthood: exploring the unique contributions of autism and ADHD to internalising problems",
+        "year": "2026",
+        "domain": "Clinical Psychology / Psychiatry",
+        "contributions": [
+          "Applied a trait‑based approach to disentangle the unique associations of autism and ADHD with clinically diagnosed internalising problems in adults.",
+          "Utilised a large, nationally representative sample of 5,000 adults from the United Kingdom and the United States.",
+          "Demonstrated that ADHD traits are a stronger and statistically more important predictor of internalising symptoms than autistic traits.",
+          "Replicated findings from a prior study in a sample that includes clinically diagnosed neurodevelopmental conditions.",
+          "Provided evidence that the relative impact of autism and ADHD on internalising problems is distinct, informing clinical assessment and intervention."
+        ],
+        "methods": [
+          "Trait‑based statistical modelling (multivariate linear regression).",
+          "Control for covariates and assessment of multivariate outliers.",
+          "Use of existing openly accessible dataset containing autism and ADHD measures.",
+          "Assessment of internalising problem diagnoses (generalised anxiety disorder, depression)."
+        ],
+        "datasets": [
+          "Openly accessible dataset with autism and ADHD measures (reference 37)."
+        ],
+        "key_findings": [
+          "ADHD traits were significantly associated with clinically diagnosed internalising problems.",
+          "The association between ADHD traits and internalising symptoms was stronger than that of autistic traits.",
+          "All relationships were approximately linear and no multivariate outliers were detected.",
+          "The findings replicated a previous study that used a trait‑based approach.",
+          "The study highlights the distinct contribution of ADHD to internalising problems in adulthood."
+        ],
+        "limitations": [],
+        "future_work": [],
+        "key_concepts": [
+          "Autism Spectrum Disorder",
+          "Attention‑Deficit/Hyperactivity Disorder",
+          "Internalising problems",
+          "Trait‑based approach",
+          "Neurodiversity",
+          "Comorbidity",
+          "Generalised Anxiety Disorder",
+          "Depression",
+          "Multivariate regression",
+          "Linear relationships",
+          "Diagnostic co‑occurrence",
+          "Symptom overlap"
+        ],
+        "evaluated_on": [
+          "Clinically diagnosed internalising problems (GAD, depression)",
+          "Associations between autism and ADHD traits and internalising symptoms"
+        ],
+        "comparison_gap": null
+      },
+      "completeness_score": {
+        "fields": {
+          "authors": {
+            "status": "not_extracted",
+            "confidence": "low",
+            "reason": "no extraction path exists yet for this field"
+          },
+          "abstract": {
+            "status": "not_extracted",
+            "confidence": "low",
+            "reason": "no extraction path exists yet for this field"
+          },
+          "introduction": {
+            "status": "not_extracted",
+            "confidence": "low",
+            "reason": "no extraction path exists yet for this field"
+          },
+          "metrics": {
+            "status": "not_extracted",
+            "confidence": "low",
+            "reason": "no extraction path exists yet for this field"
+          },
+          "conclusion": {
+            "status": "not_extracted",
+            "confidence": "low",
+            "reason": "no extraction path exists yet for this field"
+          },
+          "title": {
+            "status": "present",
+            "confidence": "medium",
+            "source": "wiki_compiler (LLM)"
+          },
+          "doi": {
+            "status": "empty",
+            "confidence": "low",
+            "source": "none"
+          },
+          "methodology": {
+            "status": "present",
+            "confidence": "medium",
+            "source": "wiki_compiler (LLM)"
+          },
+          "dataset_population": {
+            "status": "present",
+            "confidence": "medium",
+            "source": "wiki_compiler (LLM)"
+          },
+          "results": {
+            "status": "present",
+            "confidence": "medium",
+            "source": "wiki_compiler (LLM)"
+          },
+          "limitations": {
+            "status": "empty",
+            "confidence": "low"
+          },
+          "future_work": {
+            "status": "empty",
+            "confidence": "low"
+          },
+          "models_interventions": {
+            "status": "not_extracted",
+            "confidence": "low",
+            "reason": "overlaps wiki.methods/contributions but has no distinct field"
+          },
+          "references": {
+            "status": "empty",
+            "confidence": "low"
+          },
+          "tables": {
+            "status": "empty",
+            "confidence": "low",
+            "source": "none"
+          },
+          "figures": {
+            "status": "empty",
+            "confidence": "low"
+          }
+        },
+        "present_count": 4,
+        "total_fields": 16,
+        "achievable_field_count": 11,
+        "completeness_score": 0.25,
+        "achievable_completeness_score": 0.364
+      }
+    },
+    "diff": {
+      "completeness_score_delta": 0.0,
+      "achievable_completeness_score_delta": 0.0,
+      "present_count_delta": 0,
+      "field_status_changes": {},
+      "title_changed": false,
+      "contributions_count_non_ablated": 5,
+      "contributions_count_ablated": 5,
+      "key_findings_count_non_ablated": 5,
+      "key_findings_count_ablated": 5,
+      "datasets_count_non_ablated": 2,
+      "datasets_count_ablated": 1,
+      "methods_count_non_ablated": 4,
+      "methods_count_ablated": 4,
+      "evaluated_on_count_non_ablated": 3,
+      "evaluated_on_count_ablated": 2,
+      "key_findings_with_numbers_non_ablated": 3,
+      "key_findings_with_numbers_ablated": 0
+    }
+  }
+}

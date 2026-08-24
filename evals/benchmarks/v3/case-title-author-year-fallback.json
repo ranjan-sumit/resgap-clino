@@ -1,0 +1,56 @@
+{
+  "case_id": "title-author-year-fallback",
+  "benchmark_version": "v3",
+  "created": "2026-08-24",
+  "source": "Real bibliographic records copied from evals/benchmarks/v1/case-reference-duplicate-doi.json's fixture_duplicate_groups (the real AuDHD corpus reference set), with the DOI field stripped to force resolution down to the title_author_year fallback path -- not invented records.",
+  "description": "Exercises pipeline/canonical_resolver.py's title_author_year identity path (the fallback used when no DOI/PMID/OpenAlex/SS id is available) -- a code path v1/v2's fixtures never exercise, since all of v1's duplicate/contamination cases resolve via DOI.",
+  "positive_group": {
+    "description": "Two identical-format copies of the same real paper record, DOI removed. Must merge into exactly one canonical entry at identity_level=title_author_year, status=ACCEPTED.",
+    "references": [
+      {
+        "title": "Neurodiversity and mental health in adulthood: exploring the unique contributions of autism and ADHD to internalising problems",
+        "year": 2026,
+        "authors": ["Luca D. Hargitai", "Lucy H. Waldren", "Lucy A. Livingston", "Florence Y. N. Leung", "Punit Shah"],
+        "venue": "Scientific Reports",
+        "doi": "",
+        "found_in_paper": "AuDHD_1.pdf",
+        "source": "crossref"
+      },
+      {
+        "title": "Neurodiversity and mental health in adulthood: exploring the unique contributions of autism and ADHD to internalising problems",
+        "year": 2026,
+        "authors": ["Luca D. Hargitai", "Lucy H. Waldren", "Lucy A. Livingston", "Florence Y. N. Leung", "Punit Shah"],
+        "venue": "Scientific Reports",
+        "doi": "",
+        "found_in_paper": "AuDHD_2.pdf",
+        "source": "openalex"
+      }
+    ],
+    "expected_canonical_entry_count": 1,
+    "expected_identity_level": "title_author_year",
+    "expected_status": "ACCEPTED"
+  },
+  "negative_pair": {
+    "description": "Two genuinely different real papers from the same corpus -- must NOT merge.",
+    "references": [
+      {
+        "title": "Neurodiversity and mental health in adulthood: exploring the unique contributions of autism and ADHD to internalising problems",
+        "year": 2026,
+        "authors": ["Luca D. Hargitai", "Lucy H. Waldren"],
+        "doi": "", "found_in_paper": "AuDHD_1.pdf"
+      },
+      {
+        "title": "Autism spectrum disorder",
+        "year": 2020,
+        "authors": [],
+        "doi": "", "found_in_paper": "AuDHD_1.pdf"
+      }
+    ],
+    "expected_merge": false
+  },
+  "known_limitation_finding": {
+    "summary": "Live-verified while building this fixture (2026-08-24): resolve_canonical_identity()'s title_author_year path is NOT robust to author-name-format variation. The SAME real paper, formatted as ['Luca D. Hargitai', ...] vs ['Hargitai, Luca D.'], produces two DIFFERENT identity keys -- because _first_author_surname() takes the raw first whitespace-split token after stripping commas, not a true parsed surname, so 'Luca' and 'Hargitai' are extracted from the two formats respectively.",
+    "verification": "Confirmed directly: resolve_canonical_identity({'title': 'Neurodiversity and mental health in adulthood', 'year': 2026, 'authors': ['Luca D. Hargitai', 'Lucy H. Waldren']}) and the same record with authors=['Hargitai, Luca D.'] produce different identity_key values.",
+    "implication": "This positive_group above deliberately uses IDENTICAL author-list formatting in both copies (the realistic case: the same extraction pipeline re-processing the same paper) -- it does not claim robustness to cross-provider name-format differences, which is a real, open gap for a future story to close, not something this fixture pretends is already solved."
+  }
+}
