@@ -1,12 +1,14 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowUpRight } from "lucide-react";
-import { Alert, AlertDescription } from "@/components/ui/alert";
 import { CountStatView } from "@/components/data/count-stat";
 import { ConfidenceStat } from "@/components/data/confidence-stat";
 import { StatusBadge } from "@/components/data/status-badge";
 import { EmptyState } from "@/components/data/empty-state";
 import { PageHero } from "@/components/shell/page-hero";
 import { api } from "@/lib/api";
+
+export const metadata: Metadata = { title: "Dashboard" };
 
 export default async function DashboardPage() {
   const projects = await api.listProjects();

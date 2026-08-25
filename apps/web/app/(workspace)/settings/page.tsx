@@ -1,6 +1,9 @@
+import type { Metadata } from "next";
 import { PageHero } from "@/components/shell/page-hero";
 import { getBranding } from "@/lib/branding";
 import { api } from "@/lib/api";
+
+export const metadata: Metadata = { title: "Settings" };
 
 export default async function SettingsPage() {
   const [{ theme }, health] = await Promise.all([getBranding(), api.health()]);

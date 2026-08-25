@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { EmptyState } from "@/components/data/empty-state";
@@ -6,6 +7,8 @@ import { PageHero } from "@/components/shell/page-hero";
 import { TechnicalDiagram } from "@/components/lineage/technical-diagram";
 import { GapChainCard } from "@/components/lineage/gap-chain";
 import { api, ApiError } from "@/lib/api";
+
+export const metadata: Metadata = { title: "Lineage" };
 
 export default async function LineagePage({ params }: { params: Promise<{ runId: string }> }) {
   const { runId } = await params;

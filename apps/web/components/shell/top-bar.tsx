@@ -1,6 +1,6 @@
 "use client";
 
-import { Bell, Search, User } from "lucide-react";
+import { Bell, User } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { CommandPalette } from "@/components/shell/command-palette";
 import type { ProjectSummary } from "@/lib/api";
 
 export function TopBar({ projects }: { projects: ProjectSummary[] }) {
@@ -48,14 +49,7 @@ export function TopBar({ projects }: { projects: ProjectSummary[] }) {
       </div>
 
       <div className="flex items-center gap-3">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span className="flex h-8 w-8 cursor-not-allowed items-center justify-center rounded-md text-neutral/40">
-              <Search className="h-4 w-4" aria-hidden />
-            </span>
-          </TooltipTrigger>
-          <TooltipContent>Search arrives with the Corpus and Evidence screens.</TooltipContent>
-        </Tooltip>
+        <CommandPalette />
         <Tooltip>
           <TooltipTrigger asChild>
             <span className="flex h-8 w-8 cursor-not-allowed items-center justify-center rounded-md text-neutral/40">

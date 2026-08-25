@@ -1,9 +1,12 @@
+import type { Metadata } from "next";
 import { PageHero } from "@/components/shell/page-hero";
 import { CountStatView } from "@/components/data/count-stat";
 import { EmptyState } from "@/components/data/empty-state";
 import { ModelResultsTable } from "@/components/council/model-results-table";
 import { SensitivityBars } from "@/components/council/sensitivity-bars";
 import { api } from "@/lib/api";
+
+export const metadata: Metadata = { title: "Research Council" };
 
 function ListSection({ title, items }: { title: string; items: string[] }) {
   if (items.length === 0) return null;

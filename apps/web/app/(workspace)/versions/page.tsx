@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
@@ -7,6 +8,8 @@ import { StatusBadge } from "@/components/data/status-badge";
 import { EmptyState } from "@/components/data/empty-state";
 import { PromoteButton } from "@/components/artifacts/promote-button";
 import { api } from "@/lib/api";
+
+export const metadata: Metadata = { title: "Versions" };
 
 export default async function VersionsPage() {
   const { artifacts, empty_reason } = await api.artifacts();

@@ -1,9 +1,12 @@
+import type { Metadata } from "next";
 import { PageHero } from "@/components/shell/page-hero";
 import { ConfidenceStat } from "@/components/data/confidence-stat";
 import { CountStatView } from "@/components/data/count-stat";
 import { EmptyState } from "@/components/data/empty-state";
 import { api } from "@/lib/api";
 import type { GraphView } from "@/lib/api";
+
+export const metadata: Metadata = { title: "Knowledge Graph" };
 
 // A muted dot per type -- enough to scan by type without turning the
 // entity list into a wall of rainbow badges (the "tag soup" problem the

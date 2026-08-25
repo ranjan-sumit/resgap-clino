@@ -1,7 +1,10 @@
+import type { Metadata } from "next";
 import { PageHero } from "@/components/shell/page-hero";
 import { ConfidenceStat } from "@/components/data/confidence-stat";
 import { EmptyState } from "@/components/data/empty-state";
 import { api } from "@/lib/api";
+
+export const metadata: Metadata = { title: "Evidence" };
 
 export default async function EvidencePage() {
   const projects = await api.listProjects();

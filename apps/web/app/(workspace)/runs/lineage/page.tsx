@@ -1,6 +1,9 @@
+import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { EmptyState } from "@/components/data/empty-state";
 import { api } from "@/lib/api";
+
+export const metadata: Metadata = { title: "Lineage" };
 
 export default async function LineageResolverPage() {
   const { runs } = await api.listRuns(1);

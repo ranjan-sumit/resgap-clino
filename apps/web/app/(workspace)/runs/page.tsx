@@ -1,7 +1,10 @@
+import type { Metadata } from "next";
 import { RunsTable } from "@/components/runs/runs-table";
 import { EmptyState } from "@/components/data/empty-state";
 import { PageHero } from "@/components/shell/page-hero";
 import { api } from "@/lib/api";
+
+export const metadata: Metadata = { title: "Runs" };
 
 export default async function RunsPage() {
   const { runs, empty_reason } = await api.listRuns();

@@ -1,8 +1,11 @@
+import type { Metadata } from "next";
 import { PageHero } from "@/components/shell/page-hero";
 import { ConfidenceStat } from "@/components/data/confidence-stat";
 import { StatusBadge } from "@/components/data/status-badge";
 import { EmptyState } from "@/components/data/empty-state";
 import { api } from "@/lib/api";
+
+export const metadata: Metadata = { title: "Corpus" };
 
 export default async function CorpusPage() {
   const projects = await api.listProjects();

@@ -1,8 +1,11 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { PageHero } from "@/components/shell/page-hero";
 import { StatusBadge } from "@/components/data/status-badge";
 import { EmptyState } from "@/components/data/empty-state";
 import { api } from "@/lib/api";
+
+export const metadata: Metadata = { title: "Research Gaps" };
 
 export default async function GapsPage() {
   const projects = await api.listProjects();

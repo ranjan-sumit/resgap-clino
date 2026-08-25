@@ -1,4 +1,5 @@
 import { Fragment } from "react";
+import type { Metadata } from "next";
 import Link from "next/link";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -92,6 +93,20 @@ function ManifestPanel({ manifest }: { manifest: RunManifestView }) {
       )}
     </div>
   );
+}
+
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ runId: string }>;
+}): Promise<Metadata> {
+  const { runId } = await params;
+  try {
+    const run = await api.getRun(runId);
+    return { title: run.name };
+  } catch {
+    return { title: "Run" };
+  }
 }
 
 export default async function RunDetailPage({ params }: { params: Promise<{ runId: string }> }) {

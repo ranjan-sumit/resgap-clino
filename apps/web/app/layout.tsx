@@ -4,7 +4,10 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Clinova Research Intelligence Platform",
+  title: {
+    default: "Clinova Research Intelligence Platform",
+    template: "%s · Clinova",
+  },
   description: "Evidence → Gaps → Hypotheses → Studies",
 };
 

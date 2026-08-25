@@ -1,6 +1,9 @@
+import type { Metadata } from "next";
 import { PageHero } from "@/components/shell/page-hero";
 import { EmptyState } from "@/components/data/empty-state";
 import { api } from "@/lib/api";
+
+export const metadata: Metadata = { title: "Proposals" };
 
 const RISK_TONE: Record<string, string> = {
   low: "text-semantic-success",

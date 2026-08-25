@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { ShieldCheck } from "lucide-react";
 import {
@@ -11,6 +12,8 @@ import { ComparePicker } from "@/components/runs/compare-picker";
 import { PromoteCandidateButton } from "@/components/runs/promote-candidate-button";
 import { PageHero } from "@/components/shell/page-hero";
 import { api, ApiError, type RunComparison } from "@/lib/api";
+
+export const metadata: Metadata = { title: "Compare" };
 
 function DiffList({ title, items }: { title: string; items: string[] }) {
   return (
