@@ -66,10 +66,24 @@ def corpus_confidence(results: dict) -> Measure:
 def graph_confidence(results: dict) -> Measure:
     g = results.get("graph_quality")
     if not g:
+        # graph_quality (Epic 3.1 scoring) and results["graph"] (the graph
+        # itself) are two separate fields written at two separate points --
+        # an older run can genuinely have a real, populated graph with no
+        # quality score ever computed for it (it predates Epic 3.1). Saying
+        # "no graph was built" for that case is factually wrong: the stats
+        # tiles right above this one show real non-zero entity/relationship
+        # counts from that same graph. Distinguish the two honestly.
+        stats = (results.get("graph") or {}).get("stats") or {}
+        n_entities = stats.get("entity_count", 0)
+        if n_entities > 0:
+            basis = (f"A knowledge graph exists for this run ({n_entities} entities, "
+                     f"{stats.get('relationship_count', 0)} relationships), but quality was never scored "
+                     f"for it -- this run predates graph-quality scoring (Epic 3.1).")
+        else:
+            basis = "No knowledge graph was built for this run (quality gate blocked gap analysis)."
         return Measure(
             key="graph_confidence", label="Graph Confidence", display="Not recorded",
-            level="Unknown", recorded=False,
-            basis="No knowledge graph was built for this run (quality gate blocked gap analysis).",
+            level="Unknown", recorded=False, basis=basis,
             source="pipeline/graph_quality.py::score_graph_quality",
         )
     value = g.get("quality_score")

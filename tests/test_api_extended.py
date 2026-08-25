@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fastapi.testclient import TestClient
 
 from apps.api.main import app
+from apps.api.services.measures import graph_confidence
 from utils.database import _get_conn, init_db
 
 client = TestClient(app)
@@ -21,6 +22,33 @@ client = TestClient(app)
 # The one real project this whole session's data lives under -- same
 # fixture project every other apps/api test file already assumes.
 PROJECT_ID = "Healthcare AI"
+
+
+class GraphConfidenceTests(unittest.TestCase):
+    """Regression test for a real bug found via screenshot review: an older
+    run with a populated results["graph"] but no results["graph_quality"]
+    (it predates Epic 3.1 scoring) was reporting "No knowledge graph was
+    built for this run" -- factually wrong, since the graph genuinely
+    exists. Must distinguish "no graph" from "graph exists, unscored"."""
+
+    def test_graph_exists_but_unscored_says_so_honestly(self):
+        results = {"graph": {"stats": {"entity_count": 61, "relationship_count": 61}}}
+        m = graph_confidence(results)
+        self.assertFalse(m.recorded)
+        self.assertIn("61 entities", m.basis)
+        self.assertNotIn("No knowledge graph was built", m.basis)
+
+    def test_genuinely_no_graph_says_so(self):
+        m = graph_confidence({})
+        self.assertFalse(m.recorded)
+        self.assertIn("No knowledge graph was built", m.basis)
+
+    def test_scored_graph_still_uses_the_real_quality_score(self):
+        results = {"graph_quality": {"quality_score": 0.9, "build_status": "CLEAN",
+                                       "entity_count": 10, "relationship_count": 8}}
+        m = graph_confidence(results)
+        self.assertTrue(m.recorded)
+        self.assertEqual(m.value, 0.9)
 
 
 class CorpusRouteTests(unittest.TestCase):

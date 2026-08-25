@@ -54,6 +54,43 @@ def main() -> int:
         )
         page.screenshot(path=str(SCREENSHOT_DIR / "10_dashboard_redesign.png"), full_page=True)
 
+        # --- Sidebar: Dashboard is reachable from the persistent nav (it
+        # previously had no nav entry at all -- only reachable via Landing's
+        # CTA or browser back), and the old "Research" planned item that sat
+        # directly above the live "Research" group heading (identical label,
+        # one dead, one real) is gone.
+        nav_text = page.locator('nav[aria-label="Primary"]').inner_text()
+        check("sidebar: Dashboard is a real, reachable nav link", "Dashboard" in nav_text)
+        dashboard_link = page.locator('nav[aria-label="Primary"] a', has_text="Dashboard")
+        check("sidebar: Dashboard link points at /dashboard", dashboard_link.get_attribute("href") == "/dashboard")
+        research_occurrences = nav_text.lower().count("research")
+        # "Research" the live group heading, "Research Gaps"/"Research
+        # Council" (Intelligence items), "Research Intelligence" (product
+        # name) are all expected -- a bare duplicate planned "Research" item
+        # directly under "Workspace" is not.
+        workspace_items_text = page.evaluate("""() => {
+            const heading = [...document.querySelectorAll('nav[aria-label="Primary"] div')]
+                .find(d => d.textContent.trim() === 'WORKSPACE');
+            return heading ? heading.parentElement.innerText : '';
+        }""")
+        check(
+            "sidebar: Workspace group has no dead 'Research' item duplicating the group below",
+            "Research" not in workspace_items_text.replace("WORKSPACE", ""),
+            f"Workspace group text: {workspace_items_text!r}",
+        )
+
+        # --- Graph confidence: an older run with a real, populated graph
+        # but no graph_quality score must say so honestly, not claim no
+        # graph exists at all (a real bug caught by screenshot review --
+        # the stats tiles right above it show 61 real entities).
+        page.goto(f"{WEB_BASE}/knowledge-graph", wait_until="networkidle", timeout=20000)
+        confidence_text = page.locator("text=Graph Confidence").locator("..").inner_text()
+        check(
+            "knowledge-graph: unscored-but-real graph is described honestly",
+            "No knowledge graph was built" not in confidence_text,
+            confidence_text[:200],
+        )
+
         # --- New screens: each loads real content, not an error/empty shell.
         # Section labels (ConfidenceStat, CountStatView, h2 headers) are
         # deliberately rendered uppercase via CSS text-transform -- compare
@@ -95,18 +132,23 @@ def main() -> int:
             f"got {stage_order}",
         )
 
-        # --- Knowledge Graph: relationship rows are compact (not a
-        # multi-line wrap caused by a right-floated long paper name).
+        # --- Knowledge Graph: relationships are grouped by source entity
+        # (one row per source, all its targets listed inside), not one row
+        # per edge -- a fallback-built graph's ~60 "paper mentions concept"
+        # edges collapse to a small number of source groups instead of a
+        # near-identical-looking wall of 60 rows.
         page.goto(f"{WEB_BASE}/knowledge-graph", wait_until="networkidle", timeout=20000)
-        row_heights = page.evaluate("""() => {
+        group_count, edge_count = page.evaluate("""() => {
             const heading = [...document.querySelectorAll('h2')].find(h => h.textContent.includes('Relationships'));
             const list = heading ? heading.parentElement.querySelector('ul') : null;
-            return list ? [...list.children].slice(0, 10).map(r => r.getBoundingClientRect().height) : [];
+            const groups = list ? list.children.length : 0;
+            const edges = list ? list.querySelectorAll('.rounded.bg-muted').length : 0;
+            return [groups, edges];
         }""")
         check(
-            "knowledge-graph: relationship rows stay compact (<70px)",
-            all(h < 70 for h in row_heights) if row_heights else False,
-            f"heights sample: {row_heights[:5]}",
+            "knowledge-graph: relationships collapse into far fewer source groups than raw edges",
+            group_count > 0 and edge_count > group_count,
+            f"{group_count} source groups covering {edge_count} edges",
         )
 
         # --- Versions + promote: exercised against a throwaway artifact

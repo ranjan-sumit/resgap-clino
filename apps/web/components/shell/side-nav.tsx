@@ -24,7 +24,7 @@ export function SideNav({ productName }: { productName: string }) {
     >
       <div className="pointer-events-none absolute inset-0 bg-brand-glow opacity-60" aria-hidden />
 
-      <Link href="/" className="relative z-10 mb-10 flex items-center gap-2.5 px-2">
+      <Link href="/dashboard" className="relative z-10 mb-10 flex items-center gap-2.5 px-2">
         <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-gradient-to-br from-clinova-cyan to-clinova-light shadow-glow-sm">
           <span className="font-display text-sm text-clinova-deep">C</span>
         </span>

@@ -14,12 +14,28 @@ const TYPE_DOT: Record<string, string> = {
   model: "bg-clinova-deep",
 };
 
+const COUNT_HINTS: Record<string, string> = {
+  communities: "Thematic clusters of related entities, identified by an LLM pass over the graph. Often 0 for a fallback-built graph (no LLM entity extraction ran for this run).",
+  orphans: "Entities with few or no relationships connecting them to the rest of the graph -- expected to be high on a fallback-built graph, which mostly has paper-to-concept \"mentions\" edges rather than concept-to-concept relationships.",
+  bridges: "Cases where one paper's stated limitation could potentially be addressed by another paper's proposed solution -- a real cross-paper research-gap signal, not a graph-structure defect.",
+};
+
 function groupByType(entities: GraphView["entities"]) {
   const groups = new Map<string, GraphView["entities"]>();
   for (const e of entities) {
     const list = groups.get(e.type) ?? [];
     list.push(e);
     groups.set(e.type, list);
+  }
+  return [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
+}
+
+function groupBySource(relationships: GraphView["relationships"]) {
+  const groups = new Map<string, GraphView["relationships"]>();
+  for (const r of relationships) {
+    const list = groups.get(r.source) ?? [];
+    list.push(r);
+    groups.set(r.source, list);
   }
   return [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
 }
@@ -31,6 +47,7 @@ export default async function KnowledgeGraphPage() {
   }
 
   const graph = await api.graph(projects[0].project_id);
+  const relationshipGroups = groupBySource(graph.relationships);
 
   return (
     <div className="mx-auto max-w-6xl space-y-8">
@@ -38,7 +55,7 @@ export default async function KnowledgeGraphPage() {
 
       <div className="grid grid-cols-5 gap-4">
         {graph.counts.map((c) => (
-          <CountStatView key={c.key} stat={c} />
+          <CountStatView key={c.key} stat={c} hint={COUNT_HINTS[c.key]} />
         ))}
       </div>
 
@@ -98,22 +115,33 @@ export default async function KnowledgeGraphPage() {
             <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-neutral">
               Relationships ({graph.relationships.length})
             </h2>
+            {/* Grouped by source -- a fallback-built graph (no LLM entity
+                extraction) is mostly "paper mentions concept" edges, so the
+                same source repeats for dozens of rows; showing it once per
+                group instead of once per edge is what makes this scannable. */}
             <ul className="divide-y divide-border/60 rounded-lg border border-border/60 bg-card shadow-card">
-              {graph.relationships.slice(0, 60).map((r, i) => (
-                <li key={i} className="px-4 py-2.5 text-sm">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-slate-800">{r.source}</span>
-                    <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-xs text-neutral">
-                      {r.relation}
-                    </span>
-                    <span className="text-slate-800">{r.target}</span>
+              {relationshipGroups.slice(0, 40).map(([source, edges]) => (
+                <li key={source} className="px-4 py-3 text-sm">
+                  <p className="font-medium text-slate-800">{source}</p>
+                  <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1.5 pl-3">
+                    {edges.map((e, i) => (
+                      <span
+                        key={i}
+                        className="inline-flex items-center gap-1.5 text-xs"
+                        title={e.paper ?? undefined}
+                      >
+                        <span className="rounded bg-muted px-1.5 py-0.5 text-neutral">{e.relation}</span>
+                        <span className="text-slate-800">{e.target}</span>
+                      </span>
+                    ))}
                   </div>
-                  {r.paper && <p className="mt-1 truncate text-xs text-neutral" title={r.paper}>{r.paper}</p>}
                 </li>
               ))}
             </ul>
-            {graph.relationships.length > 60 && (
-              <p className="mt-2 text-xs text-neutral">Showing the first 60 of {graph.relationships.length}.</p>
+            {relationshipGroups.length > 40 && (
+              <p className="mt-2 text-xs text-neutral">
+                Showing the first 40 of {relationshipGroups.length} source entities.
+              </p>
             )}
           </section>
         </>

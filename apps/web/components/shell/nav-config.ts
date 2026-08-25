@@ -19,7 +19,7 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     label: "Workspace",
     items: [
-      { label: "Research", status: "planned" },
+      { label: "Dashboard", href: "/dashboard", status: "live" },
       { label: "Projects", status: "planned" },
     ],
   },
