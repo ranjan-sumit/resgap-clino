@@ -99,10 +99,9 @@ def main() -> int:
         # multi-line wrap caused by a right-floated long paper name).
         page.goto(f"{WEB_BASE}/knowledge-graph", wait_until="networkidle", timeout=20000)
         row_heights = page.evaluate("""() => {
-            const rows = [...document.querySelectorAll('li')].filter(
-                li => li.querySelector('.rounded-full') && li.className.includes('border')
-            );
-            return rows.slice(0, 10).map(r => r.getBoundingClientRect().height);
+            const heading = [...document.querySelectorAll('h2')].find(h => h.textContent.includes('Relationships'));
+            const list = heading ? heading.parentElement.querySelector('ul') : null;
+            return list ? [...list.children].slice(0, 10).map(r => r.getBoundingClientRect().height) : [];
         }""")
         check(
             "knowledge-graph: relationship rows stay compact (<70px)",

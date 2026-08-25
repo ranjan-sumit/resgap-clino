@@ -55,13 +55,13 @@ export default async function ProposalsPage() {
                 {p.methodology && (
                   <div>
                     <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-neutral">Methodology</p>
-                    <p className="text-clinova-deep">{p.methodology}</p>
+                    <p className="text-slate-800">{p.methodology}</p>
                   </div>
                 )}
                 {p.novelty && (
                   <div>
                     <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-neutral">Novelty</p>
-                    <p className="text-clinova-deep">{p.novelty}</p>
+                    <p className="text-slate-800">{p.novelty}</p>
                   </div>
                 )}
                 {p.expected_contribution && (
@@ -69,13 +69,13 @@ export default async function ProposalsPage() {
                     <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-neutral">
                       Expected contribution
                     </p>
-                    <p className="text-clinova-deep">{p.expected_contribution}</p>
+                    <p className="text-slate-800">{p.expected_contribution}</p>
                   </div>
                 )}
                 {p.builds_on.length > 0 && (
                   <div>
                     <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-neutral">Builds on</p>
-                    <p className="text-clinova-deep">{p.builds_on.join(", ")}</p>
+                    <p className="text-slate-800">{p.builds_on.join(", ")}</p>
                   </div>
                 )}
               </div>
@@ -85,7 +85,7 @@ export default async function ProposalsPage() {
                   <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-neutral">
                     Suggested experiments
                   </p>
-                  <ul className="list-disc space-y-1 pl-4 text-sm text-clinova-deep">
+                  <ul className="list-disc space-y-1 pl-4 text-sm text-slate-800">
                     {p.suggested_experiments.map((e, ei) => (
                       <li key={ei}>{e}</li>
                     ))}

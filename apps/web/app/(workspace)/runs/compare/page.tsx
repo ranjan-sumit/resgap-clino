@@ -21,7 +21,7 @@ function DiffList({ title, items }: { title: string; items: string[] }) {
       {items.length === 0 ? (
         <p className="text-sm italic text-neutral">None</p>
       ) : (
-        <ul className="space-y-1 text-sm text-clinova-deep">
+        <ul className="space-y-1 text-sm text-slate-800">
           {items.map((item, i) => (
             <li key={i} className="truncate" title={item}>
               {item}

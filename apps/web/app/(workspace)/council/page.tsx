@@ -1,6 +1,8 @@
 import { PageHero } from "@/components/shell/page-hero";
 import { CountStatView } from "@/components/data/count-stat";
 import { EmptyState } from "@/components/data/empty-state";
+import { ModelResultsTable } from "@/components/council/model-results-table";
+import { SensitivityBars } from "@/components/council/sensitivity-bars";
 import { api } from "@/lib/api";
 
 function ListSection({ title, items }: { title: string; items: string[] }) {
@@ -8,7 +10,7 @@ function ListSection({ title, items }: { title: string; items: string[] }) {
   return (
     <div className="rounded-lg border border-border/60 bg-card p-5 shadow-card">
       <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-neutral">{title}</p>
-      <ul className="list-disc space-y-1 pl-4 text-sm text-clinova-deep">
+      <ul className="list-disc space-y-1 pl-4 text-sm text-slate-800">
         {items.map((item, i) => (
           <li key={i}>{item}</li>
         ))}
@@ -38,54 +40,50 @@ export default async function ResearchCouncilPage() {
               <CountStatView key={c.key} stat={c} />
             ))}
           </div>
+          {council.n_excluded_low_confidence > 0 && (
+            <p className="text-xs text-neutral">
+              {council.n_excluded_low_confidence} parameter(s) excluded from simulation — confidence too low.
+            </p>
+          )}
 
           {council.novel_finding && (
-            <section className="relative overflow-hidden rounded-xl bg-hero-gradient p-6 text-white shadow-raised">
-              <div className="pointer-events-none absolute inset-0 bg-brand-glow opacity-60" aria-hidden />
-              <div className="relative">
-                <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.18em] text-clinova-cyan">
-                  Novel Finding · {council.novel_finding.confidence} confidence
-                </p>
-                <h2 className="font-display text-2xl">{council.novel_finding.title}</h2>
-                <p className="mt-3 max-w-3xl text-sm leading-relaxed text-white/85">{council.novel_finding.claim}</p>
-                <p className="mt-3 max-w-3xl text-xs text-white/60">{council.novel_finding.what_makes_it_new}</p>
-                <div className="mt-5 grid grid-cols-2 gap-4 text-xs text-white/75">
-                  <div>
-                    <p className="mb-1 font-semibold uppercase tracking-wide text-clinova-cyan">Mechanism</p>
-                    <p>{council.novel_finding.mechanism}</p>
-                  </div>
-                  <div>
-                    <p className="mb-1 font-semibold uppercase tracking-wide text-clinova-cyan">
-                      Suggested validation
-                    </p>
-                    <p>{council.novel_finding.validation_study}</p>
-                  </div>
-                  <div>
-                    <p className="mb-1 font-semibold uppercase tracking-wide text-clinova-cyan">
-                      Clinical opportunity
-                    </p>
-                    <p>{council.novel_finding.clinical_opportunity}</p>
-                  </div>
-                  <div>
-                    <p className="mb-1 font-semibold uppercase tracking-wide text-clinova-cyan">
-                      Commercial opportunity
-                    </p>
-                    <p>{council.novel_finding.commercial_opportunity}</p>
-                  </div>
+            <section className="rounded-xl border border-border/60 bg-card p-6 shadow-card">
+              <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.18em] text-clinova-deep">
+                Novel Finding · {council.novel_finding.confidence} confidence
+              </p>
+              <h2 className="font-display text-2xl text-clinova-deep">{council.novel_finding.title}</h2>
+              <p className="mt-3 max-w-3xl text-sm leading-relaxed text-slate-800">
+                {council.novel_finding.claim}
+              </p>
+              <p className="mt-3 max-w-3xl text-xs text-neutral">{council.novel_finding.what_makes_it_new}</p>
+              <div className="mt-5 grid grid-cols-2 gap-4 border-t border-border/60 pt-4 text-xs text-neutral">
+                <div>
+                  <p className="mb-1 font-semibold uppercase tracking-wide text-neutral">Mechanism</p>
+                  <p>{council.novel_finding.mechanism}</p>
                 </div>
-                {council.novel_finding.evidence_chain.length > 0 && (
-                  <div className="mt-5 border-t border-white/15 pt-4">
-                    <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-clinova-cyan">
-                      Evidence chain
-                    </p>
-                    <ul className="list-disc space-y-1 pl-4 text-xs text-white/75">
-                      {council.novel_finding.evidence_chain.map((e, i) => (
-                        <li key={i}>{e}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
+                <div>
+                  <p className="mb-1 font-semibold uppercase tracking-wide text-neutral">Suggested validation</p>
+                  <p>{council.novel_finding.validation_study}</p>
+                </div>
+                <div>
+                  <p className="mb-1 font-semibold uppercase tracking-wide text-neutral">Clinical opportunity</p>
+                  <p>{council.novel_finding.clinical_opportunity}</p>
+                </div>
+                <div>
+                  <p className="mb-1 font-semibold uppercase tracking-wide text-neutral">Commercial opportunity</p>
+                  <p>{council.novel_finding.commercial_opportunity}</p>
+                </div>
               </div>
+              {council.novel_finding.evidence_chain.length > 0 && (
+                <div className="mt-4 border-t border-border/60 pt-4">
+                  <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-neutral">Evidence chain</p>
+                  <ul className="list-disc space-y-1 pl-4 text-xs text-neutral">
+                    {council.novel_finding.evidence_chain.map((e, i) => (
+                      <li key={i}>{e}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </section>
           )}
 
@@ -99,23 +97,24 @@ export default async function ResearchCouncilPage() {
             </section>
           )}
 
-          {Object.keys(council.sim_headline_numbers).length > 0 && (
+          {council.models_run.length > 0 && (
             <section>
-              <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-neutral">
-                Simulation headline numbers
+              <h2 className="mb-1 text-xs font-semibold uppercase tracking-wider text-neutral">
+                Computational modelling
               </h2>
-              <div className="grid grid-cols-4 gap-3">
-                {Object.entries(council.sim_headline_numbers).map(([k, v]) => (
-                  <div key={k} className="rounded-lg border border-border/60 bg-card p-4 shadow-card">
-                    <p className="stat-gradient-text font-display text-2xl">
-                      {typeof v === "number" ? v.toLocaleString(undefined, { maximumFractionDigits: 2 }) : String(v)}
-                    </p>
-                    <p className="mt-1 text-[10px] uppercase tracking-wide text-neutral">{k.replace(/_/g, " ")}</p>
-                  </div>
+              <p className="mb-3 text-sm text-neutral">
+                {council.models_run.length} algorithm{council.models_run.length === 1 ? "" : "s"} run across{" "}
+                {council.scenarios_run.length} scenarios ({council.scenarios_run.join(", ")}).
+              </p>
+              <div className="space-y-4">
+                {council.models_run.map((m) => (
+                  <ModelResultsTable key={m.model_key} model={m} scenarios={council.scenarios_run} />
                 ))}
               </div>
             </section>
           )}
+
+          <SensitivityBars drivers={council.sensitivity_ranking} />
 
           <div className="grid grid-cols-2 gap-4">
             <ListSection title="Clinical insights" items={council.clinical_insights} />

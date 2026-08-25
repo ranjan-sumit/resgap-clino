@@ -120,18 +120,18 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
         title={
           <span className="flex flex-wrap items-center gap-3">
             {run.name}
-            <StatusBadge chip={run.status} onDark />
+            <StatusBadge chip={run.status} />
           </span>
         }
         description={
-          <span className="font-mono text-xs text-white/60">
+          <span className="font-mono text-xs text-neutral">
             {run.run_id} · {run.created_at}
           </span>
         }
         actions={
           <Link
             href={`/runs/${run.run_id}/lineage`}
-            className="rounded-md border border-white/20 bg-white/5 px-3 py-1.5 text-sm text-white hover:bg-white/10"
+            className="rounded-md border border-border px-3 py-1.5 text-sm text-clinova-deep hover:bg-secondary"
           >
             View lineage &rarr;
           </Link>

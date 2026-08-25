@@ -3,12 +3,6 @@ import { ConfidenceStat } from "@/components/data/confidence-stat";
 import { EmptyState } from "@/components/data/empty-state";
 import { api } from "@/lib/api";
 
-const CONFIDENCE_TONE: Record<string, string> = {
-  high: "text-semantic-success",
-  medium: "text-semantic-warning",
-  low: "text-semantic-critical",
-};
-
 export default async function EvidencePage() {
   const projects = await api.listProjects();
   if (projects.length === 0) {
@@ -56,11 +50,9 @@ export default async function EvidencePage() {
                   <span className="rounded-md bg-clinova-light/10 px-2 py-0.5 text-xs font-medium text-clinova-deep">
                     {e.evidence_type}
                   </span>
-                  <span className={`text-xs font-medium ${CONFIDENCE_TONE[e.confidence] ?? "text-neutral"}`}>
-                    {e.confidence} confidence
-                  </span>
+                  <span className="text-xs font-medium text-neutral">{e.confidence} confidence</span>
                 </div>
-                <p className="mt-2 text-sm text-clinova-deep">{e.text}</p>
+                <p className="mt-2 text-sm text-slate-800">{e.text}</p>
                 <p className="mt-2 font-mono text-xs text-neutral">
                   {e.paper_filename}
                   {e.page != null ? ` · p.${e.page}` : ""}

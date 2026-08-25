@@ -826,6 +826,27 @@ export interface components {
             /** Tolerance */
             tolerance: number | null;
         };
+        /**
+         * ModelRunView
+         * @description One algorithm's real output from pipeline/simulation_engine.py's
+         *     run_all_applicable() -- e.g. Monte Carlo, Markov Chain, Bootstrap.
+         *     `metrics_by_scenario` is scenario -> metric label -> value, parsed
+         *     once here (server-side) from the pipeline's `{scenario}_{metric}`
+         *     headline_numbers keys, so the frontend never has to decode an
+         *     encoded key string itself.
+         */
+        ModelRunView: {
+            /** Model Key */
+            model_key: string;
+            /** Model Used */
+            model_used: string;
+            /** Metrics By Scenario */
+            metrics_by_scenario: {
+                [key: string]: {
+                    [key: string]: number | string;
+                };
+            };
+        };
         /** ModelSelectionView */
         ModelSelectionView: {
             /** Selected Model */
@@ -992,7 +1013,15 @@ export interface components {
             basis_note: string;
             /** Params Summary */
             params_summary: components["schemas"]["CountStat"][];
+            /** N Excluded Low Confidence */
+            n_excluded_low_confidence: number;
             model_selection: components["schemas"]["ModelSelectionView"] | null;
+            /** Scenarios Run */
+            scenarios_run: string[];
+            /** Models Run */
+            models_run: components["schemas"]["ModelRunView"][];
+            /** Sensitivity Ranking */
+            sensitivity_ranking: components["schemas"]["SensitivityDriver"][];
             novel_finding: components["schemas"]["NovelFindingView"] | null;
             /** Clinical Insights */
             clinical_insights: string[];
@@ -1008,10 +1037,6 @@ export interface components {
             overall_confidence: string | null;
             /** Insight Agents */
             insight_agents: components["schemas"]["CouncilAgentResponse"][];
-            /** Sim Headline Numbers */
-            sim_headline_numbers: {
-                [key: string]: number | string;
-            };
             /** Empty Reason */
             empty_reason?: string | null;
         };
@@ -1150,6 +1175,13 @@ export interface components {
             n_gaps_without_identity: number;
             /** Identity Note */
             identity_note: string | null;
+        };
+        /** SensitivityDriver */
+        SensitivityDriver: {
+            /** Parameter */
+            parameter: string;
+            /** Importance */
+            importance: number;
         };
         /**
          * StatusChip

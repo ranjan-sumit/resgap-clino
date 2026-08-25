@@ -24,13 +24,13 @@ export default async function CorpusPage() {
             <ConfidenceStat measure={corpus.corpus_confidence} />
             <div className="rounded-lg border border-border/60 bg-card p-5 shadow-card">
               <p className="mb-1 text-xs font-medium uppercase tracking-wide text-neutral">DOI resolution</p>
-              <p className="stat-gradient-text font-display text-3xl">
+              <p className="font-display text-clinova-deep text-3xl">
                 {corpus.doi_resolution_rate != null ? `${(corpus.doi_resolution_rate * 100).toFixed(0)}%` : "Not recorded"}
               </p>
             </div>
             <div className="rounded-lg border border-border/60 bg-card p-5 shadow-card">
               <p className="mb-1 text-xs font-medium uppercase tracking-wide text-neutral">Abstract availability</p>
-              <p className="stat-gradient-text font-display text-3xl">
+              <p className="font-display text-clinova-deep text-3xl">
                 {corpus.abstract_availability != null ? `${(corpus.abstract_availability * 100).toFixed(0)}%` : "Not recorded"}
               </p>
             </div>
@@ -49,7 +49,7 @@ export default async function CorpusPage() {
               <div className="grid grid-cols-7 gap-3">
                 {corpus.reference_funnel.map((stage) => (
                   <div key={stage.key} className="rounded-lg border border-border/60 bg-card p-3 text-center shadow-card">
-                    <p className="stat-gradient-text font-display text-2xl">{stage.count}</p>
+                    <p className="font-display text-clinova-deep text-2xl">{stage.count}</p>
                     <p className="mt-1 text-[10px] uppercase tracking-wide text-neutral">{stage.label}</p>
                   </div>
                 ))}

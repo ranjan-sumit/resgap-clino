@@ -29,11 +29,32 @@ class ModelSelectionView(BaseModel):
     confidence: str | None
 
 
+class SensitivityDriver(BaseModel):
+    parameter: str
+    importance: float
+
+
+class ModelRunView(BaseModel):
+    """One algorithm's real output from pipeline/simulation_engine.py's
+    run_all_applicable() -- e.g. Monte Carlo, Markov Chain, Bootstrap.
+    `metrics_by_scenario` is scenario -> metric label -> value, parsed
+    once here (server-side) from the pipeline's `{scenario}_{metric}`
+    headline_numbers keys, so the frontend never has to decode an
+    encoded key string itself."""
+    model_key: str
+    model_used: str
+    metrics_by_scenario: dict[str, dict[str, float | int | str]]
+
+
 class ResearchCouncilView(BaseModel):
     run: RunRef | None
     basis_note: str
     params_summary: list[CountStat]
+    n_excluded_low_confidence: int
     model_selection: ModelSelectionView | None
+    scenarios_run: list[str]
+    models_run: list[ModelRunView]
+    sensitivity_ranking: list[SensitivityDriver]
     novel_finding: NovelFindingView | None
     clinical_insights: list[str]
     research_insights: list[str]
@@ -42,5 +63,4 @@ class ResearchCouncilView(BaseModel):
     limitations: list[str]
     overall_confidence: str | None
     insight_agents: list[CouncilAgentResponse]
-    sim_headline_numbers: dict[str, float | int | str]
     empty_reason: str | None = None

@@ -42,7 +42,7 @@ export default async function DashboardPage() {
           dashboard.basis_run && (
             <>
               {dashboard.basis_note}{" "}
-              <Link href={`/runs/${dashboard.basis_run.run_id}`} className="text-clinova-cyan underline">
+              <Link href={`/runs/${dashboard.basis_run.run_id}`} className="text-clinova-deep underline">
                 View run
               </Link>
             </>

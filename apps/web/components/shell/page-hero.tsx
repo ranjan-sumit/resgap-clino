@@ -1,8 +1,10 @@
 import type { ReactNode } from "react";
 
-// A dark gradient header band, carried from the Landing page's hero energy
-// into every inner screen -- the fix for "premium landing page, then a
-// flat white admin panel the second you click in."
+// A calm, light page header -- eyebrow + title + description, generous
+// space, one thin bottom border. Deliberately NOT a dark gradient banner:
+// that pattern (tried first) repeated on every single page read as heavy
+// and monotonous rather than premium -- a page header should orient the
+// reader, not compete with the content below it for attention.
 export function PageHero({
   eyebrow,
   title,
@@ -15,18 +17,15 @@ export function PageHero({
   actions?: ReactNode;
 }) {
   return (
-    <div className="relative overflow-hidden rounded-xl bg-hero-gradient px-8 py-8 text-white shadow-raised">
-      <div className="pointer-events-none absolute inset-0 bg-brand-glow opacity-70" aria-hidden />
-      <div className="relative flex items-start justify-between gap-6">
-        <div>
-          {eyebrow && (
-            <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.18em] text-clinova-cyan">{eyebrow}</p>
-          )}
-          <h1 className="font-display text-3xl leading-tight text-white">{title}</h1>
-          {description && <div className="mt-2 max-w-2xl text-sm text-white/70">{description}</div>}
-        </div>
-        {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
+    <div className="flex items-start justify-between gap-6 border-b border-border/70 pb-6">
+      <div>
+        {eyebrow && (
+          <p className="mb-1.5 font-mono text-[11px] uppercase tracking-[0.18em] text-clinova-deep">{eyebrow}</p>
+        )}
+        <h1 className="font-display text-[28px] leading-tight text-clinova-deep">{title}</h1>
+        {description && <div className="mt-1.5 max-w-2xl text-sm text-neutral">{description}</div>}
       </div>
+      {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
     </div>
   );
 }

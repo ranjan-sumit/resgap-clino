@@ -34,7 +34,7 @@ export default async function LineagePage({ params }: { params: Promise<{ runId:
       <PageHero
         eyebrow="Engineering"
         title="Lineage"
-        description={<span className="font-mono text-xs text-white/60">{runId}</span>}
+        description={<span className="font-mono text-xs text-neutral">{runId}</span>}
       />
 
       <Tabs defaultValue="technical">

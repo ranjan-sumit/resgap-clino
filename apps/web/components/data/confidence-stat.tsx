@@ -24,7 +24,7 @@ export function ConfidenceStat({ measure }: { measure: Measure }) {
         <div
           className={
             measure.recorded
-              ? "stat-gradient-text font-display text-3xl"
+              ? "font-display text-clinova-deep text-3xl"
               : "font-sans text-lg italic text-neutral"
           }
         >

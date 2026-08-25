@@ -77,7 +77,7 @@ export default async function GapChallengerPage() {
                       </p>
                       {g.funnel.judged_candidates.map((c, ci) => (
                         <div key={ci} className="flex items-center justify-between gap-3 text-sm">
-                          <span className="text-clinova-deep">{c.title}</span>
+                          <span className="text-slate-800">{c.title}</span>
                           <span className="flex shrink-0 items-center gap-2 text-xs text-neutral">
                             {c.relevant ? "Relevant" : "Not relevant"}
                             {c.contradicts_gap && <span className="text-semantic-warning">Contradicts</span>}

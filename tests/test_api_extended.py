@@ -91,6 +91,27 @@ class CouncilRouteTests(unittest.TestCase):
             self.assertIn("Computational Lab", body["run"]["name"])
             self.assertGreater(len(body["params_summary"]), 0)
 
+    def test_model_results_are_parsed_into_real_scenario_tables(self):
+        """The computational-modelling view this was missing entirely --
+        each model's headline_numbers must come back decoded into real
+        scenario -> metric tables, not the pipeline's raw encoded keys."""
+        r = client.get(f"/api/projects/{PROJECT_ID}/council")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        if not body["models_run"]:
+            self.skipTest("no real Computational Lab run with model results in this dataset")
+        for model in body["models_run"]:
+            self.assertTrue(model["model_used"])
+            self.assertTrue(model["metrics_by_scenario"])
+            for scenario, metrics in model["metrics_by_scenario"].items():
+                self.assertTrue(scenario)
+                for metric_label in metrics:
+                    # Decoded to a human label, not a raw "base_case_x_mean" key.
+                    self.assertNotIn("_", metric_label)
+        for driver in body["sensitivity_ranking"]:
+            self.assertTrue(driver["parameter"])
+            self.assertIsInstance(driver["importance"], (int, float))
+
 
 class ArtifactsRouteTests(unittest.TestCase):
     def test_lists_real_registered_artifacts(self):
