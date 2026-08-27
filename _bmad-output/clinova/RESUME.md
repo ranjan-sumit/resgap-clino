@@ -429,6 +429,18 @@ Frontend-only change (no `apps/api` edits) — full pytest suite re-verified any
 
 **Still open:** Data Quality, Reporting/export (Epic 5.5), the Projects multi-project switcher, and Experiments all remain "Later" — this was a deliberate single-item pick, not a claim the full "many parts left" list is closed.
 
+## Phase 5 — Slice 8 (real report export — Epic 5.5), 2026-08-27
+
+**"yes. please continue"** — continuing down the still-open list from Slice 7 (Data Quality, Reporting/export, Projects switcher, Experiments), picked by checking the actual code rather than working the list in listed order. Ruled out the other three with real reasons: Data Quality's real content (per-paper completeness breakdowns) is a local variable in `app.py`, never persisted to `results`, so an honest screen would be nearly empty; Experiments has no real evaluation-run registry (already noted in Slice 5); Projects assumes multiple real projects and this dataset only has one — building a switcher now would be speculative UI over data that doesn't exist. Reporting was different: `utils/export.py` already contains complete, real, production-quality `to_enterprise_html_report` / `to_enterprise_pdf_report` / `to_markdown_report` / `to_json` builders — and grepping `app.py` confirmed Streamlit's own UI already calls all four via `st.download_button` (~lines 2595-2647). The web app had zero access to any of it. That's not a missing nice-to-have, it's a literal capability regression against Streamlit — directly on-point for "my streamlit was more user friendly than this."
+
+**Built:** `GET /api/runs/{run_id}/report?format=html|pdf|markdown|json` (`apps/api/routers/reports.py`, `apps/api/services/reports_service.py`) — a thin wrapper returning the real report bytes with a `Content-Disposition` download header, using the deterministic narrative fallback (no LLM client passed to `generate_report_narrative`) so a report download is fast and free rather than a surprise per-click LLM cost. New `ReportDownloadMenu` component wired into Run Detail's page actions, next to "View lineage" — four plain download links; no client-side fetch/blob handling needed since the browser already does the right thing with a `Content-Disposition` header.
+
+**One real branding bug caught while screenshotting the HTML report, not assumed clean:** the report template hardcoded the literal string `"Research Gap Analyzer"` in its eyebrow and footer — but Streamlit's own `st.set_page_config` already reads the *current* product name from `packages/branding/theme.json` (a `_load_branding()` helper added back at Phase 1, Story 1.4.2). The export module had never been updated to match. Fixed `utils/export.py` with the identical defensive-fallback pattern `app.py` already uses — since `utils/export.py` is shared by both apps, this fixes the report Streamlit itself generates too, not just the new web download.
+
+6 new backend tests (`ReportRouteTests`), full suite now **719 passing**. New `playwright_phase5_slice8.py` (9/9) — including a direct HTTP fetch of the actual download link's href, since a real click triggers a native browser download Playwright can't easily inspect — plus a full re-verification pass of every existing Playwright suite (slice1/2/5/6/7, 89/89 total): zero regressions, `tsc` clean, contracts regenerated.
+
+**Still open:** Data Quality, the Projects multi-project switcher, and Experiments all remain deliberately "Later" for the reasons above, not oversights.
+
 ## Key decisions already made (don't re-litigate without a new ADR)
 
 - Architecture: **Option C, Staged Hybrid** (ADR-000) — infrastructure introduced per-phase, not upfront.
