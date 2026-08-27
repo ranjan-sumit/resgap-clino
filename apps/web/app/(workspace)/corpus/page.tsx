@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { PageHero } from "@/components/shell/page-hero";
 import { ConfidenceStat } from "@/components/data/confidence-stat";
 import { StatusBadge } from "@/components/data/status-badge";
@@ -66,14 +67,16 @@ export default async function CorpusPage() {
             </h2>
             <ul className="space-y-2">
               {corpus.papers.map((p, i) => (
-                <li
-                  key={i}
-                  className="rounded-lg border border-border/60 bg-card p-4 shadow-card transition-all hover:-translate-y-0.5 hover:shadow-card-hover"
-                >
-                  <p className="font-medium text-clinova-deep">{p.title ?? p.filename}</p>
-                  <p className="mt-1 font-mono text-xs text-neutral">
-                    {p.filename} · {p.char_count.toLocaleString()} chars
-                  </p>
+                <li key={i}>
+                  <Link
+                    href={`/corpus/papers/${encodeURIComponent(p.filename)}`}
+                    className="block rounded-lg border border-border/60 bg-card p-4 shadow-card transition-all hover:-translate-y-0.5 hover:shadow-card-hover"
+                  >
+                    <p className="font-medium text-clinova-deep">{p.title ?? p.filename}</p>
+                    <p className="mt-1 font-mono text-xs text-neutral">
+                      {p.filename} · {p.char_count.toLocaleString()} chars
+                    </p>
+                  </Link>
                 </li>
               ))}
             </ul>

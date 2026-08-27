@@ -71,6 +71,34 @@ class CorpusRouteTests(unittest.TestCase):
         self.assertIsNotNone(r.json()["empty_reason"])
 
 
+class PaperDetailRouteTests(unittest.TestCase):
+    """The real per-paper LLM wiki (title/contributions/methods/findings/
+    limitations/etc, pipeline/wiki_compiler.py) plus parsed sections/tables
+    -- computed on every run but, before this route existed, never exposed
+    past a one-line title/char_count row on the Corpus list."""
+
+    def test_returns_the_real_wiki_for_a_known_paper(self):
+        corpus = client.get(f"/api/projects/{PROJECT_ID}/corpus").json()
+        self.assertGreaterEqual(len(corpus["papers"]), 1)
+        filename = corpus["papers"][0]["filename"]
+
+        r = client.get(f"/api/projects/{PROJECT_ID}/corpus/papers/{filename}")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["filename"], filename)
+        self.assertIsInstance(body["contributions"], list)
+        self.assertIsInstance(body["sections"], list)
+        self.assertIsInstance(body["tables"], list)
+
+    def test_unknown_paper_in_a_real_project_is_404_not_500(self):
+        r = client.get(f"/api/projects/{PROJECT_ID}/corpus/papers/does-not-exist.pdf")
+        self.assertEqual(r.status_code, 404)
+
+    def test_unknown_project_is_404_not_500(self):
+        r = client.get("/api/projects/does-not-exist/corpus/papers/anything.pdf")
+        self.assertEqual(r.status_code, 404)
+
+
 class EvidenceRouteTests(unittest.TestCase):
     def test_returns_real_evidence_items(self):
         r = client.get(f"/api/projects/{PROJECT_ID}/evidence")

@@ -239,6 +239,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/projects/{project_id}/corpus/papers/{filename}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Project Corpus Paper */
+        get: operations["project_corpus_paper_api_projects__project_id__corpus_papers__filename__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/projects/{project_id}/evidence": {
         parameters: {
             query?: never;
@@ -879,6 +896,52 @@ export interface components {
             /** Confidence Reasoning */
             confidence_reasoning: string;
         };
+        /**
+         * PaperDetail
+         * @description The real per-paper LLM "wiki" (pipeline/wiki_compiler.py) plus the
+         *     raw parsed sections/tables -- computed for every paper on every run but,
+         *     until now, never surfaced past a one-line title/char_count row on the
+         *     Corpus list.
+         */
+        PaperDetail: {
+            /** Filename */
+            filename: string;
+            /** Project Id */
+            project_id: string;
+            basis_run: components["schemas"]["RunRef"] | null;
+            /** Title */
+            title: string | null;
+            /** Year */
+            year: string | null;
+            /** Domain */
+            domain: string | null;
+            /** Char Count */
+            char_count: number;
+            /** Contributions */
+            contributions: string[];
+            /** Methods */
+            methods: string[];
+            /** Datasets */
+            datasets: string[];
+            /** Key Findings */
+            key_findings: string[];
+            /** Limitations */
+            limitations: string[];
+            /** Future Work */
+            future_work: string[];
+            /** Key Concepts */
+            key_concepts: string[];
+            /** Evaluated On */
+            evaluated_on: string[];
+            /** Comparison Gap */
+            comparison_gap: string | null;
+            /** Tree Summary */
+            tree_summary: string | null;
+            /** Sections */
+            sections: components["schemas"]["PaperSection"][];
+            /** Tables */
+            tables: components["schemas"]["PaperTable"][];
+        };
         /** PaperRef */
         PaperRef: {
             /** Filename */
@@ -887,6 +950,24 @@ export interface components {
             title: string | null;
             /** Char Count */
             char_count: number;
+        };
+        /** PaperSection */
+        PaperSection: {
+            /** Heading */
+            heading: string;
+            /** Text */
+            text: string;
+        };
+        /** PaperTable */
+        PaperTable: {
+            /** Page */
+            page: number;
+            /** Content */
+            content: string;
+            /** Rows */
+            rows: number;
+            /** Cols */
+            cols: number;
         };
         /** ProjectDashboard */
         ProjectDashboard: {
@@ -1671,6 +1752,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CorpusView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    project_corpus_paper_api_projects__project_id__corpus_papers__filename__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+                filename: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaperDetail"];
                 };
             };
             /** @description Validation Error */

@@ -15,6 +15,7 @@ export type Measure = components["schemas"]["Measure"];
 export type CountStat = components["schemas"]["CountStat"];
 export type VersionField = components["schemas"]["VersionField"];
 export type CorpusView = components["schemas"]["CorpusView"];
+export type PaperDetail = components["schemas"]["PaperDetail"];
 export type EvidenceView = components["schemas"]["EvidenceView"];
 export type GraphView = components["schemas"]["GraphView"];
 export type ChallengerView = components["schemas"]["ChallengerView"];
@@ -68,6 +69,10 @@ export const api = {
       `/api/runs/${encodeURIComponent(runId)}/lineage/scientific${gapId ? `?gap_id=${encodeURIComponent(gapId)}` : ""}`,
     ),
   corpus: (projectId: string) => get<CorpusView>(`/api/projects/${encodeURIComponent(projectId)}/corpus`),
+  paper: (projectId: string, filename: string) =>
+    get<PaperDetail>(
+      `/api/projects/${encodeURIComponent(projectId)}/corpus/papers/${encodeURIComponent(filename)}`,
+    ),
   evidence: (projectId: string) => get<EvidenceView>(`/api/projects/${encodeURIComponent(projectId)}/evidence`),
   graph: (projectId: string) => get<GraphView>(`/api/projects/${encodeURIComponent(projectId)}/graph`),
   challenger: (projectId: string) =>
