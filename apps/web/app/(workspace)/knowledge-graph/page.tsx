@@ -3,6 +3,7 @@ import { PageHero } from "@/components/shell/page-hero";
 import { ConfidenceStat } from "@/components/data/confidence-stat";
 import { CountStatView } from "@/components/data/count-stat";
 import { EmptyState } from "@/components/data/empty-state";
+import { ForceGraph } from "@/components/graph/force-graph";
 import { api } from "@/lib/api";
 import type { GraphView } from "@/lib/api";
 
@@ -68,6 +69,13 @@ export default async function KnowledgeGraphPage() {
         <EmptyState title="No graph yet" description={graph.empty_reason} />
       ) : (
         <>
+          <section>
+            <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-neutral">
+              Graph explorer
+            </h2>
+            <ForceGraph entities={graph.entities} relationships={graph.relationships} />
+          </section>
+
           {graph.communities.length > 0 && (
             <section>
               <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-neutral">
@@ -87,7 +95,7 @@ export default async function KnowledgeGraphPage() {
 
           <section>
             <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-neutral">
-              Entities ({graph.entities.length})
+              Entities, by type ({graph.entities.length})
             </h2>
             <div className="rounded-lg border border-border/60 bg-card p-5 shadow-card">
               <div className="space-y-4">

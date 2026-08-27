@@ -4,6 +4,7 @@ import { CountStatView } from "@/components/data/count-stat";
 import { EmptyState } from "@/components/data/empty-state";
 import { ModelResultsTable } from "@/components/council/model-results-table";
 import { SensitivityBars } from "@/components/council/sensitivity-bars";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
 
 export const metadata: Metadata = { title: "Research Council" };
@@ -29,6 +30,7 @@ export default async function ResearchCouncilPage() {
   }
 
   const council = await api.council(projects[0].project_id);
+  const hasModelling = council.models_run.length > 0 || council.sensitivity_ranking.length > 0;
 
   return (
     <div className="mx-auto max-w-6xl space-y-8">
@@ -90,59 +92,80 @@ export default async function ResearchCouncilPage() {
             </section>
           )}
 
-          {council.model_selection && (
-            <section className="rounded-lg border border-border/60 bg-card p-5 shadow-card">
-              <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-neutral">
-                Model selection · {council.model_selection.confidence} confidence
-              </p>
-              <p className="font-display text-xl text-clinova-deep">{council.model_selection.selected_model}</p>
-              <p className="mt-2 text-sm text-neutral">{council.model_selection.rationale}</p>
-            </section>
-          )}
-
-          {council.models_run.length > 0 && (
-            <section>
-              <h2 className="mb-1 text-xs font-semibold uppercase tracking-wider text-neutral">
+          <Tabs defaultValue={hasModelling ? "modelling" : "findings"}>
+            <TabsList className="h-11 gap-1 bg-slate-100 p-1">
+              <TabsTrigger value="modelling" className="px-4 py-1.5 text-sm">
                 Computational modelling
-              </h2>
-              <p className="mb-3 text-sm text-neutral">
-                {council.models_run.length} algorithm{council.models_run.length === 1 ? "" : "s"} run across{" "}
-                {council.scenarios_run.length} scenarios ({council.scenarios_run.join(", ")}).
-              </p>
-              <div className="space-y-4">
-                {council.models_run.map((m) => (
-                  <ModelResultsTable key={m.model_key} model={m} scenarios={council.scenarios_run} />
-                ))}
+              </TabsTrigger>
+              <TabsTrigger value="findings" className="px-4 py-1.5 text-sm">
+                Findings &amp; debate
+              </TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="modelling" className="mt-5 space-y-6">
+              {hasModelling ? (
+                <>
+                  {council.model_selection && (
+                    <section className="rounded-lg border border-border/60 bg-card p-5 shadow-card">
+                      <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-neutral">
+                        Model selection · {council.model_selection.confidence} confidence
+                      </p>
+                      <p className="font-display text-xl text-clinova-deep">{council.model_selection.selected_model}</p>
+                      <p className="mt-2 text-sm text-neutral">{council.model_selection.rationale}</p>
+                    </section>
+                  )}
+
+                  {council.models_run.length > 0 && (
+                    <section>
+                      <p className="mb-3 text-sm text-neutral">
+                        {council.models_run.length} algorithm{council.models_run.length === 1 ? "" : "s"} run across{" "}
+                        {council.scenarios_run.length} scenarios ({council.scenarios_run.join(", ")}).
+                      </p>
+                      <div className="space-y-4">
+                        {council.models_run.map((m) => (
+                          <ModelResultsTable key={m.model_key} model={m} scenarios={council.scenarios_run} />
+                        ))}
+                      </div>
+                    </section>
+                  )}
+
+                  <SensitivityBars drivers={council.sensitivity_ranking} />
+                </>
+              ) : (
+                <EmptyState
+                  title="No computational modelling for this run"
+                  description="Simulation requires at least one extracted parameter with usable confidence -- none were available for this run."
+                />
+              )}
+            </TabsContent>
+
+            <TabsContent value="findings" className="mt-5 space-y-6">
+              <div className="grid grid-cols-2 gap-4">
+                <ListSection title="Clinical insights" items={council.clinical_insights} />
+                <ListSection title="Research insights" items={council.research_insights} />
+                <ListSection title="Key uncertainties" items={council.key_uncertainties} />
+                <ListSection title="Actionable next steps" items={council.actionable_next_steps} />
               </div>
-            </section>
-          )}
+              <ListSection title="Limitations" items={council.limitations} />
 
-          <SensitivityBars drivers={council.sensitivity_ranking} />
-
-          <div className="grid grid-cols-2 gap-4">
-            <ListSection title="Clinical insights" items={council.clinical_insights} />
-            <ListSection title="Research insights" items={council.research_insights} />
-            <ListSection title="Key uncertainties" items={council.key_uncertainties} />
-            <ListSection title="Actionable next steps" items={council.actionable_next_steps} />
-          </div>
-          <ListSection title="Limitations" items={council.limitations} />
-
-          {council.insight_agents.length > 0 && (
-            <section>
-              <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-neutral">Council debate</h2>
-              <div className="space-y-3">
-                {council.insight_agents.map((a, i) => (
-                  <div key={i} className="rounded-lg border border-border/60 bg-card p-4 shadow-card">
-                    <p className="text-sm font-medium text-clinova-deep">
-                      {a.agent} <span className="font-normal text-neutral">· {a.role}</span>
-                    </p>
-                    <p className="mt-1 font-mono text-[10px] text-neutral">{a.model}</p>
-                    <p className="mt-2 whitespace-pre-line text-sm text-neutral">{a.response}</p>
+              {council.insight_agents.length > 0 && (
+                <section>
+                  <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-neutral">Council debate</h2>
+                  <div className="space-y-3">
+                    {council.insight_agents.map((a, i) => (
+                      <div key={i} className="rounded-lg border border-border/60 bg-card p-4 shadow-card">
+                        <p className="text-sm font-medium text-clinova-deep">
+                          {a.agent} <span className="font-normal text-neutral">· {a.role}</span>
+                        </p>
+                        <p className="mt-1 font-mono text-[10px] text-neutral">{a.model}</p>
+                        <p className="mt-2 whitespace-pre-line text-sm text-neutral">{a.response}</p>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
-            </section>
-          )}
+                </section>
+              )}
+            </TabsContent>
+          </Tabs>
         </>
       )}
     </div>

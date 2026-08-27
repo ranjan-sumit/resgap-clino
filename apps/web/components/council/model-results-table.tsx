@@ -4,7 +4,11 @@ type ModelRun = ResearchCouncilView["models_run"][number];
 
 function formatValue(v: number | string): string {
   if (typeof v !== "number") return v;
-  return v.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  // Pinned to en-US rather than `undefined` (runtime-default locale) --
+  // the server's locale otherwise leaks into number grouping, e.g.
+  // rendering 118994772.53 as "11,89,94,772.53" (lakh-style) instead of
+  // "118,994,772.53".
+  return v.toLocaleString("en-US", { maximumFractionDigits: 2 });
 }
 
 // One clean table per model: rows are the metrics that model computed,
