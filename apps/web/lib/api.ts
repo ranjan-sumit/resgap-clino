@@ -79,6 +79,8 @@ export const api = {
     get<ChallengerView>(`/api/projects/${encodeURIComponent(projectId)}/challenger`),
   council: (projectId: string) => get<ResearchCouncilView>(`/api/projects/${encodeURIComponent(projectId)}/council`),
   artifacts: () => get<ArtifactListResponse>("/api/artifacts"),
+  reportUrl: (runId: string, format: "html" | "pdf" | "markdown" | "json") =>
+    `${BASE}/api/runs/${encodeURIComponent(runId)}/report?format=${format}`,
   promoteRun: async (runId: string, toStatus: "CANDIDATE" | "CHAMPION" | "ARCHIVED"): Promise<ArtifactView> => {
     const res = await fetch(
       `${BASE}/api/runs/${encodeURIComponent(runId)}/promote?to_status=${toStatus}`,

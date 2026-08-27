@@ -10,6 +10,7 @@ import { VersionFieldView } from "@/components/data/version-field";
 import { EmptyState } from "@/components/data/empty-state";
 import { ErrorState } from "@/components/data/error-state";
 import { PageHero } from "@/components/shell/page-hero";
+import { ReportDownloadMenu } from "@/components/runs/report-download-menu";
 import { formatDuration } from "@/lib/format";
 import { api, ApiError, type RunManifestView } from "@/lib/api";
 
@@ -144,12 +145,15 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
           </span>
         }
         actions={
-          <Link
-            href={`/runs/${run.run_id}/lineage`}
-            className="rounded-md border border-border px-3 py-1.5 text-sm text-clinova-deep hover:bg-secondary"
-          >
-            View lineage &rarr;
-          </Link>
+          <div className="flex items-center gap-2">
+            <ReportDownloadMenu runId={run.run_id} />
+            <Link
+              href={`/runs/${run.run_id}/lineage`}
+              className="rounded-md border border-border px-3 py-1.5 text-sm text-clinova-deep hover:bg-secondary"
+            >
+              View lineage &rarr;
+            </Link>
+          </div>
         }
       />
 

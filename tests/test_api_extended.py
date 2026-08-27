@@ -227,5 +227,54 @@ class PromoteRouteTests(unittest.TestCase):
         self.assertEqual(r.status_code, 404)
 
 
+class ReportRouteTests(unittest.TestCase):
+    """Wraps utils/export.py's existing report builders -- already real,
+    already exercised by the Streamlit app's own download buttons -- as a
+    new download surface for the web app (Clinova Phase 5, Epic 5.5)."""
+
+    @classmethod
+    def setUpClass(cls):
+        runs = client.get("/api/runs?limit=1").json()["runs"]
+        assert runs, "no real runs available to test report generation against"
+        cls.run_id = runs[0]["run_id"]
+
+    def test_html_report_is_real_and_downloadable(self):
+        r = client.get(f"/api/runs/{self.run_id}/report?format=html")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("text/html", r.headers["content-type"])
+        self.assertIn("attachment", r.headers["content-disposition"])
+        self.assertIn("Research Gap Analysis Report", r.text)
+        # Brand name must come from packages/branding/theme.json, not the
+        # stale pre-Clinova literal this template used to hardcode.
+        self.assertIn("Clinova Research Intelligence Platform", r.text)
+        self.assertNotIn(">Research Gap Analyzer<", r.text)
+
+    def test_pdf_report_returns_real_pdf_bytes(self):
+        r = client.get(f"/api/runs/{self.run_id}/report?format=pdf")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.headers["content-type"], "application/pdf")
+        self.assertTrue(r.content.startswith(b"%PDF"))
+
+    def test_markdown_report_is_real_text(self):
+        r = client.get(f"/api/runs/{self.run_id}/report?format=markdown")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("# Research Gap Analysis Report", r.text)
+
+    def test_json_report_is_the_full_pipeline_output(self):
+        r = client.get(f"/api/runs/{self.run_id}/report?format=json")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertIn("papers", body)
+        self.assertIn("gaps", body)
+
+    def test_unknown_run_is_404_not_500(self):
+        r = client.get("/api/runs/this-run-does-not-exist/report?format=html")
+        self.assertEqual(r.status_code, 404)
+
+    def test_unknown_format_is_404_not_500(self):
+        r = client.get(f"/api/runs/{self.run_id}/report?format=xml")
+        self.assertEqual(r.status_code, 404)
+
+
 if __name__ == "__main__":
     unittest.main()
