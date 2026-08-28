@@ -598,6 +598,11 @@ from pipeline.discovery_engine import run_discovery_engine
 from pipeline.llm_council import council_select_model, council_synthesise_insights
 from pipeline.simulation_engine import run_simulation, filter_confident_params, resolve_models_to_run
 from pipeline.multi_run import run_multi_council
+# Clinova Phase 5, Epic 5.6 -- the Stage 1-6 orchestration formerly inline
+# in this file. Extracted so the FastAPI app can run the identical
+# pipeline; this file injects its Streamlit progress/trace/warning
+# callbacks into it, so behaviour here is unchanged.
+from pipeline.run_pipeline import PipelineInputError, RunOptions, run_full_pipeline
 from pipeline.doc_generator import build_zip
 from domain_config import get_domain_display_options, parse_domain_selection, get_domain_config
 # Clinova Phase 1 (Epics 1.2-1.3) -- opt-in Corpus Quality Engine + canonical
@@ -1155,12 +1160,8 @@ if run_btn and uploaded_files:
     st.session_state.pipeline_trace = []
     st.session_state.loaded_run_id  = None
 
-    # Clinova Phase 4, Epic 4.3 token instrumentation (2026-08-24): real,
-    # not fabricated -- see utils/token_meter.py. Wired into every real
-    # pipeline run so run_manifests.token_usage gets its first non-NULL
-    # values, per provider/model support (a provider that rejects
-    # stream_options degrades honestly to no usage capture, never an
-    # estimate).
+    # Clinova Phase 4, Epic 4.3 token instrumentation -- real, not
+    # fabricated (see utils/token_meter.py).
     token_meter = TokenMeter()
     client  = build_client(selected_provider_key, provider_api_key, model=selected_model, token_meter=token_meter)
     context = {
@@ -1168,11 +1169,6 @@ if run_btn and uploaded_files:
         "interest": interest or "General research",
         "gap_type": gap_type,
     }
-    name = run_name.strip() or f"{selected_domain[:20]} — {datetime.now().strftime('%H:%M')}"
-
-    # Clinova Phase 4, Epic 4.2 -- real wall-clock start, used for
-    # RunManifest.run_duration_seconds below.
-    _run_start_time = time.time()
 
     prog = st.progress(0)
     stat = st.empty()
@@ -1181,487 +1177,66 @@ if run_btn and uploaded_files:
         stat.markdown(_card("Pipeline Running", f"⟳ {msg}"), unsafe_allow_html=True)
 
     try:
-        all_papers, all_trees = [], []
-
-        # Stage 1+2: Parse + PageIndex
-        upd("Stage 1 — Parsing PDFs & building PageIndex trees…", 5)
-        # Clinova Phase 1: when the Corpus Quality Engine is enabled, Stage
-        # 2B below needs each paper's original PDF file (Docling operates
-        # on the file, not the already-extracted text) -- keep the temp
-        # files alive until Stage 2B runs instead of deleting them here.
-        paper_tmp_paths = []
-        for uf in uploaded_files:
-            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-                tmp.write(uf.getvalue()); tmp_path = tmp.name
-            paper = parse_pdf(tmp_path, uf.name,
-                              client=client if use_vision else None,
-                              use_vision=use_vision)
-            paper["tier"] = 1
-            all_papers.append(paper)
-            all_trees.append(build_tree(paper))
-            if enable_quality_engine:
-                paper_tmp_paths.append(tmp_path)
-            else:
-                os.unlink(tmp_path)
-
-        _add_trace("Stage 1 — PDF Parse",
-                   f"{len(uploaded_files)} PDFs",
-                   f"{sum(p.get('char_count',0) for p in all_papers):,} chars extracted")
-        prog.progress(12)
-
-        # Stage 1B: Reference extraction (optional)
-        ref_papers = []
-        ref_diagnostics = {}
-        ref_resolution_diagnostics = None
-        if extract_refs:
-            upd("Stage 1B — Extracting & enriching references (50+ paper corpus)…", 14)
-            limit_value = None if ref_limit == "All" else int(ref_limit)
-            def ref_upd(_current, _total, msg):
-                upd(f"Stage 1B — {msg}", 14)
-            ref_papers, ref_diagnostics = extract_and_enrich_references(
-                all_papers,
-                client,
-                max_refs_per_paper=limit_value,
-                progress_callback=ref_upd,
-                return_diagnostics=True,
-            )
-            st.session_state.ref_papers = ref_papers
-            st.session_state.ref_diagnostics = ref_diagnostics
-            summary = summarise_reference_corpus(ref_papers)
-            _add_trace("Stage 1B — Reference Extraction",
-                       f"{len(uploaded_files)} PDFs scanned",
-                       f"{summary['total']} refs from {ref_diagnostics.get('raw_entries',0)} raw entries: "
-                       f"{summary['tier2_abstract']} with abstract, {summary['tier3_title']} title-only")
-
-            # Stage 1C: Canonical reference resolution + filtering
-            # (Clinova Phase 1, Story 1.3.3 -- default-safe corpus
-            # filtering, opt-in via the same Corpus Quality Engine toggle).
-            # Only VERIFIED/ACCEPTED references (a real DOI/PMID/OpenAlex-
-            # ID/SS-ID match, or a full title+author+year match) feed the
-            # rest of the pipeline; QUARANTINED (title-only partial match)
-            # and UNRESOLVED references are dropped from what downstream
-            # stages see, but counted in ref_resolution_diagnostics --
-            # never silently discarded without a trace.
-            if enable_quality_engine and ref_papers:
-                upd("Stage 1C — Canonical reference resolution…", 21)
-                trusted_refs, ref_resolution_diagnostics = filter_and_dedupe_references(ref_papers)
-                ref_papers = trusted_refs
-                st.session_state.ref_papers = ref_papers
-                st.session_state.ref_resolution_diagnostics = ref_resolution_diagnostics
-                sc = ref_resolution_diagnostics["status_counts"]
-                _add_trace(
-                    "Stage 1C — Reference Resolution",
-                    f"{ref_resolution_diagnostics['input_count']} enriched refs",
-                    f"{ref_resolution_diagnostics['trusted_count']} trusted "
-                    f"(VERIFIED {sc['VERIFIED']}, ACCEPTED {sc['ACCEPTED']}), "
-                    f"{sc['QUARANTINED']} quarantined, {sc['UNRESOLVED']} unresolved, "
-                    f"{ref_resolution_diagnostics['duplicates_removed']} duplicates merged",
-                )
-        prog.progress(20)
-
-        # Stage 2: Wiki
-        upd("Stage 2 — Compiling LLM Wiki pages…", 22)
-        client.set_stage("Stage 2 — LLM Wiki")
-        wiki = build_wiki(all_papers, all_trees, client, domain_config=domain_cfg)
-        _add_trace("Stage 2 — LLM Wiki",
-                   f"{len(all_papers)} papers",
-                   f"{len(wiki.get('pages',[]))} pages, "
-                   f"{len(wiki.get('cross_links',{}).get('shared_concepts',[]))} links")
-        prog.progress(34)
-
-        # Stage 2B: Corpus Quality Engine (Clinova Phase 1, Epic 1.2, opt-in)
-        # Cross-checks each paper against a second parser (Docling), scores
-        # extraction completeness against the 05-data-architecture.md §4
-        # field checklist, and enforces the PASS/DEGRADED/FAIL gate before
-        # gap analysis is allowed to run (Story 1.2.3 / PRD FR-3).
-        corpus_quality_metrics = None
-        # B23 fix (2026-08-21): a FAIL gate used to raise all the way to the
-        # outer except block, discarding EVERYTHING already fetched this run
-        # (papers, references, wiki, evidence) with nothing saved -- a user
-        # whose corpus happened to score FAIL got back nothing at all, not
-        # even the data that had genuinely already been gathered. Now the
-        # block is caught locally: gap-analysis stages (3-6) are skipped,
-        # but Stage 1-2C's fetched data is still built into a normal results
-        # dict and saved, with the gate's FAIL status/reasons visible in it.
-        gate_blocked = False
-        gate_block_reasons = []
-        wiki_pages = wiki.get("pages", [])
-        # docling_results defaults to all-None (honest: no real page
-        # provenance available) when the Quality Engine toggle is off --
-        # Stage 2C below runs unconditionally and degrades gracefully to
-        # section-only/no provenance in that case, per Story 2.1.3's design.
-        docling_results = [None] * len(all_papers)
-        if enable_quality_engine:
-            upd("Stage 2B — Corpus Quality Engine (multi-parser cross-check)…", 35)
-            paper_scores = []
-            docling_results = []
-            for i, (paper, tmp_path) in enumerate(zip(all_papers, paper_tmp_paths)):
-                upd(f"Stage 2B — Cross-checking paper {i+1}/{len(all_papers)} with Docling…", 35)
-                wiki_page = wiki_pages[i] if i < len(wiki_pages) else {}
-                docling_result = None
-                try:
-                    docling_result = extract_with_docling(tmp_path, paper.get("filename", uploaded_files[i].name))
-                    reconciled = reconcile_paper(paper, docling_result, paper.get("filename", ""))
-                except Exception:
-                    # A Docling failure degrades the paper's score to
-                    # "nothing reconciled" rather than aborting the whole
-                    # run -- consistent with this file's existing B6/B12/B17
-                    # philosophy of never letting one paper's failure kill
-                    # processing that could otherwise proceed. This paper's
-                    # doi/tables fields will score not-extracted/empty
-                    # below, which correctly lowers its completeness score
-                    # rather than silently pretending nothing was lost.
-                    reconciled = {"fields": {}}
-                docling_results.append(docling_result)
-                score = score_paper_completeness(
-                    reconciled, wiki_page,
-                    ref_count=len(ref_papers), has_figures=bool(paper.get("figures")),
-                )
-                paper_scores.append(score)
-
-            corpus_quality_metrics = compute_corpus_quality(
-                paper_scores, ref_diagnostics, ref_papers=ref_papers,
-            )
-            try:
-                corpus_quality_metrics = enforce_quality_gate(
-                    corpus_quality_metrics,
-                    override=override_quality_gate,
-                    override_reason="user-checked override in sidebar" if override_quality_gate else "",
-                    override_by="streamlit_user",
-                )
-            except QualityGateBlockedError as e:
-                # B23 fix: previously re-raised here, which discarded every
-                # paper/reference/wiki page already fetched this run -- now
-                # caught locally so that data is still saved. Stage 3-6
-                # (knowledge graph / gap detection / validation / proposals)
-                # are skipped below since running gap analysis against a
-                # FAIL-gated corpus would violate PRD FR-3; only that
-                # gap-analysis output is empty, not the whole run.
-                gate_blocked = True
-                gate_block_reasons = e.reasons
-                # Temp-file cleanup happens unconditionally a few lines below
-                # (runs whether or not the gate blocked) -- no need to repeat it here.
-
-            _add_trace(
-                "Stage 2B — Corpus Quality Engine",
-                f"{len(all_papers)} papers, {len(ref_papers)} refs",
-                f"{corpus_quality_metrics['extraction_completeness']:.0%} extraction completeness, "
-                f"{corpus_quality_metrics['doi_resolution_rate']:.0%} DOI resolution, "
-                f"gate={corpus_quality_metrics['quality_gate']}",
-            )
-
-        for p in paper_tmp_paths:
-            try:
-                os.unlink(p)
-            except OSError:
-                pass
-
-        # Stage 2C: Evidence Extraction (Clinova Phase 2, Epic 2.1/2.2).
-        # Runs on EVERY run, independent of the Quality Engine toggle
-        # (2026-08-21 fix -- previously tied to it unnecessarily): 6 of 13
-        # evidence types are deterministic (zero LLM/Docling cost, derived
-        # from the wiki page alone), so gating the whole stage behind
-        # Docling's ~90s/paper cost meant users paid nothing to get nothing
-        # unless they also opted into the heavier corpus-quality cross-
-        # check. The other 7 types cost one small scoped LLM call per
-        # paper (max_tokens=1500) -- cheap relative to the wiki/graph/gap
-        # calls already made on every run regardless. Real page-level
-        # provenance still depends on Stage 2B having run (docling_results
-        # is honestly all-None otherwise, per Story 2.1.3's design) --
-        # only the PROVENANCE QUALITY is gated by the toggle, not whether
-        # evidence gets extracted at all.
-        upd("Stage 2C — Extracting evidence objects…", 35)
-        evidence_objects = {}
-        total_evidence = 0
-        for i, paper in enumerate(all_papers):
-            wiki_page = wiki_pages[i] if i < len(wiki_pages) else {}
-            docling_result = docling_results[i] if i < len(docling_results) else None
-            filename = paper.get("filename", f"paper_{i+1}")
-            try:
-                evidence_dicts, _, _ = extract_evidence_cached(
-                    filename, wiki_page, docling_result, client=client, use_llm=True,
-                )
-            except Exception:
-                # Same never-let-one-paper-kill-the-run philosophy as the
-                # Docling cross-check above -- evidence extraction is
-                # additive, not load-bearing for the rest of the run.
-                evidence_dicts = []
-            evidence_objects[filename] = evidence_dicts
-            total_evidence += len(evidence_dicts)
-
-        _add_trace(
-            "Stage 2C — Evidence Extraction",
-            f"{len(all_papers)} papers",
-            f"{total_evidence} evidence objects extracted "
-            f"({'with' if enable_quality_engine else 'without'} Docling page provenance)",
+        # Clinova Phase 5, Epic 5.6: the Stage 1-6 orchestration that used to
+        # live inline here now lives in pipeline/run_pipeline.py, so the web
+        # app can run the exact same pipeline instead of a reimplementation.
+        # Streamlit-specific concerns (progress bar, trace rows, warnings)
+        # are injected as callbacks -- behaviour here is unchanged.
+        outcome = run_full_pipeline(
+            papers=[(uf.name, uf.getvalue()) for uf in uploaded_files],
+            context=context,
+            client=client,
+            name=run_name,
+            options=RunOptions(
+                provider_key=selected_provider_key,
+                model=selected_model,
+                use_vision=use_vision,
+                extract_refs=extract_refs,
+                ref_limit=None if ref_limit == "All" else int(ref_limit),
+                enable_quality_engine=enable_quality_engine,
+                override_quality_gate=override_quality_gate,
+                enable_gap_challenger=enable_gap_challenger,
+                enable_graph_persistence=enable_graph_persistence,
+                ss_api_key=ss_api_key,
+                domain_config=domain_cfg,
+                git_commit=_GIT_COMMIT,
+            ),
+            progress=upd,
+            trace=_add_trace,
+            warn=lambda m: st.warning(f"⚠️ {m}"),
+            token_meter=token_meter,
         )
 
-        if not gate_blocked:
-            # Stage 3: Knowledge Graph
-            upd("Stage 3 — Building knowledge graph (LazyGraphRAG)…", 36)
-            client.set_stage("Stage 3 — Knowledge Graph")
-            graph = build_knowledge_graph(wiki, client, domain_config=domain_cfg,
-                                          evidence_objects=evidence_objects)
-            # Clinova Phase 3, Epic 3.1 (FR-7): every graph build is scored,
-            # not just counted -- build_status/quality_score feed into the
-            # gap confidence downgrade below (real success criterion: "a
-            # degraded graph provably reduces the confidence of any gap
-            # conclusion derived from it").
-            graph_quality = score_graph_quality(graph, wiki)
-            _add_trace("Stage 3 — Knowledge Graph",
-                       "Wiki pages + cross-links",
-                       f"{graph['stats']['entity_count']} entities, "
-                       f"{graph['stats']['relationship_count']} relationships "
-                       f"— {graph_quality['build_status']} "
-                       f"(quality={graph_quality['quality_score']})")
-            prog.progress(48)
-
-            # Stage 4+5: Gaps + Validation
-            upd("Stage 4 — Detecting research gaps…", 50)
-            client.set_stage("Stage 4 — Gap Detection")
-            gaps = detect_gaps(wiki, graph, context, client, domain_config=domain_cfg,
-                               evidence_objects=evidence_objects)
-            # Clinova Phase 3, Epic 3.2 (Hybrid Gap Engine): the deterministic
-            # pattern library is a second, independent candidate-gap source,
-            # evaluated directly against this run's real Evidence Objects
-            # (Stage 2C) -- no LLM call, and additive to the existing
-            # LLM-only detect_gaps() above, not a replacement for it. Every
-            # gap from either source now carries a `source` tag (semantic vs
-            # deterministic) per 04-ai-research-architecture.md §4's
-            # provenance requirement. No-op outside Healthcare AI today (the
-            # pattern library is domain-specific, per its own module docstring).
-            det_gaps = detect_deterministic_gaps(evidence_objects, context.get("domain", ""))
-            # Graph-structural signal (source 2 of 3): queries the local
-            # entity/relationship graph Stage 3 just built above -- no Neo4j,
-            # no LLM call, domain-agnostic (unlike the pattern library).
-            # Neo4j itself (the "primary new infra" 10-phased-implementation-
-            # plan.md names for Phase 3) is deferred pending Docker/admin
-            # access on this machine; querying the graph structurally does
-            # not actually require it, since a real graph is already built
-            # for every run today.
-            graph_gaps = detect_graph_structural_gaps(graph)
-            gaps = gaps + det_gaps + graph_gaps
-            # FR-7's success criterion, made real: a DEGRADED/FALLBACK graph
-            # build downgrades confidence for gaps whose entire evidentiary
-            # basis is that graph (source == "graph_structural") -- not
-            # silently treated as equal-quality to a clean build.
-            gaps = apply_graph_quality_to_gaps(gaps, graph_quality)
-            upd("Stage 5 — Validating gaps (Semantic Scholar + arXiv)…", 58)
-            client.set_stage("Stage 5 — Gap Validation")
-            validated_gaps = validate_gaps(gaps, client, domain_config=domain_cfg, ss_api_key=ss_api_key.strip())
-            _add_trace("Stage 4-5 — Gaps",
-                       "Wiki + graph + domain context"
-                       + (f" + {len(det_gaps)} deterministic-pattern candidates" if det_gaps else "")
-                       + (f" + {len(graph_gaps)} graph-structural candidates" if graph_gaps else ""),
-                       f"{len(validated_gaps)} gaps: "
-                       f"{sum(1 for g in validated_gaps if g.get('validation_status')=='open')} open")
-            prog.progress(66)
-
-            # Stage 5b: Gap Challenger (Clinova Phase 3, Epic 3.4, opt-in --
-            # additive enrichment on top of Stage 5's existing open/partial/
-            # solved validation, not a replacement for it). Each gap gets
-            # `challenger_state`/`challenger_status`/`challenge_funnel` keys
-            # merged in; a per-gap failure degrades that one gap to no
-            # enrichment rather than aborting the run, matching this file's
-            # existing per-paper-failure-isolation philosophy elsewhere.
-            if enable_gap_challenger:
-                upd("Stage 5b — Gap Challenger (search coverage + terminal status)…", 62)
-                client.set_stage("Stage 5b — Gap Challenger")
-                for i, gap in enumerate(validated_gaps):
-                    upd(f"Stage 5b — Challenging gap {i+1}/{len(validated_gaps)}…", 62)
-                    try:
-                        challenge = run_challenge(
-                            gap, client, ss_api_key=ss_api_key.strip(), domain_config=domain_cfg,
-                        )
-                        gap.update(challenge)
-                    except Exception as e:
-                        gap["challenger_state"] = None
-                        gap["challenger_status"] = None
-                        gap["challenger_error"] = str(e)
-                statuses = [g.get("challenger_status") for g in validated_gaps if g.get("challenger_status")]
-                status_counts = {s: statuses.count(s) for s in sorted(set(statuses))}
-                _add_trace(
-                    "Stage 5b — Gap Challenger",
-                    f"{len(validated_gaps)} gaps",
-                    ", ".join(f"{v} {k}" for k, v in status_counts.items()) or "no gaps reached a terminal status",
-                )
-
-            # Stage 6: Proposals
-            upd("Stage 6 — Generating proposals…", 68)
-            client.set_stage("Stage 6 — Proposals")
-            proposals = generate_proposals(validated_gaps, wiki, context, client,
-                                           domain_config=domain_cfg)
-            _add_trace("Stage 6 — Proposals", f"{len(validated_gaps)} gaps",
-                       f"{len(proposals)} proposals")
-            prog.progress(75)
-        else:
-            # B23 fix: gate-blocked runs skip gap analysis entirely (PRD
-            # FR-3 -- must not analyze a FAIL-gated corpus) but still reach
-            # this point with real fetched data to save below.
-            upd("Quality gate FAILED — skipping gap analysis, saving fetched data…", 68)
-            graph = {"stats": {"entity_count": 0, "relationship_count": 0}, "communities": []}
-            graph_quality = None
-            validated_gaps = []
-            proposals = []
-            _add_trace("Stage 3-6 — Skipped (quality gate FAIL)",
-                       f"{len(all_papers)} papers, {len(ref_papers)} refs",
-                       "; ".join(gate_block_reasons) or "corpus below quality threshold")
-            prog.progress(75)
-
-        # Build full corpus
-        corpus = assign_tiers(all_papers, ref_papers)
-        st.session_state.corpus = corpus
-
-        # Store results
-        results = {
-            "papers": [
-                {"filename": p["filename"], "wiki": w,
-                 "char_count": p.get("char_count",0),
-                 "sections": p.get("sections",{}),
-                 "tables": p.get("tables",[]),
-                 "tree_summary": tree_to_summary(t, max_chars=2000),
-                 "tier": 1}
-                for p, w, t in zip(all_papers, wiki["pages"], all_trees)
-            ],
-            "wiki": wiki, "graph": graph, "graph_quality": graph_quality,
-            "gaps": validated_gaps, "proposals": proposals,
-            "communities": graph.get("communities", []),
-            "context": context,
-            "corpus_stats": corpus_stats(corpus),
-            "ref_summary": summarise_reference_corpus(ref_papers),
-            "ref_papers": ref_papers,
-            "ref_diagnostics": ref_diagnostics,
-            "ref_resolution_diagnostics": ref_resolution_diagnostics,
-            "corpus_quality_metrics": corpus_quality_metrics,
-            "evidence_objects": evidence_objects,
-            "corpus": corpus,
-            "pipeline_trace": st.session_state.pipeline_trace,
-            # B23 fix: surfaced so the Results view can explain why gaps/
-            # proposals are empty on a gate-blocked run, distinct from a
-            # genuinely gap-free corpus.
-            "gate_blocked": gate_blocked,
-            "gate_block_reasons": gate_block_reasons,
-        }
-        st.session_state.results = results
-
-        # Auto-save to database -- happens regardless of gate_blocked, so a
-        # FAIL-gated run's fetched papers/references/wiki/evidence are never
-        # lost (B23 fix).
-        saved_id = save_run(name, results)
-        st.session_state.loaded_run_id = None  # fresh run, not a loaded one
-        st.session_state.current_run_id = saved_id
-        st.session_state.current_run_name = name
-
-        # Clinova Phase 3, Epic 3.1 (opt-in) -- persists this run's graph to
-        # ArcadeDB so it can be compared against other runs later. Skipped
-        # (not attempted) when gate_blocked, since that path's graph is an
-        # empty placeholder with nothing real to persist. A failure here
-        # (most commonly: ArcadeDB isn't running) degrades to a warning,
-        # never blocks the already-successful run from completing.
-        if enable_graph_persistence and not gate_blocked:
-            ok, msg = arcadedb_connect_ok()
-            if ok:
-                try:
-                    gsummary = save_graph_snapshot(saved_id, name, graph, quality=graph_quality)
-                    _add_trace(
-                        "Graph Persistence (ArcadeDB)",
-                        f"{gsummary['entity_count']} entities, {gsummary['relationship_count']} relationships",
-                        f"Saved under run_id={saved_id[:8]}…",
-                    )
-                except Exception as e:
-                    st.warning(f"⚠️ Graph persistence failed (run itself completed normally): {e}")
-            else:
-                st.warning(f"⚠️ Graph not persisted -- {msg}")
-
-        # Clinova Phase 4, Epic 4.1/4.2 -- records this run as a
-        # ResearchArtifact (artifact_type="pipeline") and its full
-        # RunManifest (FR-22/FR-23). Always attempted, gate-blocked runs
-        # included -- a FAIL-gated run is itself a real, worth-recording
-        # research event, not a non-event. Failure here degrades to a
-        # warning, same convention as graph persistence above -- the run
-        # itself has already completed and saved successfully by this
-        # point, so a registry-write failure must never look like the run
-        # failed.
-        lineage = {"artifact_ids": []}
-        try:
-            record_artifact(
-                artifact_id=f"pipeline:{saved_id}", artifact_type="pipeline",
-                artifact_version=f"pipeline:{saved_id}",
-                project_id=context.get("domain") or "default",
-                content_hash=saved_id, run_id=saved_id,
-            )
-            # Clinova Phase 4, Epic 4.4 (FR-24) -- writes the Technical
-            # Lineage spine (corpus -> paper_extraction -> evidence_set ->
-            # graph -> gap_set -> proposal_set) so the future Lineage view
-            # has real per-stage artifacts to walk, not just the one
-            # pipeline-level row above. Gate-blocked runs truncate the
-            # spine after evidence_set (see pipeline/lineage.py).
-            lineage = record_run_lineage(
-                run_id=saved_id,
-                project_id=context.get("domain") or "default",
-                papers=all_papers, wiki=wiki, ref_papers=ref_papers,
-                evidence_objects=evidence_objects,
-                graph=None if gate_blocked else graph,
-                gaps=None if gate_blocked else validated_gaps,
-                proposals=None if gate_blocked else proposals,
-                tooling={
-                    "graph_builder": str(GRAPH_PERSISTENCE_VERSION) if enable_graph_persistence else None,
-                    "embedding_model": EMBEDDING_MODEL if enable_gap_challenger else None,
-                    "model_bundle": f"{selected_provider_key}:{selected_model}",
-                },
-                gate_blocked=gate_blocked,
-            )
-            record_run_manifest(
-                run_id=saved_id,
-                project_id=context.get("domain") or "default",
-                git_commit=_GIT_COMMIT,
-                parser_versions={
-                    "pymupdf": None,  # no formal version constant exists for this stage yet
-                    "docling": DOCLING_STAGE_VERSION if enable_quality_engine else None,
-                },
-                reference_resolver_version=str(REFERENCE_STAGE_VERSION),
-                # Clinova model selector (2026-08-23): the real provider:model
-                # this run actually used -- was always None before this
-                # feature existed, since only one model was ever in play.
-                model_bundle_version=f"{selected_provider_key}:{selected_model}",
-                embedding_model_version=EMBEDDING_MODEL if enable_gap_challenger else None,
-                reranker_version=RERANK_MODEL if enable_gap_challenger else None,
-                graph_version=str(GRAPH_PERSISTENCE_VERSION) if enable_graph_persistence else None,
-                search_strategy_version=str(GAP_CHALLENGER_STAGE_VERSION) if enable_gap_challenger else None,
-                academic_search_date=datetime.now().date().isoformat(),
-                search_providers=["semantic_scholar", "arxiv"],
-                # Now real: the Technical Lineage spine's artifact ids
-                # (Epic 4.4), not a fabricated reference.
-                output_artifacts=lineage["artifact_ids"],
-                warnings=gate_block_reasons if gate_blocked else [],
-                quality_gate_results={
-                    "corpus": corpus_quality_metrics.get("quality_gate") if corpus_quality_metrics else None,
-                    "graph": graph_quality.get("build_status") if graph_quality else None,
-                },
-                run_duration_seconds=round(time.time() - _run_start_time, 1),
-                # Clinova Phase 4, Epic 4.3 token instrumentation
-                # (2026-08-24): real when the provider supports
-                # stream_options and at least one call's usage was
-                # captured; None (not a fabricated 0) otherwise -- see
-                # utils/token_meter.py::to_manifest_dict().
-                token_usage=token_meter.to_manifest_dict(),
-            )
-        except Exception as e:
-            st.warning(f"⚠️ Run Manifest not recorded (run itself completed normally): {e}")
+        results = outcome.results
+        st.session_state.results          = results
+        st.session_state.ref_papers       = results.get("ref_papers", [])
+        st.session_state.ref_diagnostics  = results.get("ref_diagnostics", {})
+        st.session_state.ref_resolution_diagnostics = results.get("ref_resolution_diagnostics")
+        st.session_state.corpus           = results.get("corpus", [])
+        st.session_state.loaded_run_id    = None  # fresh run, not a loaded one
+        st.session_state.current_run_id   = outcome.run_id
+        st.session_state.current_run_name = outcome.name
 
         prog.progress(80)
         prog.empty(); stat.empty()
-        if gate_blocked:
+        if outcome.gate_blocked:
             st.warning(
-                f"⚠️ Quality gate FAILED — gap analysis skipped: {'; '.join(gate_block_reasons)}. "
-                f"Fetched data ({len(all_papers)} papers, {len(ref_papers)} refs, "
-                f"{total_evidence} evidence objects) was saved as '{name}' ({saved_id[:8]}…). "
+                f"⚠️ Quality gate FAILED — gap analysis skipped: "
+                f"{'; '.join(outcome.gate_block_reasons)}. "
+                f"Fetched data ({outcome.n_papers} papers, {outcome.n_refs} refs, "
+                f"{outcome.n_evidence} evidence objects) was saved as "
+                f"'{outcome.name}' ({outcome.run_id[:8]}…). "
                 "Re-run with the sidebar override checked to force gap analysis anyway."
             )
         else:
-            st.success(f"✅ Done — {len(validated_gaps)} gaps, {len(proposals)} proposals. "
-                       f"Saved as '{name}' ({saved_id[:8]}…)")
+            st.success(f"✅ Done — {outcome.n_gaps} gaps, {outcome.n_proposals} proposals. "
+                       f"Saved as '{outcome.name}' ({outcome.run_id[:8]}…)")
 
+    except PipelineInputError as e:
+        # A caller-input problem (too few papers), not a crash -- reported
+        # the same way the old inline `len(uploaded_files) < 2` check was.
+        prog.empty(); stat.empty()
+        st.warning(str(e))
     except Exception as e:
         prog.empty(); stat.empty()
         st.error(f"Pipeline error: {e}")

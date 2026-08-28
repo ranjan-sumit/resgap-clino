@@ -358,6 +358,74 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/runs/new/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** New Run Config */
+        get: operations["new_run_config_api_runs_new_config_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/runs/new": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create Run */
+        post: operations["create_run_api_runs_new_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** All Jobs */
+        get: operations["all_jobs_api_jobs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/{job_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Job Status */
+        get: operations["job_status_api_jobs__job_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -401,6 +469,56 @@ export interface components {
             created_at: string;
             /** Next Legal Statuses */
             next_legal_statuses: ("EXPERIMENTAL" | "CANDIDATE" | "CHAMPION" | "ARCHIVED")[];
+        };
+        /** Body_create_run_api_runs_new_post */
+        Body_create_run_api_runs_new_post: {
+            /** Files */
+            files: string[];
+            /**
+             * Name
+             * @default
+             */
+            name: string;
+            /**
+             * Domain
+             * @default Healthcare AI
+             */
+            domain: string;
+            /**
+             * Interest
+             * @default
+             */
+            interest: string;
+            /**
+             * Gap Type
+             * @default Any
+             */
+            gap_type: string;
+            /**
+             * Provider Key
+             * @default nvidia
+             */
+            provider_key: string;
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /**
+             * Extract Refs
+             * @default false
+             */
+            extract_refs: boolean;
+            /**
+             * Enable Quality Engine
+             * @default false
+             */
+            enable_quality_engine: boolean;
+            /**
+             * Enable Gap Challenger
+             * @default false
+             */
+            enable_gap_challenger: boolean;
         };
         /** ChallengeFunnelView */
         ChallengeFunnelView: {
@@ -890,6 +1008,34 @@ export interface components {
             /** Confidence */
             confidence: string | null;
         };
+        /**
+         * NewRunConfig
+         * @description Everything the New Run screen needs to render honest, real choices --
+         *     including which providers actually have a key configured, so the UI can
+         *     disable the ones that would fail rather than letting a run start and die
+         *     minutes later.
+         */
+        NewRunConfig: {
+            /** Providers */
+            providers: components["schemas"]["ProviderOption"][];
+            /** Default Provider */
+            default_provider: string;
+            /** Domains */
+            domains: string[];
+            /** Default Domain */
+            default_domain: string;
+            /** Min Papers */
+            min_papers: number;
+            /** Max Papers */
+            max_papers: number;
+            /**
+             * Jobs Are In Process
+             * @default true
+             */
+            jobs_are_in_process: boolean;
+            /** Jobs Note */
+            jobs_note: string;
+        };
         /** NovelFindingView */
         NovelFindingView: {
             /** Title */
@@ -1082,6 +1228,21 @@ export interface components {
             /** Risk */
             risk?: string | null;
         };
+        /** ProviderOption */
+        ProviderOption: {
+            /** Key */
+            key: string;
+            /** Label */
+            label: string;
+            /** Default Model */
+            default_model: string;
+            /** Models */
+            models: string[];
+            /** Api Key Env */
+            api_key_env: string;
+            /** Api Key Present */
+            api_key_present: boolean;
+        };
         /** ReferenceFunnelStage */
         ReferenceFunnelStage: {
             /** Key */
@@ -1187,6 +1348,53 @@ export interface components {
             gate_blocked: boolean;
             /** Gate Block Reasons */
             gate_block_reasons: string[];
+        };
+        /** RunJobView */
+        RunJobView: {
+            /** Job Id */
+            job_id: string;
+            /** Name */
+            name: string;
+            /** Project Id */
+            project_id: string;
+            /** State */
+            state: string;
+            /** Percent */
+            percent: number;
+            /** Message */
+            message: string;
+            /** Trace */
+            trace: components["schemas"]["TraceRow"][];
+            /** Warnings */
+            warnings: string[];
+            /** Run Id */
+            run_id?: string | null;
+            /** Error */
+            error?: string | null;
+            /**
+             * Gate Blocked
+             * @default false
+             */
+            gate_blocked: boolean;
+            /**
+             * Gate Block Reasons
+             * @default []
+             */
+            gate_block_reasons: string[];
+            /**
+             * N Gaps
+             * @default 0
+             */
+            n_gaps: number;
+            /**
+             * N Proposals
+             * @default 0
+             */
+            n_proposals: number;
+            /** Started At */
+            started_at: string;
+            /** Finished At */
+            finished_at?: string | null;
         };
         /** RunListResponse */
         RunListResponse: {
@@ -1348,6 +1556,15 @@ export interface components {
             } | null;
             /** Note */
             note?: string | null;
+        };
+        /** TraceRow */
+        TraceRow: {
+            /** Stage */
+            stage: string;
+            /** Inputs */
+            inputs: string;
+            /** Outputs */
+            outputs: string;
         };
         /** TraceStep */
         TraceStep: {
@@ -1978,6 +2195,110 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    new_run_config_api_runs_new_config_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NewRunConfig"];
+                };
+            };
+        };
+    };
+    create_run_api_runs_new_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_create_run_api_runs_new_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunJobView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    all_jobs_api_jobs_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunJobView"][];
+                };
+            };
+        };
+    };
+    job_status_api_jobs__job_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunJobView"];
                 };
             };
             /** @description Validation Error */

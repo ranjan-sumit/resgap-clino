@@ -1,7 +1,9 @@
 import type { Metadata } from "next";
 import { RunsTable } from "@/components/runs/runs-table";
 import { EmptyState } from "@/components/data/empty-state";
+import Link from "next/link";
 import { PageHero } from "@/components/shell/page-hero";
+import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 
 export const metadata: Metadata = { title: "Runs" };
@@ -15,6 +17,11 @@ export default async function RunsPage() {
         eyebrow="Engineering"
         title="Runs"
         description="Every pipeline run recorded in the registry, newest first."
+        actions={
+          <Button asChild>
+            <Link href="/runs/new">New run</Link>
+          </Button>
+        }
       />
 
       {runs.length === 0 ? (

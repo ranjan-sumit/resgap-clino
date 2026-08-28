@@ -16,6 +16,8 @@ export type CountStat = components["schemas"]["CountStat"];
 export type VersionField = components["schemas"]["VersionField"];
 export type CorpusView = components["schemas"]["CorpusView"];
 export type PaperDetail = components["schemas"]["PaperDetail"];
+export type RunJobView = components["schemas"]["RunJobView"];
+export type NewRunConfig = components["schemas"]["NewRunConfig"];
 export type EvidenceView = components["schemas"]["EvidenceView"];
 export type GraphView = components["schemas"]["GraphView"];
 export type ChallengerView = components["schemas"]["ChallengerView"];
@@ -81,6 +83,16 @@ export const api = {
   artifacts: () => get<ArtifactListResponse>("/api/artifacts"),
   reportUrl: (runId: string, format: "html" | "pdf" | "markdown" | "json") =>
     `${BASE}/api/runs/${encodeURIComponent(runId)}/report?format=${format}`,
+  newRunConfig: () => get<NewRunConfig>("/api/runs/new/config"),
+  jobStatus: (jobId: string) => get<RunJobView>(`/api/jobs/${encodeURIComponent(jobId)}`),
+  startRun: async (form: FormData): Promise<RunJobView> => {
+    const res = await fetch(`${BASE}/api/runs/new`, { method: "POST", body: form });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new ApiError(res.status, body.detail || `Starting the run failed with ${res.status}`);
+    }
+    return res.json();
+  },
   promoteRun: async (runId: string, toStatus: "CANDIDATE" | "CHAMPION" | "ARCHIVED"): Promise<ArtifactView> => {
     const res = await fetch(
       `${BASE}/api/runs/${encodeURIComponent(runId)}/promote?to_status=${toStatus}`,

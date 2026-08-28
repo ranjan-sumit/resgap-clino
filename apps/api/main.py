@@ -15,9 +15,10 @@ from fastapi.responses import JSONResponse
 from apps.api import settings
 from apps.api.errors import DatabaseUnavailableError, NotFoundError
 from apps.api.routers import (
-    artifacts, challenger, compare, config, corpus, council, evidence, graph, health, lineage,
-    projects, reports, runs,
+    artifacts, challenger, compare, config, corpus, council, evidence, graph, health, jobs,
+    lineage, projects, reports, runs,
 )
+from pipeline.run_pipeline import PipelineInputError
 from utils.database import InvalidArtifactTransitionError
 
 
@@ -59,6 +60,12 @@ def create_app() -> FastAPI:
         # surfaced as-is, not wrapped into a generic 500.
         return JSONResponse(status_code=404, content={"detail": str(exc)})
 
+    @app.exception_handler(PipelineInputError)
+    async def _pipeline_input(_request: Request, exc: PipelineInputError):
+        # Bad caller input (too few PDFs, no API key configured) -- a 400
+        # with the real reason, never a 500.
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
     @app.exception_handler(InvalidArtifactTransitionError)
     async def _invalid_transition(_request: Request, exc: InvalidArtifactTransitionError):
         # A real lifecycle-rule rejection (e.g. EXPERIMENTAL -> CHAMPION
@@ -78,6 +85,7 @@ def create_app() -> FastAPI:
     app.include_router(council.router, prefix="/api")
     app.include_router(artifacts.router, prefix="/api")
     app.include_router(reports.router, prefix="/api")
+    app.include_router(jobs.router, prefix="/api")
 
     return app
 

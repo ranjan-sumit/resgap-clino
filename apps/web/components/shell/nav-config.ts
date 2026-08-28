@@ -47,6 +47,9 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     label: "Engineering",
     items: [
+      // First entry in the group: starting a run is the primary verb of
+      // this product, and it had no entry point in the web app at all.
+      { label: "New Run", href: "/runs/new", status: "live" },
       { label: "Runs", href: "/runs", status: "live" },
       { label: "Compare", href: "/runs/compare", status: "live" },
       { label: "Versions", href: "/versions", status: "live" },
