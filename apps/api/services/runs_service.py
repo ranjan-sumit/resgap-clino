@@ -5,6 +5,7 @@ here, never in routers/runs.py.
 """
 from apps.api.errors import NotFoundError
 from apps.api.models.common import CountStat, Measure, StatusChip, VersionField
+from apps.api.services.title_match import normalise_title as _normalise_title
 from apps.api.models.runs import (
     LinkedRef,
     GapSummary, PaperRef, ProposalSummary, RunDetail, RunManifestView,
@@ -161,20 +162,19 @@ def _gap_summary(g: dict, papers_by_title: dict | None = None, proposals_by_gap:
     )
 
 
-def _normalise_title(title: str) -> str:
-    """Titles are the only join key the pipeline records between gaps,
-    proposals and papers -- there are no ids -- so matching tolerates the
-    whitespace/case/typographic-dash noise LLM output carries."""
-    return " ".join((title or "").lower().replace("‑", "-").replace("‐", "-").split())
-
-
 def _paper_ref(p: dict) -> PaperRef:
     wiki = p.get("wiki") or {}
     return PaperRef(filename=p.get("filename", ""), title=wiki.get("title"), char_count=p.get("char_count", 0))
 
 
-def _proposal_summary(p: dict) -> ProposalSummary:
+def _proposal_summary(p: dict, gap_titles: set[str] | None = None) -> ProposalSummary:
+    raw_gap = (p.get("addresses_gap") or "").strip()
+    addresses_gap = None
+    if raw_gap:
+        known = _normalise_title(raw_gap) in (gap_titles or set())
+        addresses_gap = LinkedRef(label=raw_gap, href="/gaps" if known else None)
     return ProposalSummary(
+        addresses_gap=addresses_gap,
         title=p.get("title", ""), addresses_gap_id=p.get("addresses_gap_id"),
         addresses_gap_id_resolution=p.get("addresses_gap_id_resolution"),
         problem_statement=p.get("problem_statement"), methodology=p.get("methodology"),
@@ -263,6 +263,10 @@ def build_manifest_view(run_id: str, project_id: str, manifest: dict | None) -> 
     )
 
 
+def _gap_titles(results: dict) -> set[str]:
+    return {_normalise_title(g.get("title", "")) for g in results.get("gaps") or [] if g.get("title")}
+
+
 def _papers_by_title(results: dict) -> dict[str, str]:
     return {
         _normalise_title((p.get("wiki") or {}).get("title") or p.get("filename", "")): p.get("filename", "")
@@ -304,7 +308,10 @@ def build_run_detail(run_id: str) -> RunDetail:
             _gap_summary(g, _papers_by_title(results), _proposals_by_gap(results))
             for g in results.get("gaps") or []
         ],
-        proposals=[_proposal_summary(p) for p in results.get("proposals") or []],
+        proposals=[
+            _proposal_summary(p, _gap_titles(results))
+            for p in results.get("proposals") or []
+        ],
         warnings=(manifest or {}).get("warnings") or [],
         gate_blocked=bool(results.get("gate_blocked")),
         gate_block_reasons=results.get("gate_block_reasons") or [],

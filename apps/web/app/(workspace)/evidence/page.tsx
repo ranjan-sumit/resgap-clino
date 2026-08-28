@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { Metadata } from "next";
 import { PageHero } from "@/components/shell/page-hero";
 import { ConfidenceStat } from "@/components/data/confidence-stat";
@@ -59,7 +60,14 @@ export default async function EvidencePage() {
                 </div>
                 <p className="mt-2 text-sm text-slate-800">{e.text}</p>
                 <p className="mt-2 font-mono text-xs text-neutral">
-                  {e.paper_filename}
+                  {/* paper_filename is exactly the Paper Detail route param,
+                      so evidence links straight to the paper it came from. */}
+                  <Link
+                    href={`/corpus/papers/${encodeURIComponent(e.paper_filename)}`}
+                    className="text-clinova-deep hover:underline"
+                  >
+                    {e.paper_filename}
+                  </Link>
                   {e.page != null ? ` · p.${e.page}` : ""}
                   {e.section ? ` · ${e.section}` : ""}
                 </p>

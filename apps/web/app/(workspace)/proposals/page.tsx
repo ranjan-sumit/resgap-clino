@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { Metadata } from "next";
 import { PageHero } from "@/components/shell/page-hero";
 import { EmptyState } from "@/components/data/empty-state";
@@ -98,9 +99,21 @@ export default async function ProposalsPage() {
                 </div>
               )}
 
+              {/* The pipeline records the addressed gap by title, not id, so
+                  the readable title is the useful link; the id line stays for
+                  provenance. A gap named but not present in this run is shown
+                  as text, never a link that would 404. */}
               <p className="mt-4 text-xs text-neutral">
                 Addresses gap:{" "}
-                {p.addresses_gap_id ? (
+                {p.addresses_gap ? (
+                  p.addresses_gap.href ? (
+                    <Link href={p.addresses_gap.href} className="text-clinova-deep hover:underline">
+                      {p.addresses_gap.label}
+                    </Link>
+                  ) : (
+                    <span className="text-slate-800">{p.addresses_gap.label}</span>
+                  )
+                ) : p.addresses_gap_id ? (
                   <span className="font-mono text-clinova-deep">{p.addresses_gap_id.slice(0, 8)}</span>
                 ) : (
                   <span className="italic">unresolved ({p.addresses_gap_id_resolution ?? "no match"})</span>

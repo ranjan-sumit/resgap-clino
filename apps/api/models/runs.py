@@ -66,6 +66,11 @@ class ProposalSummary(BaseModel):
     title: str
     addresses_gap_id: str | None
     addresses_gap_id_resolution: str | None
+    # The gap this proposal addresses, as a navigable link (Epic 5.7). The
+    # pipeline records the gap by TITLE, not id, so this is resolved by
+    # normalised-title match against the run's own gaps -- href is None when
+    # the named gap isn't in this run, which is real and must not 404.
+    addresses_gap: LinkedRef | None = None
     problem_statement: str | None = None
     methodology: str | None = None
     novelty: str | None = None

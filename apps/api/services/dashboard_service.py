@@ -8,6 +8,7 @@ from apps.api.models.dashboard import (
     ActivityEvent, GapOpportunity, LinkedRef, ProjectDashboard, ProjectSummary, RunDelta,
 )
 from apps.api.services.measures import build_confidence_measures
+from apps.api.services.title_match import normalise_title as _normalise
 from apps.api.services.runs_service import (
     _CHALLENGE_CHIPS, _NOT_CHALLENGED_CHIP, _UNKNOWN_VALIDATION_CHIP, _VALIDATION_CHIPS,
     build_counts, build_run_summary,
@@ -27,13 +28,6 @@ def list_projects() -> list[ProjectSummary]:
         project_id = r.get("domain") or "default"
         counts[project_id] = counts.get(project_id, 0) + 1
     return [ProjectSummary(project_id=pid, label=pid, n_runs=n) for pid, n in sorted(counts.items())]
-
-
-def _normalise(title: str) -> str:
-    """Titles are the only join key the pipeline records between gaps,
-    proposals and papers -- there are no ids -- so matching has to tolerate
-    the whitespace/case/typographic-dash noise that LLM output carries."""
-    return " ".join((title or "").lower().replace("‑", "-").replace("‐", "-").split())
 
 
 def _gap_cross_links(

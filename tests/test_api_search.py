@@ -106,5 +106,45 @@ class GapCrossLinkTests(unittest.TestCase):
         self.assertEqual(_normalise_title("Multi‑Ethnic  Dataset"),
                           _normalise_title("multi-ethnic dataset"))
 
+
+class SharedTitleMatchTests(unittest.TestCase):
+    """The title normaliser used to exist as two private copies (one in
+    runs_service, one in dashboard_service). Two copies of a matching rule is
+    how cross-links silently stop matching: one gets fixed, the other
+    doesn't, and the failure mode is an empty list rather than an error."""
+
+    def test_both_services_use_the_one_shared_implementation(self):
+        from apps.api.services.dashboard_service import _normalise
+        from apps.api.services.runs_service import _normalise_title
+        from apps.api.services.title_match import normalise_title
+        self.assertIs(_normalise_title, normalise_title)
+        self.assertIs(_normalise, normalise_title)
+
+    def test_folds_every_typographic_dash_the_pipeline_emits(self):
+        from apps.api.services.title_match import normalise_title
+        for variant in ("Multi‑Ethnic", "Multi‐Ethnic", "Multi‒Ethnic",
+                        "Multi–Ethnic", "Multi—Ethnic"):
+            self.assertEqual(normalise_title(variant), "multi-ethnic", variant)
+
+    def test_collapses_case_and_whitespace(self):
+        from apps.api.services.title_match import normalise_title
+        self.assertEqual(normalise_title("  A   B  "), normalise_title("a b"))
+
+
+class ProposalCrossLinkTests(unittest.TestCase):
+    def test_proposals_link_to_the_gap_they_address(self):
+        runs = client.get("/api/runs?limit=1").json()["runs"]
+        run = client.get(f"/api/runs/{runs[0]['run_id']}").json()
+        with_gap = [p for p in run["proposals"] if p.get("addresses_gap")]
+        self.assertGreater(len(with_gap), 0)
+        for p in with_gap:
+            self.assertTrue(p["addresses_gap"]["label"].strip())
+
+    def test_a_gap_not_in_this_run_is_text_not_a_dead_link(self):
+        from apps.api.services.runs_service import _proposal_summary
+        summary = _proposal_summary({"title": "P", "addresses_gap": "Nope"}, gap_titles=set())
+        self.assertIsNotNone(summary.addresses_gap)
+        self.assertIsNone(summary.addresses_gap.href)
+
 if __name__ == "__main__":
     unittest.main()
