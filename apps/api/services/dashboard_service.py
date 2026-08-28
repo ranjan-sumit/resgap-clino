@@ -4,7 +4,9 @@ names which run it came from -- never a fabricated cross-run sum (runs
 in the same project can overlap in content, so summing would double-count).
 """
 from apps.api.models.common import RunRef
-from apps.api.models.dashboard import ActivityEvent, GapOpportunity, ProjectDashboard, ProjectSummary
+from apps.api.models.dashboard import (
+    ActivityEvent, GapOpportunity, LinkedRef, ProjectDashboard, ProjectSummary, RunDelta,
+)
 from apps.api.services.measures import build_confidence_measures
 from apps.api.services.runs_service import (
     _CHALLENGE_CHIPS, _NOT_CHALLENGED_CHIP, _UNKNOWN_VALIDATION_CHIP, _VALIDATION_CHIPS,
@@ -27,7 +29,41 @@ def list_projects() -> list[ProjectSummary]:
     return [ProjectSummary(project_id=pid, label=pid, n_runs=n) for pid, n in sorted(counts.items())]
 
 
-def _gap_opportunity(g: dict, run_id: str) -> GapOpportunity:
+def _normalise(title: str) -> str:
+    """Titles are the only join key the pipeline records between gaps,
+    proposals and papers -- there are no ids -- so matching has to tolerate
+    the whitespace/case/typographic-dash noise that LLM output carries."""
+    return " ".join((title or "").lower().replace("‑", "-").replace("‐", "-").split())
+
+
+def _gap_cross_links(
+    g: dict,
+    papers_by_title: dict[str, str],
+    proposals_by_gap: dict[str, list[str]],
+) -> tuple[list[LinkedRef], list[LinkedRef]]:
+    supporting = []
+    for title in g.get("supporting_papers") or []:
+        filename = papers_by_title.get(_normalise(title))
+        supporting.append(LinkedRef(
+            label=title,
+            # A supporting paper is often a *reference*, not one of the
+            # uploaded PDFs -- real, but with no Paper Detail screen to open.
+            # Rendered as plain text rather than a link that would 404.
+            href=f"/corpus/papers/{filename}" if filename else None,
+        ))
+    proposals = [
+        LinkedRef(label=title, href="/proposals")
+        for title in proposals_by_gap.get(_normalise(g.get("title", "")), [])
+    ]
+    return supporting, proposals
+
+
+def _gap_opportunity(
+    g: dict,
+    run_id: str,
+    papers_by_title: dict[str, str] | None = None,
+    proposals_by_gap: dict[str, list[str]] | None = None,
+) -> GapOpportunity:
     confidence_str = g.get("confidence")
     level = confidence_str.title() if confidence_str in ("high", "medium", "low") else "Unknown"
     from apps.api.models.common import Measure
@@ -44,6 +80,60 @@ def _gap_opportunity(g: dict, run_id: str) -> GapOpportunity:
         validation=_VALIDATION_CHIPS.get(g.get("validation_status"), _UNKNOWN_VALIDATION_CHIP),
         challenge=_CHALLENGE_CHIPS.get(g.get("challenger_status"), _NOT_CHALLENGED_CHIP),
         confidence=confidence, run_id=run_id,
+        **dict(zip(
+            ("supporting_papers", "proposals"),
+            _gap_cross_links(g, papers_by_title or {}, proposals_by_gap or {}),
+        )),
+    )
+
+
+def _build_delta(all_runs: list[dict]) -> RunDelta | None:
+    """None when there is nothing to compare against -- a single-run project
+    has no 'since last run', and inventing a delta against an empty
+    placeholder would be a fabricated number."""
+    if len(all_runs) < 2:
+        return None
+    current, previous = all_runs[0], all_runs[1]
+    try:
+        from pipeline.run_compare import compare_runs
+        cmp = compare_runs(previous["id"], current["id"])
+    except Exception:
+        # A run that predates a schema change can fail to compare. That's a
+        # missing panel, never a broken dashboard.
+        return None
+
+    gaps = cmp.get("gaps") or {}
+    papers = cmp.get("papers") or {}
+    graph = cmp.get("graph") or {}
+    proposals = cmp.get("proposals") or {}
+    evidence = cmp.get("evidence") or {}
+
+    gaps_added = [str(g) for g in (gaps.get("added") or [])]
+    gaps_removed = [str(g) for g in (gaps.get("removed") or [])]
+    papers_added = [str(p) for p in (papers.get("added") or [])]
+    papers_removed = [str(p) for p in (papers.get("removed") or [])]
+    entities_added = len(graph.get("entities_added") or [])
+    entities_removed = len(graph.get("entities_removed") or [])
+    evidence_delta = int(evidence.get("delta") or 0)
+    proposals_added = int(proposals.get("added_count") or 0)
+    proposals_removed = int(proposals.get("removed_count") or 0)
+
+    return RunDelta(
+        previous_run=RunRef(run_id=previous["id"], name=previous["name"],
+                            created_at=str(previous["created_at"])),
+        current_run=RunRef(run_id=current["id"], name=current["name"],
+                           created_at=str(current["created_at"])),
+        gaps_added=gaps_added, gaps_removed=gaps_removed,
+        papers_added=papers_added, papers_removed=papers_removed,
+        entities_added_count=entities_added, entities_removed_count=entities_removed,
+        evidence_delta=evidence_delta,
+        proposals_added_count=proposals_added, proposals_removed_count=proposals_removed,
+        compare_href=f"/runs/compare?baseline={previous['id']}&candidate={current['id']}",
+        unchanged=not any([
+            gaps_added, gaps_removed, papers_added, papers_removed,
+            entities_added, entities_removed, evidence_delta,
+            proposals_added, proposals_removed,
+        ]),
     )
 
 
@@ -77,8 +167,22 @@ def get_project_dashboard(project_id: str) -> ProjectDashboard:
         confidence_rank = {"high": 0, "medium": 1, "low": 2}.get(g.get("confidence"), 3)
         return (status_rank, confidence_rank, -len(g.get("evidence_basis") or ""))
 
+    # Title -> filename / gap-title -> proposal-titles lookups, built once
+    # per request so cross-link resolution stays O(1) per gap.
+    papers_by_title = {
+        _normalise((p.get("wiki") or {}).get("title") or p.get("filename", "")): p.get("filename", "")
+        for p in results.get("papers") or []
+    }
+    proposals_by_gap: dict[str, list[str]] = {}
+    for proposal in results.get("proposals") or []:
+        key = _normalise(proposal.get("addresses_gap", ""))
+        if key:
+            proposals_by_gap.setdefault(key, []).append(proposal.get("title", ""))
+
     top = sorted(reportable, key=_sort_key)[:10]
-    top_opportunities = [_gap_opportunity(g, rid) for g, rid in top]
+    top_opportunities = [
+        _gap_opportunity(g, rid, papers_by_title, proposals_by_gap) for g, rid in top
+    ]
 
     recent_runs = [build_run_summary(r) for r in all_runs[:5]]
 
@@ -101,5 +205,6 @@ def get_project_dashboard(project_id: str) -> ProjectDashboard:
         project_id=project_id, project_label=project_id, basis_run=basis_run, basis_note=basis_note,
         counts=build_counts(results), confidence=build_confidence_measures(results),
         recent_runs=recent_runs, top_opportunities=top_opportunities,
-        n_excluded_insufficient_evidence=n_excluded, activity=activity[:15], empty_reason=None,
+        n_excluded_insufficient_evidence=n_excluded, activity=activity[:15],
+        delta=_build_delta(all_runs), empty_reason=None,
     )

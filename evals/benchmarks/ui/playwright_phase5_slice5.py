@@ -65,7 +65,11 @@ def main() -> int:
         page.goto(f"{WEB_BASE}/dashboard", wait_until="networkidle", timeout=20000)
         page.keyboard.press("Control+k")
         page.wait_for_timeout(400)
-        search_input = page.locator('input[placeholder*="Jump to"]')
+        # Selected by role inside the open dialog rather than by placeholder
+        # text: the placeholder is user-facing copy that legitimately changes
+        # (it did, when the palette gained real content search), and a test
+        # should not fail because a sentence was reworded.
+        search_input = page.locator('[role="dialog"] input').first
         check("command palette: opens via Ctrl+K", search_input.is_visible())
         search_input.fill("corpus")
         page.wait_for_timeout(300)

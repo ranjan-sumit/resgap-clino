@@ -6,13 +6,14 @@ import { EmptyState } from "@/components/data/empty-state";
 import { ModellingPanel } from "@/components/council/modelling-panel";
 import { api } from "@/lib/api";
 import { getSelectedProject } from "@/lib/project";
+import { common } from "@/lib/copy";
 
 export const metadata: Metadata = { title: "Computational Modelling" };
 
 export default async function ComputationalModellingPage() {
   const project = await getSelectedProject();
   if (!project) {
-    return <EmptyState title="No projects yet" description="Runs created in the Streamlit workspace appear here automatically." />;
+    return <EmptyState title={common.no_projects_title} description={common.no_projects_body} />;
   }
 
   const council = await api.council(project.project_id);

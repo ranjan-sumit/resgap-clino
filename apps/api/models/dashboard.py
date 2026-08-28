@@ -10,6 +10,14 @@ class ProjectSummary(BaseModel):
     n_runs: int
 
 
+class LinkedRef(BaseModel):
+    """A cross-screen link resolved server-side. `href` is None when the
+    referenced thing exists in the data but has no screen of its own to
+    point at -- shown as plain text rather than a dead link."""
+    label: str
+    href: str | None = None
+
+
 class GapOpportunity(BaseModel):
     gap_id: str | None
     title: str
@@ -19,6 +27,11 @@ class GapOpportunity(BaseModel):
     challenge: StatusChip
     confidence: Measure
     run_id: str
+    # Cross-links (Epic 5.7): the papers this gap was derived from, and the
+    # proposals that address it -- previously present in the data but never
+    # navigable, which is why every screen felt like an island.
+    supporting_papers: list[LinkedRef] = []
+    proposals: list[LinkedRef] = []
 
 
 class ActivityEvent(BaseModel):
@@ -27,6 +40,25 @@ class ActivityEvent(BaseModel):
     title: str
     detail: str
     href: str
+
+
+class RunDelta(BaseModel):
+    """What changed between the previous run and the current one. Built from
+    pipeline/run_compare.py -- the same function the Compare screen uses, so
+    the two can never disagree about what changed."""
+    previous_run: RunRef
+    current_run: RunRef
+    gaps_added: list[str] = []
+    gaps_removed: list[str] = []
+    papers_added: list[str] = []
+    papers_removed: list[str] = []
+    entities_added_count: int = 0
+    entities_removed_count: int = 0
+    evidence_delta: int = 0
+    proposals_added_count: int = 0
+    proposals_removed_count: int = 0
+    compare_href: str
+    unchanged: bool = False
 
 
 class ProjectDashboard(BaseModel):
@@ -40,4 +72,5 @@ class ProjectDashboard(BaseModel):
     top_opportunities: list[GapOpportunity]
     n_excluded_insufficient_evidence: int
     activity: list[ActivityEvent]
+    delta: RunDelta | None = None
     empty_reason: str | None

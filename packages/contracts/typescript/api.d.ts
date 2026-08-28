@@ -785,6 +785,16 @@ export interface components {
             confidence: components["schemas"]["Measure"];
             /** Run Id */
             run_id: string;
+            /**
+             * Supporting Papers
+             * @default []
+             */
+            supporting_papers: components["schemas"]["apps__api__models__dashboard__LinkedRef"][];
+            /**
+             * Proposals
+             * @default []
+             */
+            proposals: components["schemas"]["apps__api__models__dashboard__LinkedRef"][];
         };
         /** GapSummary */
         GapSummary: {
@@ -799,6 +809,16 @@ export interface components {
             validation: components["schemas"]["StatusChip"];
             challenge: components["schemas"]["StatusChip"];
             confidence: components["schemas"]["Measure"];
+            /**
+             * Supporting Papers
+             * @default []
+             */
+            supporting_papers: components["schemas"]["apps__api__models__runs__LinkedRef"][];
+            /**
+             * Proposals
+             * @default []
+             */
+            proposals: components["schemas"]["apps__api__models__runs__LinkedRef"][];
         };
         /** GraphCommunityView */
         GraphCommunityView: {
@@ -1170,6 +1190,7 @@ export interface components {
             n_excluded_insufficient_evidence: number;
             /** Activity */
             activity: components["schemas"]["ActivityEvent"][];
+            delta?: components["schemas"]["RunDelta"] | null;
             /** Empty Reason */
             empty_reason: string | null;
         };
@@ -1332,6 +1353,68 @@ export interface components {
             /** Manifest Diff */
             manifest_diff: components["schemas"]["ManifestFieldDiff"][];
             promotion: components["schemas"]["PromotionGateView"];
+        };
+        /**
+         * RunDelta
+         * @description What changed between the previous run and the current one. Built from
+         *     pipeline/run_compare.py -- the same function the Compare screen uses, so
+         *     the two can never disagree about what changed.
+         */
+        RunDelta: {
+            previous_run: components["schemas"]["RunRef"];
+            current_run: components["schemas"]["RunRef"];
+            /**
+             * Gaps Added
+             * @default []
+             */
+            gaps_added: string[];
+            /**
+             * Gaps Removed
+             * @default []
+             */
+            gaps_removed: string[];
+            /**
+             * Papers Added
+             * @default []
+             */
+            papers_added: string[];
+            /**
+             * Papers Removed
+             * @default []
+             */
+            papers_removed: string[];
+            /**
+             * Entities Added Count
+             * @default 0
+             */
+            entities_added_count: number;
+            /**
+             * Entities Removed Count
+             * @default 0
+             */
+            entities_removed_count: number;
+            /**
+             * Evidence Delta
+             * @default 0
+             */
+            evidence_delta: number;
+            /**
+             * Proposals Added Count
+             * @default 0
+             */
+            proposals_added_count: number;
+            /**
+             * Proposals Removed Count
+             * @default 0
+             */
+            proposals_removed_count: number;
+            /** Compare Href */
+            compare_href: string;
+            /**
+             * Unchanged
+             * @default false
+             */
+            unchanged: boolean;
         };
         /** RunDetail */
         RunDetail: {
@@ -1669,6 +1752,30 @@ export interface components {
             recorded: boolean;
             /** Note */
             note?: string | null;
+        };
+        /**
+         * LinkedRef
+         * @description A cross-screen link resolved server-side. `href` is None when the
+         *     referenced thing exists in the data but has no screen of its own to
+         *     point at -- shown as plain text rather than a dead link.
+         */
+        apps__api__models__dashboard__LinkedRef: {
+            /** Label */
+            label: string;
+            /** Href */
+            href?: string | null;
+        };
+        /**
+         * LinkedRef
+         * @description A cross-screen link resolved server-side. `href` is None when the
+         *     referenced thing genuinely exists in the data but has no screen of its
+         *     own -- rendered as plain text instead of a link that would 404.
+         */
+        apps__api__models__runs__LinkedRef: {
+            /** Label */
+            label: string;
+            /** Href */
+            href?: string | null;
         };
     };
     responses: never;

@@ -8,6 +8,7 @@ import { entityColor } from "@/components/graph/entity-colors";
 import { api } from "@/lib/api";
 import { getSelectedProject } from "@/lib/project";
 import type { GraphView } from "@/lib/api";
+import { common } from "@/lib/copy";
 
 export const metadata: Metadata = { title: "Knowledge Graph" };
 
@@ -40,7 +41,7 @@ function groupBySource(relationships: GraphView["relationships"]) {
 export default async function KnowledgeGraphPage() {
   const project = await getSelectedProject();
   if (!project) {
-    return <EmptyState title="No projects yet" description="Runs created in the Streamlit workspace appear here automatically." />;
+    return <EmptyState title={common.no_projects_title} description={common.no_projects_body} />;
   }
 
   const graph = await api.graph(project.project_id);

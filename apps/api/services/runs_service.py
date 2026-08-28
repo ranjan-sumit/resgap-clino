@@ -6,6 +6,7 @@ here, never in routers/runs.py.
 from apps.api.errors import NotFoundError
 from apps.api.models.common import CountStat, Measure, StatusChip, VersionField
 from apps.api.models.runs import (
+    LinkedRef,
     GapSummary, PaperRef, ProposalSummary, RunDetail, RunManifestView,
     RunSummary, TokenUsageView, TraceStep,
 )
@@ -125,7 +126,7 @@ def _token_usage_view(manifest: dict | None) -> TokenUsageView:
     )
 
 
-def _gap_summary(g: dict) -> GapSummary:
+def _gap_summary(g: dict, papers_by_title: dict | None = None, proposals_by_gap: dict | None = None) -> GapSummary:
     validation_chip = _VALIDATION_CHIPS.get(g.get("validation_status"), _UNKNOWN_VALIDATION_CHIP)
     challenge_chip = _CHALLENGE_CHIPS.get(g.get("challenger_status"), _NOT_CHALLENGED_CHIP)
     confidence_str = g.get("confidence")
@@ -137,11 +138,34 @@ def _gap_summary(g: dict) -> GapSummary:
         basis=f"LLM/pattern-assigned confidence level: {confidence_str or 'not recorded'}.",
         source="gap.confidence",
     )
+    supporting = [
+        LinkedRef(
+            label=title,
+            # A supporting paper is often a *reference*, not one of the
+            # uploaded PDFs -- real, but with no Paper Detail screen to open.
+            # Those render as plain text rather than a link that would 404.
+            href=(f"/corpus/papers/{papers_by_title[_normalise_title(title)]}"
+                  if _normalise_title(title) in (papers_by_title or {}) else None),
+        )
+        for title in g.get("supporting_papers") or []
+    ]
+    proposals = [
+        LinkedRef(label=title, href="/proposals")
+        for title in (proposals_by_gap or {}).get(_normalise_title(g.get("title", "")), [])
+    ]
     return GapSummary(
         gap_id=g.get("gap_id"), title=g.get("title", ""), source=g.get("source"),
         evidence_basis=g.get("evidence_basis"), validation=validation_chip,
         challenge=challenge_chip, confidence=confidence,
+        supporting_papers=supporting, proposals=proposals,
     )
+
+
+def _normalise_title(title: str) -> str:
+    """Titles are the only join key the pipeline records between gaps,
+    proposals and papers -- there are no ids -- so matching tolerates the
+    whitespace/case/typographic-dash noise LLM output carries."""
+    return " ".join((title or "").lower().replace("‑", "-").replace("‐", "-").split())
 
 
 def _paper_ref(p: dict) -> PaperRef:
@@ -239,6 +263,22 @@ def build_manifest_view(run_id: str, project_id: str, manifest: dict | None) -> 
     )
 
 
+def _papers_by_title(results: dict) -> dict[str, str]:
+    return {
+        _normalise_title((p.get("wiki") or {}).get("title") or p.get("filename", "")): p.get("filename", "")
+        for p in results.get("papers") or []
+    }
+
+
+def _proposals_by_gap(results: dict) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for proposal in results.get("proposals") or []:
+        key = _normalise_title(proposal.get("addresses_gap", ""))
+        if key:
+            out.setdefault(key, []).append(proposal.get("title", ""))
+    return out
+
+
 def build_run_detail(run_id: str) -> RunDetail:
     loaded = load_run(run_id)
     if not loaded:
@@ -260,7 +300,10 @@ def build_run_detail(run_id: str) -> RunDetail:
         versions=_version_fields(manifest), manifest=build_manifest_view(run_id, project_id, manifest),
         trace=_trace_steps(results),
         papers=[_paper_ref(p) for p in results.get("papers") or []],
-        gaps=[_gap_summary(g) for g in results.get("gaps") or []],
+        gaps=[
+            _gap_summary(g, _papers_by_title(results), _proposals_by_gap(results))
+            for g in results.get("gaps") or []
+        ],
         proposals=[_proposal_summary(p) for p in results.get("proposals") or []],
         warnings=(manifest or {}).get("warnings") or [],
         gate_blocked=bool(results.get("gate_blocked")),

@@ -3,6 +3,7 @@ import { PageHero } from "@/components/shell/page-hero";
 import { EmptyState } from "@/components/data/empty-state";
 import { api } from "@/lib/api";
 import { getSelectedProject } from "@/lib/project";
+import { common } from "@/lib/copy";
 
 export const metadata: Metadata = { title: "Proposals" };
 
@@ -15,7 +16,7 @@ const RISK_TONE: Record<string, string> = {
 export default async function ProposalsPage() {
   const project = await getSelectedProject();
   if (!project) {
-    return <EmptyState title="No projects yet" description="Runs created in the Streamlit workspace appear here automatically." />;
+    return <EmptyState title={common.no_projects_title} description={common.no_projects_body} />;
   }
 
   const dashboard = await api.getDashboard(project.project_id);

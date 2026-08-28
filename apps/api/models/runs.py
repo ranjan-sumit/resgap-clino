@@ -39,6 +39,14 @@ class TraceStep(BaseModel):
     status: StatusChip
 
 
+class LinkedRef(BaseModel):
+    """A cross-screen link resolved server-side. `href` is None when the
+    referenced thing genuinely exists in the data but has no screen of its
+    own -- rendered as plain text instead of a link that would 404."""
+    label: str
+    href: str | None = None
+
+
 class GapSummary(BaseModel):
     gap_id: str | None
     title: str
@@ -47,6 +55,11 @@ class GapSummary(BaseModel):
     validation: StatusChip
     challenge: StatusChip
     confidence: Measure
+    # Cross-links (Epic 5.7): the papers this gap came from and the proposals
+    # that address it. Both were already in the data, just never navigable --
+    # which is what made every screen feel like an island.
+    supporting_papers: list[LinkedRef] = []
+    proposals: list[LinkedRef] = []
 
 
 class ProposalSummary(BaseModel):

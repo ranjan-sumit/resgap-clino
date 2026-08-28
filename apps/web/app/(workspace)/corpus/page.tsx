@@ -6,13 +6,14 @@ import { StatusBadge } from "@/components/data/status-badge";
 import { EmptyState } from "@/components/data/empty-state";
 import { api } from "@/lib/api";
 import { getSelectedProject } from "@/lib/project";
+import { common } from "@/lib/copy";
 
 export const metadata: Metadata = { title: "Corpus" };
 
 export default async function CorpusPage() {
   const project = await getSelectedProject();
   if (!project) {
-    return <EmptyState title="No projects yet" description="Runs created in the Streamlit workspace appear here automatically." />;
+    return <EmptyState title={common.no_projects_title} description={common.no_projects_body} />;
   }
 
   const corpus = await api.corpus(project.project_id);

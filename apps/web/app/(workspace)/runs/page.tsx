@@ -5,6 +5,7 @@ import Link from "next/link";
 import { PageHero } from "@/components/shell/page-hero";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
+import { common } from "@/lib/copy";
 
 export const metadata: Metadata = { title: "Runs" };
 
@@ -27,7 +28,7 @@ export default async function RunsPage() {
       {runs.length === 0 ? (
         <EmptyState
           title="No runs yet"
-          description={empty_reason ?? "Runs created in the Streamlit workspace appear here automatically."}
+          description={empty_reason ?? common.no_projects_body}
           action={{ label: "Open Streamlit", href: "http://localhost:8501" }}
         />
       ) : (

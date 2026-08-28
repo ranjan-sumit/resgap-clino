@@ -5,13 +5,14 @@ import { StatusBadge } from "@/components/data/status-badge";
 import { EmptyState } from "@/components/data/empty-state";
 import { api } from "@/lib/api";
 import { getSelectedProject } from "@/lib/project";
+import { common } from "@/lib/copy";
 
 export const metadata: Metadata = { title: "Research Gaps" };
 
 export default async function GapsPage() {
   const project = await getSelectedProject();
   if (!project) {
-    return <EmptyState title="No projects yet" description="Runs created in the Streamlit workspace appear here automatically." />;
+    return <EmptyState title={common.no_projects_title} description={common.no_projects_body} />;
   }
 
   const dashboard = await api.getDashboard(project.project_id);
@@ -52,6 +53,55 @@ export default async function GapsPage() {
               {g.evidence_basis && <p className="mt-2 text-sm text-neutral">{g.evidence_basis}</p>}
               {g.source && (
                 <p className="mt-1 text-xs uppercase tracking-wide text-neutral">Source: {g.source}</p>
+              )}
+
+              {/* Cross-links: where this gap came from, and what it led to.
+                  A supporting paper that isn't one of the uploaded PDFs has
+                  no detail screen, so it renders as plain text rather than a
+                  link that would 404. */}
+              {(g.supporting_papers.length > 0 || g.proposals.length > 0) && (
+                <div className="mt-4 grid grid-cols-2 gap-4 border-t border-border/60 pt-3">
+                  {g.supporting_papers.length > 0 && (
+                    <div>
+                      <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-neutral">
+                        Derived from
+                      </p>
+                      <ul className="space-y-1 text-xs">
+                        {g.supporting_papers.map((p, j) => (
+                          <li key={j}>
+                            {p.href ? (
+                              <Link href={p.href} className="text-clinova-deep hover:underline">
+                                {p.label}
+                              </Link>
+                            ) : (
+                              <span className="text-slate-800">{p.label}</span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {g.proposals.length > 0 && (
+                    <div>
+                      <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-neutral">
+                        Addressed by
+                      </p>
+                      <ul className="space-y-1 text-xs">
+                        {g.proposals.map((p, j) => (
+                          <li key={j}>
+                            {p.href ? (
+                              <Link href={p.href} className="text-clinova-deep hover:underline">
+                                {p.label}
+                              </Link>
+                            ) : (
+                              <span className="text-slate-800">{p.label}</span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
               )}
             </li>
           ))}

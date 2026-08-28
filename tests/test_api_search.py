@@ -66,5 +66,45 @@ class SearchRouteTests(unittest.TestCase):
         self.assertLessEqual(len(body.hits), 3)
 
 
+
+class GapCrossLinkTests(unittest.TestCase):
+    """Cross-screen links (Epic 5.7). Gaps carry the papers they were derived
+    from and the proposals that address them -- both already existed in the
+    pipeline output but were never navigable."""
+
+    def setUp(self):
+        runs = client.get("/api/runs?limit=1").json()["runs"]
+        self.run = client.get(f"/api/runs/{runs[0]['run_id']}").json()
+
+    def test_gaps_expose_supporting_paper_links(self):
+        linked = [
+            s for g in self.run["gaps"] for s in g["supporting_papers"] if s["href"]
+        ]
+        self.assertGreater(len(linked), 0)
+        for s in linked:
+            self.assertTrue(s["href"].startswith("/corpus/papers/"))
+            self.assertTrue(s["label"].strip())
+
+    def test_a_supporting_paper_with_no_screen_is_text_not_a_dead_link(self):
+        # Supporting papers are often references, not uploaded PDFs. Those
+        # must come back with href=None rather than a link that would 404.
+        for g in self.run["gaps"]:
+            for s in g["supporting_papers"]:
+                if s["href"] is None:
+                    self.assertTrue(s["label"].strip())
+
+    def test_gaps_link_to_the_proposals_that_address_them(self):
+        linked = [p for g in self.run["gaps"] for p in g["proposals"]]
+        self.assertGreater(len(linked), 0)
+        for p in linked:
+            self.assertTrue(p["label"].strip())
+
+    def test_title_matching_tolerates_typographic_dashes(self):
+        from apps.api.services.runs_service import _normalise_title
+        # Real data uses U+2011 non-breaking hyphens inside gap titles; a
+        # naive == match silently produced zero cross-links.
+        self.assertEqual(_normalise_title("Multi‑Ethnic  Dataset"),
+                          _normalise_title("multi-ethnic dataset"))
+
 if __name__ == "__main__":
     unittest.main()

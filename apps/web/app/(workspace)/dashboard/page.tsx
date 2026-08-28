@@ -8,6 +8,7 @@ import { EmptyState } from "@/components/data/empty-state";
 import { PageHero } from "@/components/shell/page-hero";
 import { api } from "@/lib/api";
 import { getSelectedProject } from "@/lib/project";
+import { common } from "@/lib/copy";
 
 export const metadata: Metadata = { title: "Dashboard" };
 
@@ -18,7 +19,7 @@ export default async function DashboardPage() {
     return (
       <EmptyState
         title="No projects yet"
-        description="Runs created in the Streamlit workspace appear here automatically."
+        description={common.no_projects_body}
         action={{ label: "Open Streamlit", href: "http://localhost:8501" }}
       />
     );
@@ -70,6 +71,72 @@ export default async function DashboardPage() {
           ))}
         </div>
       </section>
+
+      {/* What changed since the previous run. Built from the same
+          compare_runs() the Compare screen uses, so the two can never
+          disagree. Absent (not zeroed) for a single-run project, where
+          there is genuinely nothing to compare against. */}
+      {dashboard.delta && (
+        <section className="rounded-lg border border-border/60 bg-card p-5 shadow-card">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-neutral">
+              Since the previous run
+            </h2>
+            <Link
+              href={dashboard.delta.compare_href}
+              className="text-xs text-clinova-deep hover:underline"
+            >
+              Full comparison &rarr;
+            </Link>
+          </div>
+          <p className="mt-1 text-xs text-neutral">
+            {dashboard.delta.previous_run.name} &rarr; {dashboard.delta.current_run.name}
+          </p>
+
+          {dashboard.delta.unchanged ? (
+            <p className="mt-3 text-sm text-neutral">
+              Nothing measurable changed between these two runs.
+            </p>
+          ) : (
+            <div className="mt-4 grid grid-cols-4 gap-4">
+              {[
+                ["Gaps", dashboard.delta.gaps_added.length, dashboard.delta.gaps_removed.length],
+                ["Papers", dashboard.delta.papers_added.length, dashboard.delta.papers_removed.length],
+                ["Graph entities", dashboard.delta.entities_added_count, dashboard.delta.entities_removed_count],
+                ["Proposals", dashboard.delta.proposals_added_count, dashboard.delta.proposals_removed_count],
+              ].map(([label, added, removed]) => (
+                <div key={label as string}>
+                  <p className="text-[10px] font-semibold uppercase tracking-wide text-neutral">
+                    {label as string}
+                  </p>
+                  <p className="mt-0.5 font-mono text-sm">
+                    <span className={(added as number) > 0 ? "text-semantic-success" : "text-neutral"}>
+                      +{added as number}
+                    </span>
+                    <span className="mx-1 text-neutral/40">/</span>
+                    <span className={(removed as number) > 0 ? "text-semantic-critical" : "text-neutral"}>
+                      &minus;{removed as number}
+                    </span>
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {dashboard.delta.gaps_added.length > 0 && (
+            <div className="mt-4 border-t border-border/60 pt-3">
+              <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-neutral">
+                New gaps ({dashboard.delta.gaps_added.length})
+              </p>
+              <ul className="list-disc space-y-1 pl-4 text-xs text-slate-800">
+                {dashboard.delta.gaps_added.slice(0, 5).map((g, i) => (
+                  <li key={i}>{g}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </section>
+      )}
 
       <section className="grid grid-cols-2 gap-8">
         <div>
