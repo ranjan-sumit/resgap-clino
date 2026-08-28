@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Download } from "lucide-react";
 import theme from "@/../../packages/branding/theme.json";
 import { entityColor } from "@/components/graph/entity-colors";
 import type { GraphView } from "@/lib/api";
@@ -153,6 +154,64 @@ export function ForceGraph({ entities, relationships }: { entities: Entity[]; re
     return { x: (x - transform.x) / transform.k, y: (y - transform.y) / transform.k };
   };
 
+  // Exports the live SVG exactly as rendered -- the downloaded image is the
+  // graph the user is actually looking at (their pan, zoom and pinned
+  // nodes), not a re-render that could quietly differ from it.
+  const triggerDownload = (url: string, filename: string) => {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const cloneForExport = () => {
+    const svg = svgRef.current;
+    if (!svg) return null;
+    const clone = svg.cloneNode(true) as SVGSVGElement;
+    clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+    clone.setAttribute("width", String(WIDTH));
+    clone.setAttribute("height", String(HEIGHT));
+    // The page supplies the background, so without this the export is
+    // transparent and unreadable on any dark surface.
+    const bg = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    bg.setAttribute("width", String(WIDTH));
+    bg.setAttribute("height", String(HEIGHT));
+    bg.setAttribute("fill", "white");
+    clone.insertBefore(bg, clone.firstChild);
+    return clone;
+  };
+
+  const downloadSvg = () => {
+    const clone = cloneForExport();
+    if (!clone) return;
+    const blob = new Blob([new XMLSerializer().serializeToString(clone)], {
+      type: "image/svg+xml;charset=utf-8",
+    });
+    triggerDownload(URL.createObjectURL(blob), "knowledge-graph.svg");
+  };
+
+  const downloadPng = () => {
+    const clone = cloneForExport();
+    if (!clone) return;
+    const source = new XMLSerializer().serializeToString(clone);
+    const img = new Image();
+    img.onload = () => {
+      const scale = 2;  // 2x so it stays sharp in slides and papers
+      const canvas = document.createElement("canvas");
+      canvas.width = WIDTH * scale;
+      canvas.height = HEIGHT * scale;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.scale(scale, scale);
+      ctx.drawImage(img, 0, 0);
+      canvas.toBlob((blob) => {
+        if (blob) triggerDownload(URL.createObjectURL(blob), "knowledge-graph.png");
+      }, "image/png");
+    };
+    img.src = `data:image/svg+xml;base64,${window.btoa(unescape(encodeURIComponent(source)))}`;
+  };
+
   const nodes = [...nodesRef.current.values()];
   const activeId = hoveredId ?? selectedId;
   const activeNeighbors = activeId ? neighbors.get(activeId) : null;
@@ -183,6 +242,18 @@ export function ForceGraph({ entities, relationships }: { entities: Entity[]; re
             />
             Label every node
           </label>
+          <button
+            onClick={downloadPng}
+            className="flex items-center gap-1 rounded border border-border/70 px-2 py-1 text-xs text-clinova-deep hover:bg-secondary"
+          >
+            <Download className="h-3 w-3" aria-hidden /> PNG
+          </button>
+          <button
+            onClick={downloadSvg}
+            className="flex items-center gap-1 rounded border border-border/70 px-2 py-1 text-xs text-clinova-deep hover:bg-secondary"
+          >
+            <Download className="h-3 w-3" aria-hidden /> SVG
+          </button>
           {(selectedId || transform.k !== 1 || transform.x !== 0) && (
             <button
               onClick={() => { setSelectedId(null); setTransform({ x: 0, y: 0, k: 1 }); }}

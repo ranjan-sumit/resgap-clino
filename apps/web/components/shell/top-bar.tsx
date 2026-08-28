@@ -67,7 +67,7 @@ export function TopBar({
       </div>
 
       <div className="flex items-center gap-3">
-        <CommandPalette />
+        <CommandPalette projectId={selectedProjectId ?? projects[0]?.project_id} />
         <Tooltip>
           <TooltipTrigger asChild>
             <span className="flex h-8 w-8 cursor-not-allowed items-center justify-center rounded-md text-neutral/40">

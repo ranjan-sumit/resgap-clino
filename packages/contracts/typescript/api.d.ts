@@ -426,6 +426,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/projects/{project_id}/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Project Search */
+        get: operations["project_search_api_projects__project_id__search_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1482,6 +1499,46 @@ export interface components {
             /** Identity Note */
             identity_note: string | null;
         };
+        /**
+         * SearchHit
+         * @description One result. `href` is the real destination the web app should
+         *     navigate to, resolved server-side so the client never has to know how a
+         *     given kind maps to a route.
+         */
+        SearchHit: {
+            /** Kind */
+            kind: string;
+            /** Title */
+            title: string;
+            /** Subtitle */
+            subtitle?: string | null;
+            /** Href */
+            href: string;
+            /** Matched On */
+            matched_on: string;
+            /** Score */
+            score: number;
+        };
+        /** SearchResponse */
+        SearchResponse: {
+            /** Query */
+            query: string;
+            /** Project Id */
+            project_id: string;
+            /** Hits */
+            hits: components["schemas"]["SearchHit"][];
+            /** Total */
+            total: number;
+            /**
+             * Truncated
+             * @default false
+             */
+            truncated: boolean;
+            /** Basis Note */
+            basis_note: string;
+            /** Empty Reason */
+            empty_reason?: string | null;
+        };
         /** SensitivityDriver */
         SensitivityDriver: {
             /** Parameter */
@@ -2299,6 +2356,40 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RunJobView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    project_search_api_projects__project_id__search_get: {
+        parameters: {
+            query?: {
+                q?: string;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SearchResponse"];
                 };
             };
             /** @description Validation Error */

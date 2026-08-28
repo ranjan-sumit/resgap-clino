@@ -18,6 +18,8 @@ export type CorpusView = components["schemas"]["CorpusView"];
 export type PaperDetail = components["schemas"]["PaperDetail"];
 export type RunJobView = components["schemas"]["RunJobView"];
 export type NewRunConfig = components["schemas"]["NewRunConfig"];
+export type SearchResponse = components["schemas"]["SearchResponse"];
+export type SearchHit = components["schemas"]["SearchHit"];
 export type EvidenceView = components["schemas"]["EvidenceView"];
 export type GraphView = components["schemas"]["GraphView"];
 export type ChallengerView = components["schemas"]["ChallengerView"];
@@ -83,6 +85,10 @@ export const api = {
   artifacts: () => get<ArtifactListResponse>("/api/artifacts"),
   reportUrl: (runId: string, format: "html" | "pdf" | "markdown" | "json") =>
     `${BASE}/api/runs/${encodeURIComponent(runId)}/report?format=${format}`,
+  search: (projectId: string, q: string, limit = 20) =>
+    get<SearchResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/search?q=${encodeURIComponent(q)}&limit=${limit}`,
+    ),
   newRunConfig: () => get<NewRunConfig>("/api/runs/new/config"),
   jobStatus: (jobId: string) => get<RunJobView>(`/api/jobs/${encodeURIComponent(jobId)}`),
   startRun: async (form: FormData): Promise<RunJobView> => {
