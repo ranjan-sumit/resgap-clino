@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { Bell, User } from "lucide-react";
 import {
   DropdownMenu,
@@ -10,15 +11,32 @@ import {
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { CommandPalette } from "@/components/shell/command-palette";
+import { PROJECT_COOKIE } from "@/lib/project-cookie";
 import type { ProjectSummary } from "@/lib/api";
 
-export function TopBar({ projects }: { projects: ProjectSummary[] }) {
+export function TopBar({
+  projects,
+  selectedProjectId,
+}: {
+  projects: ProjectSummary[];
+  selectedProjectId?: string;
+}) {
+  const router = useRouter();
+
+  // Writes the selection the server-side getSelectedProject() reads, then
+  // re-renders the current Server Component page against the new project.
+  // Previously this <Select> had no handler at all -- purely decorative.
+  const selectProject = (projectId: string) => {
+    document.cookie = `${PROJECT_COOKIE}=${encodeURIComponent(projectId)}; path=/; max-age=31536000; samesite=lax`;
+    router.refresh();
+  };
+
   return (
-    <header className="relative flex h-16 shrink-0 items-center justify-between border-b border-border/70 bg-white/80 px-8 backdrop-blur-sm">
+    <header className="sticky top-0 z-10 flex h-16 shrink-0 items-center justify-between border-b border-border/70 bg-white/80 px-8 backdrop-blur-sm">
       <div className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-accent-line opacity-40" aria-hidden />
       <div className="flex items-center gap-4">
         {projects.length > 0 ? (
-          <Select defaultValue={projects[0].project_id}>
+          <Select value={selectedProjectId ?? projects[0].project_id} onValueChange={selectProject}>
             <SelectTrigger className="h-8 w-[220px] border-border/70 text-sm shadow-sm">
               <SelectValue placeholder="Select project" />
             </SelectTrigger>

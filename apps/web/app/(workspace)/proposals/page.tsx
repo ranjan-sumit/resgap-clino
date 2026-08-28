@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { PageHero } from "@/components/shell/page-hero";
 import { EmptyState } from "@/components/data/empty-state";
 import { api } from "@/lib/api";
+import { getSelectedProject } from "@/lib/project";
 
 export const metadata: Metadata = { title: "Proposals" };
 
@@ -12,12 +13,12 @@ const RISK_TONE: Record<string, string> = {
 };
 
 export default async function ProposalsPage() {
-  const projects = await api.listProjects();
-  if (projects.length === 0) {
+  const project = await getSelectedProject();
+  if (!project) {
     return <EmptyState title="No projects yet" description="Runs created in the Streamlit workspace appear here automatically." />;
   }
 
-  const dashboard = await api.getDashboard(projects[0].project_id);
+  const dashboard = await api.getDashboard(project.project_id);
   if (!dashboard.basis_run) {
     return <EmptyState title="No runs yet" description={dashboard.empty_reason ?? "No runs exist for this project yet."} />;
   }

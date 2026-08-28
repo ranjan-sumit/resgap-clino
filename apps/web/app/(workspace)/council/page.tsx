@@ -2,10 +2,10 @@ import type { Metadata } from "next";
 import { PageHero } from "@/components/shell/page-hero";
 import { CountStatView } from "@/components/data/count-stat";
 import { EmptyState } from "@/components/data/empty-state";
-import { ModelResultsTable } from "@/components/council/model-results-table";
-import { SensitivityBars } from "@/components/council/sensitivity-bars";
+import { ModellingPanel, hasModelling } from "@/components/council/modelling-panel";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
+import { getSelectedProject } from "@/lib/project";
 
 export const metadata: Metadata = { title: "Research Council" };
 
@@ -24,13 +24,13 @@ function ListSection({ title, items }: { title: string; items: string[] }) {
 }
 
 export default async function ResearchCouncilPage() {
-  const projects = await api.listProjects();
-  if (projects.length === 0) {
+  const project = await getSelectedProject();
+  if (!project) {
     return <EmptyState title="No projects yet" description="Runs created in the Streamlit workspace appear here automatically." />;
   }
 
-  const council = await api.council(projects[0].project_id);
-  const hasModelling = council.models_run.length > 0 || council.sensitivity_ranking.length > 0;
+  const council = await api.council(project.project_id);
+  const modellingAvailable = hasModelling(council);
 
   return (
     <div className="mx-auto max-w-6xl space-y-8">
@@ -92,7 +92,7 @@ export default async function ResearchCouncilPage() {
             </section>
           )}
 
-          <Tabs defaultValue={hasModelling ? "modelling" : "findings"}>
+          <Tabs defaultValue={modellingAvailable ? "modelling" : "findings"}>
             <TabsList className="h-11 gap-1 bg-slate-100 p-1">
               <TabsTrigger value="modelling" className="px-4 py-1.5 text-sm">
                 Computational modelling
@@ -102,41 +102,8 @@ export default async function ResearchCouncilPage() {
               </TabsTrigger>
             </TabsList>
 
-            <TabsContent value="modelling" className="mt-5 space-y-6">
-              {hasModelling ? (
-                <>
-                  {council.model_selection && (
-                    <section className="rounded-lg border border-border/60 bg-card p-5 shadow-card">
-                      <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-neutral">
-                        Model selection · {council.model_selection.confidence} confidence
-                      </p>
-                      <p className="font-display text-xl text-clinova-deep">{council.model_selection.selected_model}</p>
-                      <p className="mt-2 text-sm text-neutral">{council.model_selection.rationale}</p>
-                    </section>
-                  )}
-
-                  {council.models_run.length > 0 && (
-                    <section>
-                      <p className="mb-3 text-sm text-neutral">
-                        {council.models_run.length} algorithm{council.models_run.length === 1 ? "" : "s"} run across{" "}
-                        {council.scenarios_run.length} scenarios ({council.scenarios_run.join(", ")}).
-                      </p>
-                      <div className="space-y-4">
-                        {council.models_run.map((m) => (
-                          <ModelResultsTable key={m.model_key} model={m} scenarios={council.scenarios_run} />
-                        ))}
-                      </div>
-                    </section>
-                  )}
-
-                  <SensitivityBars drivers={council.sensitivity_ranking} />
-                </>
-              ) : (
-                <EmptyState
-                  title="No computational modelling for this run"
-                  description="Simulation requires at least one extracted parameter with usable confidence -- none were available for this run."
-                />
-              )}
+            <TabsContent value="modelling" className="mt-5">
+              <ModellingPanel council={council} />
             </TabsContent>
 
             <TabsContent value="findings" className="mt-5 space-y-6">

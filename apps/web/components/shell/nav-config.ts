@@ -37,6 +37,10 @@ export const NAV_GROUPS: NavGroup[] = [
       { label: "Research Gaps", href: "/gaps", status: "live" },
       { label: "Gap Challenger", href: "/gap-challenger", status: "live" },
       { label: "Research Council", href: "/council", status: "live" },
+      // Deep-links straight to the Council page's modelling tab. It lived
+      // only as a tab label before, so anyone scanning the sidebar for
+      // "computational modelling" found nothing and concluded it was missing.
+      { label: "Computational Modelling", href: "/council/modelling", status: "live" },
       { label: "Proposals", href: "/proposals", status: "live" },
     ],
   },

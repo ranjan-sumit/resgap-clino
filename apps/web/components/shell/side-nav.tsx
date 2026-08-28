@@ -18,9 +18,13 @@ export function SideNav({ productName }: { productName: string }) {
     .sort((a, b) => b.length - a.length)[0];
 
   return (
+    // `sticky top-0`, not a plain `h-screen`: the shell is a flex row, so a
+    // non-sticky sidebar scrolls up out of view on any page taller than the
+    // viewport (Paper Detail, Knowledge Graph), leaving a bare white column
+    // where the nav should be. Sticky pins it while <main> scrolls past.
     <nav
       aria-label="Primary"
-      className="relative flex h-screen w-[268px] shrink-0 flex-col overflow-y-auto bg-sidebar-gradient px-4 py-6 text-white shadow-sidebar-line"
+      className="sticky top-0 z-20 flex h-screen w-[268px] shrink-0 flex-col overflow-y-auto bg-sidebar-gradient px-4 py-6 text-white shadow-sidebar-line"
     >
       <div className="pointer-events-none absolute inset-0 bg-brand-glow opacity-60" aria-hidden />
 

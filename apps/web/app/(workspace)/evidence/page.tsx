@@ -3,16 +3,17 @@ import { PageHero } from "@/components/shell/page-hero";
 import { ConfidenceStat } from "@/components/data/confidence-stat";
 import { EmptyState } from "@/components/data/empty-state";
 import { api } from "@/lib/api";
+import { getSelectedProject } from "@/lib/project";
 
 export const metadata: Metadata = { title: "Evidence" };
 
 export default async function EvidencePage() {
-  const projects = await api.listProjects();
-  if (projects.length === 0) {
+  const project = await getSelectedProject();
+  if (!project) {
     return <EmptyState title="No projects yet" description="Runs created in the Streamlit workspace appear here automatically." />;
   }
 
-  const evidence = await api.evidence(projects[0].project_id);
+  const evidence = await api.evidence(project.project_id);
 
   return (
     <div className="mx-auto max-w-6xl space-y-8">

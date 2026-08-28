@@ -12,7 +12,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 from utils.database import _get_conn, init_db
 
@@ -177,11 +177,21 @@ def main() -> int:
                 page.get_by_role("option", name="CANDIDATE").click()
                 promote_btn = row.get_by_role("button", name="Promote")
                 promote_btn.click()
-                page.wait_for_timeout(1500)
+                # Wait on the actual post-condition, not a fixed sleep: the
+                # promote POST plus the router refresh can exceed a flat
+                # 1500ms (especially on a cold dev-mode route compile), which
+                # made this check intermittently fail on a working promote.
                 # StatusBadge renders the chip label Title Case ("Candidate"),
                 # not the raw uppercase status code.
-                body_after = page.inner_text("body")
-                check("versions: promote button drives a real state change", "Candidate" in body_after)
+                promoted = True
+                try:
+                    page.wait_for_function(
+                        "() => document.body.innerText.includes('Candidate')",
+                        timeout=15000,
+                    )
+                except PlaywrightTimeoutError:
+                    promoted = False
+                check("versions: promote button drives a real state change", promoted)
         finally:
             cur.execute("DELETE FROM research_artifacts WHERE artifact_id = %s", (artifact_id,))
             conn.commit()

@@ -7,13 +7,14 @@ import { StatusBadge } from "@/components/data/status-badge";
 import { EmptyState } from "@/components/data/empty-state";
 import { PageHero } from "@/components/shell/page-hero";
 import { api } from "@/lib/api";
+import { getSelectedProject } from "@/lib/project";
 
 export const metadata: Metadata = { title: "Dashboard" };
 
 export default async function DashboardPage() {
-  const projects = await api.listProjects();
+  const project = await getSelectedProject();
 
-  if (projects.length === 0) {
+  if (!project) {
     return (
       <EmptyState
         title="No projects yet"
@@ -23,7 +24,7 @@ export default async function DashboardPage() {
     );
   }
 
-  const dashboard = await api.getDashboard(projects[0].project_id);
+  const dashboard = await api.getDashboard(project.project_id);
 
   if (dashboard.empty_reason) {
     return (

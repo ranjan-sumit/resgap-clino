@@ -5,16 +5,17 @@ import { ConfidenceStat } from "@/components/data/confidence-stat";
 import { StatusBadge } from "@/components/data/status-badge";
 import { EmptyState } from "@/components/data/empty-state";
 import { api } from "@/lib/api";
+import { getSelectedProject } from "@/lib/project";
 
 export const metadata: Metadata = { title: "Corpus" };
 
 export default async function CorpusPage() {
-  const projects = await api.listProjects();
-  if (projects.length === 0) {
+  const project = await getSelectedProject();
+  if (!project) {
     return <EmptyState title="No projects yet" description="Runs created in the Streamlit workspace appear here automatically." />;
   }
 
-  const corpus = await api.corpus(projects[0].project_id);
+  const corpus = await api.corpus(project.project_id);
 
   return (
     <div className="mx-auto max-w-6xl space-y-8">

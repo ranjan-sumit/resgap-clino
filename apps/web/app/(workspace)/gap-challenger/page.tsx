@@ -3,16 +3,17 @@ import { PageHero } from "@/components/shell/page-hero";
 import { StatusBadge } from "@/components/data/status-badge";
 import { EmptyState } from "@/components/data/empty-state";
 import { api } from "@/lib/api";
+import { getSelectedProject } from "@/lib/project";
 
 export const metadata: Metadata = { title: "Gap Challenger" };
 
 export default async function GapChallengerPage() {
-  const projects = await api.listProjects();
-  if (projects.length === 0) {
+  const project = await getSelectedProject();
+  if (!project) {
     return <EmptyState title="No projects yet" description="Runs created in the Streamlit workspace appear here automatically." />;
   }
 
-  const view = await api.challenger(projects[0].project_id);
+  const view = await api.challenger(project.project_id);
 
   return (
     <div className="mx-auto max-w-6xl space-y-8">

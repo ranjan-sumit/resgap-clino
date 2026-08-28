@@ -8,6 +8,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { api, ApiError, type PaperDetail } from "@/lib/api";
+import { getSelectedProject } from "@/lib/project";
 
 function ListCard({ title, items }: { title: string; items: string[] }) {
   if (items.length === 0) return null;
@@ -55,9 +56,9 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const filename = await resolveParams(params);
   try {
-    const projects = await api.listProjects();
-    if (projects.length === 0) return { title: "Paper" };
-    const paper = await loadPaper(projects[0].project_id, filename);
+    const project = await getSelectedProject();
+    if (!project) return { title: "Paper" };
+    const paper = await loadPaper(project.project_id, filename);
     return { title: paper.title ?? filename };
   } catch {
     return { title: "Paper" };
@@ -67,14 +68,14 @@ export async function generateMetadata({
 export default async function PaperDetailPage({ params }: { params: Promise<{ filename: string }> }) {
   const filename = await resolveParams(params);
 
-  const projects = await api.listProjects();
-  if (projects.length === 0) {
+  const project = await getSelectedProject();
+  if (!project) {
     return <ErrorState title="No projects yet" detail="No papers to show." retryHref="/corpus" />;
   }
 
   let paper: PaperDetail;
   try {
-    paper = await loadPaper(projects[0].project_id, filename);
+    paper = await loadPaper(project.project_id, filename);
   } catch (err) {
     if (err instanceof ApiError) {
       return <ErrorState title="Paper not found" detail={err.message} retryHref="/corpus" />;
