@@ -15,6 +15,9 @@ export type Measure = components["schemas"]["Measure"];
 export type CountStat = components["schemas"]["CountStat"];
 export type VersionField = components["schemas"]["VersionField"];
 export type CorpusView = components["schemas"]["CorpusView"];
+export type QualityView = components["schemas"]["QualityView"];
+export type PaperCompleteness = components["schemas"]["PaperCompleteness"];
+export type TrustStatusCount = components["schemas"]["TrustStatusCount"];
 export type PaperDetail = components["schemas"]["PaperDetail"];
 export type RunJobView = components["schemas"]["RunJobView"];
 export type NewRunConfig = components["schemas"]["NewRunConfig"];
@@ -77,6 +80,7 @@ export const api = {
     get<PaperDetail>(
       `/api/projects/${encodeURIComponent(projectId)}/corpus/papers/${encodeURIComponent(filename)}`,
     ),
+  quality: (projectId: string) => get<QualityView>(`/api/projects/${encodeURIComponent(projectId)}/quality`),
   evidence: (projectId: string) => get<EvidenceView>(`/api/projects/${encodeURIComponent(projectId)}/evidence`),
   graph: (projectId: string) => get<GraphView>(`/api/projects/${encodeURIComponent(projectId)}/graph`),
   challenger: (projectId: string) =>

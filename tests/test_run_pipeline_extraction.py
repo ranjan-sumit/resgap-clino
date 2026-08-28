@@ -72,6 +72,18 @@ class ExtractionContractTests(unittest.TestCase):
         source = (REPO / "pipeline" / "run_pipeline.py").read_text(encoding="utf-8")
         self.assertIn('"pipeline_trace": trace_rows', source)
 
+    def test_results_dict_carries_per_paper_quality_scores(self):
+        """The Data Quality screen's field grid reads
+        results["paper_quality_scores"]. These were computed and then thrown
+        away before Slice 14 -- the corpus average survived, the per-paper
+        breakdown saying WHICH field was missing from WHICH paper did not,
+        which is why that screen could not be built."""
+        source = (REPO / "pipeline" / "run_pipeline.py").read_text(encoding="utf-8")
+        self.assertIn('"paper_quality_scores": paper_quality_scores', source)
+        # None, never [] -- "the Quality Engine was off" and "it ran and
+        # scored nothing" must stay distinguishable downstream.
+        self.assertIn("paper_quality_scores: list[dict] | None = None", source)
+
 
 class AppDelegatesToTheExtractionTests(unittest.TestCase):
     """app.py must call the shared pipeline, not keep a second copy of the

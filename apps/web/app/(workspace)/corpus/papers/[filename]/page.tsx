@@ -96,8 +96,8 @@ export default async function PaperDetailPage({ params }: { params: Promise<{ fi
         title={paper.title ?? paper.filename}
         description={
           paper.basis_run
-            ? `From run "${paper.basis_run.name}" (${paper.basis_run.run_id.slice(0, 8)}) · ${paper.char_count.toLocaleString()} characters parsed`
-            : `${paper.char_count.toLocaleString()} characters parsed`
+            ? `From run "${paper.basis_run.name}" (${paper.basis_run.run_id.slice(0, 8)}) · ${paper.char_count.toLocaleString("en-US")} characters parsed`
+            : `${paper.char_count.toLocaleString("en-US")} characters parsed`
         }
       />
 

@@ -76,7 +76,7 @@ export default async function CorpusPage() {
                   >
                     <p className="font-medium text-clinova-deep">{p.title ?? p.filename}</p>
                     <p className="mt-1 font-mono text-xs text-neutral">
-                      {p.filename} · {p.char_count.toLocaleString()} chars
+                      {p.filename} · {p.char_count.toLocaleString("en-US")} chars
                     </p>
                   </Link>
                 </li>

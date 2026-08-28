@@ -222,6 +222,14 @@ def run_full_pipeline(
 
     # ── Stage 2B: Corpus Quality Engine (opt-in) ──────────────────────────
     corpus_quality_metrics = None
+    # Per-paper field-level completeness. Kept at function scope (not inside
+    # the Quality Engine branch) so it can be persisted below: app.py only
+    # ever held these as a local and threw them away after aggregating, which
+    # is why no screen could show WHICH field was missing from WHICH paper --
+    # only the corpus-wide average. Stays None, never [], when the Quality
+    # Engine was off, so "not measured" and "measured, all empty" remain
+    # distinguishable downstream.
+    paper_quality_scores: list[dict] | None = None
     gate_blocked = False
     gate_block_reasons: list[str] = []
     wiki_pages = wiki.get("pages", [])
@@ -255,6 +263,14 @@ def run_full_pipeline(
         corpus_quality_metrics = compute_corpus_quality(
             paper_scores, ref_diagnostics, ref_papers=ref_papers,
         )
+        # Attach the filename each score belongs to. score_paper_completeness()
+        # returns fields/counts but no identity, and the list's order is the
+        # only thing tying a score to its paper -- an ordering dependency that
+        # would not survive being stored and re-read.
+        paper_quality_scores = [
+            {**score, "filename": paper.get("filename", papers[i][0])}
+            for i, (score, paper) in enumerate(zip(paper_scores, all_papers))
+        ]
         try:
             corpus_quality_metrics = enforce_quality_gate(
                 corpus_quality_metrics,
@@ -404,6 +420,7 @@ def run_full_pipeline(
         "ref_diagnostics": ref_diagnostics,
         "ref_resolution_diagnostics": ref_resolution_diagnostics,
         "corpus_quality_metrics": corpus_quality_metrics,
+        "paper_quality_scores": paper_quality_scores,
         "evidence_objects": evidence_objects,
         "corpus": corpus,
         "pipeline_trace": trace_rows,

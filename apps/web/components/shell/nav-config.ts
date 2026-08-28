@@ -27,6 +27,12 @@ export const NAV_GROUPS: NavGroup[] = [
     label: "Research",
     items: [
       { label: "Corpus", href: "/corpus", status: "live" },
+      // Was marked "planned" on the belief that per-paper completeness is
+      // never persisted. Half true: the field grid was being discarded (now
+      // saved), but the ADR-007 trust breakdown, the per-paper reference
+      // diagnostics and the corpus quality metrics were already being
+      // written on every run and shown nowhere.
+      { label: "Data Quality", href: "/quality", status: "live" },
       { label: "Evidence", href: "/evidence", status: "live" },
       { label: "Knowledge Graph", href: "/knowledge-graph", status: "live" },
     ],

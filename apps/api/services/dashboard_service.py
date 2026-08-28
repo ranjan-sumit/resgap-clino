@@ -7,6 +7,7 @@ from apps.api.models.common import RunRef
 from apps.api.models.dashboard import (
     ActivityEvent, GapOpportunity, LinkedRef, ProjectDashboard, ProjectSummary, RunDelta,
 )
+from apps.api.services.copy_text import no_runs_in_project
 from apps.api.services.measures import build_confidence_measures
 from apps.api.services.title_match import normalise_title as _normalise
 from apps.api.services.runs_service import (
@@ -140,8 +141,7 @@ def get_project_dashboard(project_id: str) -> ProjectDashboard:
             basis_note="No runs exist for this project yet.",
             counts=[], confidence=[], recent_runs=[], top_opportunities=[],
             n_excluded_insufficient_evidence=0, activity=[],
-            empty_reason="No runs in this project yet. Runs created in the Streamlit "
-                          "workspace appear here automatically.",
+            empty_reason=no_runs_in_project(),
         )
 
     basis_row = all_runs[0]  # list_runs() orders by created_at DESC

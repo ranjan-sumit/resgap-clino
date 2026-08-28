@@ -443,6 +443,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/projects/{project_id}/quality": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Project Quality */
+        get: operations["project_quality_api_projects__project_id__quality_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -722,6 +739,21 @@ export interface components {
             confidence: components["schemas"]["Measure"];
             /** Empty Reason */
             empty_reason?: string | null;
+        };
+        /** FieldStatus */
+        FieldStatus: {
+            /** Field */
+            field: string;
+            /** Status */
+            status: string;
+            /** Label */
+            label: string;
+            /** Confidence */
+            confidence: string;
+            /** Source */
+            source?: string | null;
+            /** Reason */
+            reason?: string | null;
         };
         /** GapChain */
         GapChain: {
@@ -1096,6 +1128,23 @@ export interface components {
             /** Confidence Reasoning */
             confidence_reasoning: string;
         };
+        /** PaperCompleteness */
+        PaperCompleteness: {
+            /** Filename */
+            filename: string;
+            /** Present Count */
+            present_count: number;
+            /** Total Fields */
+            total_fields: number;
+            /** Achievable Field Count */
+            achievable_field_count: number;
+            /** Completeness Score */
+            completeness_score: number;
+            /** Achievable Completeness Score */
+            achievable_completeness_score: number;
+            /** Fields */
+            fields: components["schemas"]["FieldStatus"][];
+        };
         /**
          * PaperDetail
          * @description The real per-paper LLM "wiki" (pipeline/wiki_compiler.py) plus the
@@ -1150,6 +1199,21 @@ export interface components {
             title: string | null;
             /** Char Count */
             char_count: number;
+        };
+        /** PaperReferenceDiagnostic */
+        PaperReferenceDiagnostic: {
+            /** Filename */
+            filename: string;
+            /** Raw Entries */
+            raw_entries: number;
+            /** Structured Entries */
+            structured_entries: number;
+            /** Combined Entries */
+            combined_entries: number;
+            /** Dois */
+            dois: number;
+            /** Note */
+            note?: string | null;
         };
         /** PaperSection */
         PaperSection: {
@@ -1281,6 +1345,37 @@ export interface components {
             api_key_env: string;
             /** Api Key Present */
             api_key_present: boolean;
+        };
+        /** QualityView */
+        QualityView: {
+            /** Project Id */
+            project_id: string;
+            basis_run: components["schemas"]["RunRef"] | null;
+            /** Basis Note */
+            basis_note: string;
+            quality_gate: components["schemas"]["StatusChip"] | null;
+            /** Quality Gate Reasons */
+            quality_gate_reasons: string[];
+            /** Measures */
+            measures: components["schemas"]["Measure"][];
+            /** Reference Funnel */
+            reference_funnel: components["schemas"]["ReferenceFunnelStage"][];
+            /** Funnel Note */
+            funnel_note?: string | null;
+            /** Trust Statuses */
+            trust_statuses: components["schemas"]["TrustStatusCount"][];
+            /** Trust Note */
+            trust_note?: string | null;
+            /** Duplicates Removed */
+            duplicates_removed?: number | null;
+            /** Per Paper References */
+            per_paper_references: components["schemas"]["PaperReferenceDiagnostic"][];
+            /** Per Paper Completeness */
+            per_paper_completeness: components["schemas"]["PaperCompleteness"][];
+            /** Completeness Absent Reason */
+            completeness_absent_reason?: string | null;
+            /** Empty Reason */
+            empty_reason?: string | null;
         };
         /** ReferenceFunnelStage */
         ReferenceFunnelStage: {
@@ -1718,6 +1813,29 @@ export interface components {
             /** Outputs */
             outputs: string;
             status: components["schemas"]["StatusChip"];
+        };
+        /**
+         * TrustStatusCount
+         * @description One of ADR-007's five reference-resolution trust statuses.
+         *
+         *     Carries a full `StatusChip` rather than a bare `tone` string: a raw tone
+         *     would be a bare color crossing the API boundary, which is the thing
+         *     common.py exists to prevent, and it would also force the semantic color
+         *     classes outside status-badge.tsx, the one place the UX spec allows them.
+         *     The chip's `reason` is the status's definition -- "QUARANTINED: 1" means
+         *     nothing to a reader who does not already know the resolution model.
+         *
+         *     `recorded=False` distinguishes a status the resolver never emitted for
+         *     this run from one it emitted zero times -- REJECTED, for instance, has
+         *     no code path yet, so reporting it as a flat 0 alongside a genuine
+         *     "QUARANTINED: 0" would claim a screening result that never happened.
+         */
+        TrustStatusCount: {
+            status: components["schemas"]["StatusChip"];
+            /** Count */
+            count: number;
+            /** Recorded */
+            recorded: boolean;
         };
         /** UnresolvedRefs */
         UnresolvedRefs: {
@@ -2498,6 +2616,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SearchResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    project_quality_api_projects__project_id__quality_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QualityView"];
                 };
             };
             /** @description Validation Error */

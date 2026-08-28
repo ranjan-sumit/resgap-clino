@@ -14,6 +14,7 @@ from apps.api.models.council import (
     CouncilAgentResponse, ModelRunView, ModelSelectionView, NovelFindingView,
     ResearchCouncilView, SensitivityDriver,
 )
+from apps.api.services.copy_text import no_runs_in_project
 from apps.api.services.project_runs import list_project_runs
 from utils.database import load_run
 
@@ -49,8 +50,7 @@ def get_project_council(project_id: str) -> ResearchCouncilView:
     if not runs:
         return ResearchCouncilView(
             run=None, basis_note="No runs exist for this project yet.",
-            empty_reason="No runs in this project yet. Runs created in the Streamlit "
-                          "workspace appear here automatically.",
+            empty_reason=no_runs_in_project(),
             **_EMPTY_KWARGS,
         )
 

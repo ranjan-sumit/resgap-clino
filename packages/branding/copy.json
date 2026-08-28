@@ -11,7 +11,7 @@
     "no_projects_title": "No projects yet",
     "no_projects_body": "Start a run to create your first project, or open one created in the Streamlit workspace.",
     "no_runs_title": "No runs yet",
-    "no_runs_body": "No runs exist for this project yet.",
+    "no_runs_body": "No runs exist for this project yet. Start one from New Run, or open a run created in the Streamlit workspace.",
     "no_gaps_title": "No gaps recorded",
     "no_gaps_body": "No research gaps were extracted for this run."
   },
@@ -63,5 +63,5 @@
       "description": "Upload papers and run the full pipeline — parsing, evidence extraction, knowledge graph, gap detection, validation and proposals."
     }
   },
-  "notes": "See _bmad-output/clinova/02-ux-specification.md §2 for the rationale behind keeping tagline and hero_headline as two distinct strings. `common` and `screens` were added in Phase 5 Epic 5.7: workspace screens previously hardcoded their own copy, so the same sentence appeared in up to 10 separate files and could not be corrected in one place -- which is exactly how the 'runs only come from Streamlit' empty state survived past the web app gaining its own New Run screen. Screens whose description is genuinely per-run (it names the basis run and its id) keep building that string at render time and are absent here on purpose."
+  "notes": "See _bmad-output/clinova/02-ux-specification.md §2 for the rationale behind keeping tagline and hero_headline as two distinct strings. `common` and `screens` were added in Phase 5 Epic 5.7: workspace screens previously hardcoded their own copy, so the same sentence appeared in up to 10 separate files and could not be corrected in one place -- which is exactly how the 'runs only come from Streamlit' empty state survived past the web app gaining its own New Run screen. `common` is read by BOTH stacks (apps/web/lib/copy.ts and apps/api/services/copy_text.py): the same six services were still hardcoding that false sentence into their API `empty_reason` after the web-side fix, so the duplication had only moved a layer down. Screens whose description is genuinely per-run (it names the basis run and its id) keep building that string at render time and are absent here on purpose."
 }

@@ -1,14 +1,18 @@
 """
 Corpus screen (Clinova Phase 5, Epic 5.2). Shows the project's basis run's
-papers plus the real, persisted corpus_quality_metrics aggregate -- per-paper
-completeness breakdowns are NOT persisted anywhere (app.py computes them as a
-local variable, never saves them to `results`), so this honestly cannot show
-a per-paper completeness table -- only the real aggregate that IS saved.
+papers plus the real, persisted corpus_quality_metrics aggregate.
+
+Deliberately stays a summary. The per-paper field breakdown, the ADR-007
+reference trust counts and the per-paper reference diagnostics all live on
+the Data Quality screen (services/quality_service.py) instead of being
+duplicated here: this screen answers "what is in the corpus", that one
+answers "how well was it extracted".
 """
 from apps.api.errors import NotFoundError
 from apps.api.models.common import RunRef, StatusChip
 from apps.api.models.corpus import CorpusView, PaperDetail, PaperSection, PaperTable, ReferenceFunnelStage
 from apps.api.models.runs import PaperRef
+from apps.api.services.copy_text import no_runs_in_project
 from apps.api.services.measures import corpus_confidence
 from apps.api.services.project_runs import get_basis_run
 from apps.api.services.runs_service import _GATE_ICON, _GATE_TONE
@@ -41,8 +45,7 @@ def get_project_corpus(project_id: str) -> CorpusView:
             papers=[], corpus_confidence=corpus_confidence({}), quality_gate=None,
             quality_gate_reasons=[], reference_funnel=[], doi_resolution_rate=None,
             abstract_availability=None,
-            empty_reason="No runs in this project yet. Runs created in the Streamlit "
-                          "workspace appear here automatically.",
+            empty_reason=no_runs_in_project(),
         )
 
     basis_run = RunRef(run_id=basis_row["id"], name=basis_row["name"], created_at=str(basis_row["created_at"]))

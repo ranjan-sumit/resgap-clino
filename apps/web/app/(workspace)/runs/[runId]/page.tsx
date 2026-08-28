@@ -40,7 +40,7 @@ function ManifestPanel({ manifest }: { manifest: RunManifestView }) {
         {manifest.token_usage.recorded ? (
           <div className="rounded-lg border border-border/60 bg-card p-4 shadow-card transition-all hover:-translate-y-0.5 hover:shadow-card-hover">
             <p className="font-display text-2xl text-clinova-deep">
-              {manifest.token_usage.total?.toLocaleString()} tokens
+              {manifest.token_usage.total?.toLocaleString("en-US")} tokens
             </p>
             <p className="mt-1 text-xs text-neutral">
               {manifest.token_usage.n_calls_recorded} calls recorded
@@ -50,7 +50,7 @@ function ManifestPanel({ manifest }: { manifest: RunManifestView }) {
                 {Object.entries(manifest.token_usage.by_stage).map(([stage, n]) => (
                   <div key={stage} className="flex justify-between gap-3">
                     <span>{stage}</span>
-                    <span className="font-mono">{n.toLocaleString()}</span>
+                    <span className="font-mono">{n.toLocaleString("en-US")}</span>
                   </div>
                 ))}
               </div>
@@ -287,7 +287,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
                 <li key={i} className="rounded-lg border border-border/60 bg-card p-4 shadow-card transition-all hover:-translate-y-0.5 hover:shadow-card-hover">
                   <p className="font-medium text-clinova-deep">{p.title ?? p.filename}</p>
                   <p className="mt-1 font-mono text-xs text-neutral">
-                    {p.filename} · {p.char_count.toLocaleString()} chars
+                    {p.filename} · {p.char_count.toLocaleString("en-US")} chars
                   </p>
                 </li>
               ))}

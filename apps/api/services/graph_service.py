@@ -6,6 +6,7 @@ graph_confidence() and pipeline/graph_structural_gaps.py already consume.
 """
 from apps.api.models.common import CountStat, RunRef
 from apps.api.models.graph import GraphCommunityView, GraphEntityView, GraphRelationshipView, GraphView
+from apps.api.services.copy_text import no_runs_in_project
 from apps.api.services.measures import graph_confidence
 from apps.api.services.project_runs import get_basis_run
 
@@ -16,8 +17,7 @@ def get_project_graph(project_id: str) -> GraphView:
         return GraphView(
             run=None, basis_note="No runs exist for this project yet.", entities=[], relationships=[],
             communities=[], counts=[], confidence=graph_confidence({}),
-            empty_reason="No runs in this project yet. Runs created in the Streamlit "
-                          "workspace appear here automatically.",
+            empty_reason=no_runs_in_project(),
         )
 
     run = RunRef(run_id=basis_row["id"], name=basis_row["name"], created_at=str(basis_row["created_at"]))

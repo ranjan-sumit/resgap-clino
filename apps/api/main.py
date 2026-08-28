@@ -16,7 +16,7 @@ from apps.api import settings
 from apps.api.errors import DatabaseUnavailableError, NotFoundError
 from apps.api.routers import (
     artifacts, challenger, compare, config, corpus, council, evidence, graph, health, jobs,
-    lineage, projects, reports, runs, search,
+    lineage, projects, quality, reports, runs, search,
 )
 from pipeline.run_pipeline import PipelineInputError
 from utils.database import InvalidArtifactTransitionError
@@ -87,6 +87,7 @@ def create_app() -> FastAPI:
     app.include_router(reports.router, prefix="/api")
     app.include_router(jobs.router, prefix="/api")
     app.include_router(search.router, prefix="/api")
+    app.include_router(quality.router, prefix="/api")
 
     return app
 

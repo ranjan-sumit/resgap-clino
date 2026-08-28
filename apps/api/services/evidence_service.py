@@ -6,6 +6,7 @@ real structure evidence_confidence() already reads for the Dashboard tile.
 """
 from apps.api.models.common import RunRef
 from apps.api.models.evidence import EvidenceItemView, EvidenceView
+from apps.api.services.copy_text import no_runs_in_project
 from apps.api.services.measures import evidence_confidence
 from apps.api.services.project_runs import get_basis_run
 
@@ -16,8 +17,7 @@ def get_project_evidence(project_id: str) -> EvidenceView:
         return EvidenceView(
             run=None, basis_note="No runs exist for this project yet.", items=[],
             by_type_counts={}, confidence=evidence_confidence({}),
-            empty_reason="No runs in this project yet. Runs created in the Streamlit "
-                          "workspace appear here automatically.",
+            empty_reason=no_runs_in_project(),
         )
 
     run = RunRef(run_id=basis_row["id"], name=basis_row["name"], created_at=str(basis_row["created_at"]))
