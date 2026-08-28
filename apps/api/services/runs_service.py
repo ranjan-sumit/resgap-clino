@@ -9,11 +9,14 @@ from apps.api.services.title_match import normalise_title as _normalise_title
 from apps.api.models.runs import (
     LinkedRef,
     GapSummary, PaperRef, ProposalSummary, RunDetail, RunManifestView,
-    RunSummary, TokenUsageView, TraceStep,
+    RunOption, RunSummary, TokenUsageView, TraceStep,
 )
 from apps.api.services.measures import build_confidence_measures
 from apps.api.services.run_status import derive_run_status, trace_status_chip
-from utils.database import get_run_manifest, get_run_row, load_run, list_runs
+from utils.database import (
+    get_run_manifest, get_run_manifests_bulk, get_run_row, list_runs, load_run,
+    load_run_gate_fields_bulk,
+)
 
 try:
     from pipeline.gap_challenger import SEARCH_COVERAGE_THRESHOLD
@@ -151,7 +154,7 @@ def _gap_summary(g: dict, papers_by_title: dict | None = None, proposals_by_gap:
         for title in g.get("supporting_papers") or []
     ]
     proposals = [
-        LinkedRef(label=title, href="/proposals")
+        LinkedRef(label=title, href="/workspace?tab=proposals")
         for title in (proposals_by_gap or {}).get(_normalise_title(g.get("title", "")), [])
     ]
     return GapSummary(
@@ -172,7 +175,7 @@ def _proposal_summary(p: dict, gap_titles: set[str] | None = None) -> ProposalSu
     addresses_gap = None
     if raw_gap:
         known = _normalise_title(raw_gap) in (gap_titles or set())
-        addresses_gap = LinkedRef(label=raw_gap, href="/gaps" if known else None)
+        addresses_gap = LinkedRef(label=raw_gap, href="/workspace?tab=gaps" if known else None)
     return ProposalSummary(
         addresses_gap=addresses_gap,
         title=p.get("title", ""), addresses_gap_id=p.get("addresses_gap_id"),
@@ -219,16 +222,21 @@ def build_counts(results: dict) -> list[CountStat]:
     ]
 
 
-def build_run_summary(run_row: dict) -> RunSummary:
-    """`run_row` is one entry of list_runs()'s output. Loads the full
-    results + manifest per run -- an N+1 query pattern acceptable at the
-    real current run count (single digits); utils/database.py could gain
-    an additive list_runs_with_manifests() LEFT JOIN if/when this
-    matters at scale (not needed for this slice)."""
+def build_run_summary(run_row: dict, results: dict | None = None,
+                       manifest: dict | None = None, *, prefetched: bool = False) -> RunSummary:
+    """`run_row` is one entry of list_runs()'s output.
+
+    Pass `results`/`manifest` with `prefetched=True` to reuse a bulk read --
+    see list_run_summaries(). Called without them it falls back to a per-run
+    load, which is correct but costs two database connections (~1.5s) for a
+    single status chip.
+    """
     run_id = run_row["id"]
-    loaded = load_run(run_id)
-    results = (loaded or {}).get("results", {}) or {}
-    manifest = get_run_manifest(run_id)
+    if not prefetched:
+        loaded = load_run(run_id)
+        results = (loaded or {}).get("results", {}) or {}
+        manifest = get_run_manifest(run_id)
+    results = results or {}
 
     return RunSummary(
         run_id=run_id, name=run_row["name"], created_at=str(run_row["created_at"]),
@@ -244,7 +252,41 @@ def build_run_summary(run_row: dict) -> RunSummary:
 
 
 def list_run_summaries(limit: int = 50) -> list[RunSummary]:
-    return [build_run_summary(r) for r in list_runs(limit=limit)]
+    """Two queries for the whole list, not two per run.
+
+    Measured on 5 runs: the per-run path cost ~9.3s, essentially all of it in
+    connection setup (utils/database._get_conn() opens and closes one per
+    call at ~0.75s). The bulk reads cost ~1.5s for the same data.
+    """
+    rows = list_runs(limit=limit)
+    ids = [r["id"] for r in rows]
+    gates = load_run_gate_fields_bulk(ids)
+    manifests = get_run_manifests_bulk(ids)
+    return [
+        build_run_summary(
+            r,
+            results=gates.get(r["id"], {}),
+            # Absent from the bulk result means no manifest row exists, which
+            # derive_run_status renders as NO_MANIFEST -- a real state, not a
+            # lookup failure.
+            manifest=manifests.get(r["id"]),
+            prefetched=True,
+        )
+        for r in rows
+    ]
+
+
+def list_run_options(limit: int = 50) -> list[RunOption]:
+    """Every field comes straight off the list_runs() row -- no load_run(),
+    no manifest read. See RunOption's docstring for why that matters."""
+    return [
+        RunOption(
+            run_id=r["id"], name=r["name"], created_at=str(r["created_at"]),
+            project_id=r.get("domain") or "default",
+            n_papers=r.get("n_papers", 0), n_gaps=r.get("n_gaps", 0),
+        )
+        for r in list_runs(limit=limit)
+    ]
 
 
 def build_manifest_view(run_id: str, project_id: str, manifest: dict | None) -> RunManifestView | None:

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Bell, User } from "lucide-react";
 import {
@@ -52,17 +53,24 @@ export function TopBar({
           <span className="text-sm italic text-neutral">No projects yet</span>
         )}
         <span className="h-4 w-px bg-border" />
+        {/* Was two permanent "Corpus: Not recorded" / "Pipeline: Not recorded"
+            chips in the top bar of all 19 screens. Both are structurally
+            always absent (app.py's manifest write never sets them), so they
+            never changed and never will until that changes -- an unchanging
+            caveat repeated on every screen is noise, not honesty. The same
+            fields are still shown in full, with their reasons, on Versions
+            and on Run Detail's Manifest tab. This keeps the signal and makes
+            it a way to go read them. */}
         <Tooltip>
           <TooltipTrigger asChild>
-            <span className="cursor-help font-mono text-xs italic text-neutral">Corpus: Not recorded</span>
+            <Link href="/versions" className="font-mono text-xs italic text-neutral hover:text-clinova-deep">
+              Versions: not recorded
+            </Link>
           </TooltipTrigger>
-          <TooltipContent>This pipeline does not version its input corpus yet.</TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span className="cursor-help font-mono text-xs italic text-neutral">Pipeline: Not recorded</span>
-          </TooltipTrigger>
-          <TooltipContent>No pipeline version constant is recorded by app.py&apos;s manifest write.</TooltipContent>
+          <TooltipContent>
+            Neither the input-corpus version nor the pipeline version is written by this pipeline&apos;s
+            manifest yet. Open Versions for the full list and the reason for each.
+          </TooltipContent>
         </Tooltip>
       </div>
 

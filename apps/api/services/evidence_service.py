@@ -8,20 +8,22 @@ from apps.api.models.common import RunRef
 from apps.api.models.evidence import EvidenceItemView, EvidenceView
 from apps.api.services.copy_text import no_runs_in_project
 from apps.api.services.measures import evidence_confidence
-from apps.api.services.project_runs import get_basis_run
+from apps.api.services.project_runs import get_basis
 
 
-def get_project_evidence(project_id: str) -> EvidenceView:
-    basis_row, results = get_basis_run(project_id)
-    if basis_row is None:
+def get_project_evidence(project_id: str, run_id: str | None = None) -> EvidenceView:
+    basis = get_basis(project_id, run_id)
+    if basis is None:
         return EvidenceView(
-            run=None, basis_note="No runs exist for this project yet.", items=[],
+            basis_run=None, basis_note="No runs exist for this project yet.", items=[],
             by_type_counts={}, confidence=evidence_confidence({}),
             empty_reason=no_runs_in_project(),
         )
 
+    basis_row, results = basis.row, basis.results
+
     run = RunRef(run_id=basis_row["id"], name=basis_row["name"], created_at=str(basis_row["created_at"]))
-    basis_note = f"Evidence reflects run \"{basis_row['name']}\" ({basis_row['id'][:8]}) — the most recent run in this project."
+    basis_note = basis.note("Evidence")
 
     evidence_objects = results.get("evidence_objects") or {}
     items: list[EvidenceItemView] = []
@@ -43,6 +45,6 @@ def get_project_evidence(project_id: str) -> EvidenceView:
         empty_reason = "No evidence objects were extracted for this run."
 
     return EvidenceView(
-        run=run, basis_note=basis_note, items=items, by_type_counts=by_type_counts,
+        basis_run=run, basis_note=basis_note, items=items, by_type_counts=by_type_counts,
         confidence=evidence_confidence(results), empty_reason=empty_reason,
     )

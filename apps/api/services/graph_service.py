@@ -8,20 +8,22 @@ from apps.api.models.common import CountStat, RunRef
 from apps.api.models.graph import GraphCommunityView, GraphEntityView, GraphRelationshipView, GraphView
 from apps.api.services.copy_text import no_runs_in_project
 from apps.api.services.measures import graph_confidence
-from apps.api.services.project_runs import get_basis_run
+from apps.api.services.project_runs import get_basis
 
 
-def get_project_graph(project_id: str) -> GraphView:
-    basis_row, results = get_basis_run(project_id)
-    if basis_row is None:
+def get_project_graph(project_id: str, run_id: str | None = None) -> GraphView:
+    basis = get_basis(project_id, run_id)
+    if basis is None:
         return GraphView(
-            run=None, basis_note="No runs exist for this project yet.", entities=[], relationships=[],
+            basis_run=None, basis_note="No runs exist for this project yet.", entities=[], relationships=[],
             communities=[], counts=[], confidence=graph_confidence({}),
             empty_reason=no_runs_in_project(),
         )
 
+    basis_row, results = basis.row, basis.results
+
     run = RunRef(run_id=basis_row["id"], name=basis_row["name"], created_at=str(basis_row["created_at"]))
-    basis_note = f"Graph reflects run \"{basis_row['name']}\" ({basis_row['id'][:8]}) — the most recent run in this project."
+    basis_note = basis.note("Graph")
 
     graph = results.get("graph") or {}
     entities = [
@@ -58,6 +60,6 @@ def get_project_graph(project_id: str) -> GraphView:
         empty_reason = "No knowledge graph was built for this run."
 
     return GraphView(
-        run=run, basis_note=basis_note, entities=entities, relationships=relationships,
+        basis_run=run, basis_note=basis_note, entities=entities, relationships=relationships,
         communities=communities, counts=counts, confidence=graph_confidence(results), empty_reason=empty_reason,
     )

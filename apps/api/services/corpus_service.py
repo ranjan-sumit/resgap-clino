@@ -14,7 +14,7 @@ from apps.api.models.corpus import CorpusView, PaperDetail, PaperSection, PaperT
 from apps.api.models.runs import PaperRef
 from apps.api.services.copy_text import no_runs_in_project
 from apps.api.services.measures import corpus_confidence
-from apps.api.services.project_runs import get_basis_run
+from apps.api.services.project_runs import get_basis
 from apps.api.services.runs_service import _GATE_ICON, _GATE_TONE
 
 # Fixed display order -- pipeline/corpus_quality.py's own dict literal order,
@@ -37,9 +37,9 @@ def _reference_funnel(cqm: dict | None) -> list[ReferenceFunnelStage]:
     ]
 
 
-def get_project_corpus(project_id: str) -> CorpusView:
-    basis_row, results = get_basis_run(project_id)
-    if basis_row is None:
+def get_project_corpus(project_id: str, run_id: str | None = None) -> CorpusView:
+    basis = get_basis(project_id, run_id)
+    if basis is None:
         return CorpusView(
             project_id=project_id, basis_run=None, basis_note="No runs exist for this project yet.",
             papers=[], corpus_confidence=corpus_confidence({}), quality_gate=None,
@@ -48,8 +48,10 @@ def get_project_corpus(project_id: str) -> CorpusView:
             empty_reason=no_runs_in_project(),
         )
 
+    basis_row, results = basis.row, basis.results
+
     basis_run = RunRef(run_id=basis_row["id"], name=basis_row["name"], created_at=str(basis_row["created_at"]))
-    basis_note = f"Corpus reflects run \"{basis_row['name']}\" ({basis_row['id'][:8]}) — the most recent run in this project."
+    basis_note = basis.note("Corpus")
 
     papers = [
         PaperRef(filename=p.get("filename", ""), title=(p.get("wiki") or {}).get("title"),
@@ -77,14 +79,19 @@ def get_project_corpus(project_id: str) -> CorpusView:
     )
 
 
-def get_paper_detail(project_id: str, filename: str) -> PaperDetail:
-    basis_row, results = get_basis_run(project_id)
-    if basis_row is None:
+def get_paper_detail(project_id: str, filename: str, run_id: str | None = None) -> PaperDetail:
+    basis = get_basis(project_id, run_id)
+    if basis is None:
         raise NotFoundError(f"No runs exist for project '{project_id}'.")
+
+    basis_row, results = basis.row, basis.results
 
     paper = next((p for p in results.get("papers") or [] if p.get("filename") == filename), None)
     if paper is None:
-        raise NotFoundError(f"No paper '{filename}' in project '{project_id}''s most recent run.")
+        raise NotFoundError(
+            f"No paper '{filename}' in run \"{basis_row['name']}\" ({basis_row['id'][:8]}). "
+            "A different run in this project may include it."
+        )
 
     wiki = paper.get("wiki") or {}
     basis_run = RunRef(run_id=basis_row["id"], name=basis_row["name"], created_at=str(basis_row["created_at"]))

@@ -31,8 +31,8 @@ def main() -> int:
         # --- Per-page tab titles: each real screen sets its own title
         # (previously every single page showed the same generic app name).
         for path, expected in [
-            ("/dashboard", "Dashboard"), ("/corpus", "Corpus"), ("/runs", "Runs"),
-            ("/knowledge-graph", "Knowledge Graph"), ("/versions", "Versions"),
+            ("/dashboard", "Dashboard"), ("/workspace?tab=corpus", "Corpus"), ("/runs", "Runs"),
+            ("/workspace?tab=graph", "Knowledge Graph"), ("/versions", "Versions"),
         ]:
             page.goto(f"{WEB_BASE}{path}", wait_until="networkidle", timeout=20000)
             title = page.title()
@@ -77,8 +77,17 @@ def main() -> int:
         check("command palette: typing filters to a real matching screen", corpus_result.count() > 0)
         if corpus_result.count() > 0:
             corpus_result.click()
-            page.wait_for_timeout(2500)
-            check("command palette: clicking a result actually navigates", page.url.endswith("/corpus"), page.url)
+            # Wait on the post-condition, not a fixed sleep: a cold dev-server
+            # render of ANY route here takes ~8s (/dashboard measures the
+            # same), so the old 2500ms wait was a race, not a timing fact.
+            navigated = True
+            try:
+                page.wait_for_function(
+                    "location.pathname === '/workspace' && location.search.includes('tab=corpus')",
+                    timeout=30000)
+            except Exception:
+                navigated = False
+            check("command palette: clicking a result actually navigates", navigated, page.url)
         page.screenshot(path=str(SCREENSHOT_DIR / "12_command_palette.png"))
 
         # --- 404: an unmatched route gets a real branded not-found page,

@@ -74,3 +74,21 @@ class ProjectDashboard(BaseModel):
     activity: list[ActivityEvent]
     delta: RunDelta | None = None
     empty_reason: str | None
+
+
+class WorkspaceHeader(BaseModel):
+    """Just what the workspace's header strip shows, above its tab bar.
+
+    The workspace first reused ProjectDashboard, which measures ~14.7s:
+    `recent_runs` rebuilds a full RunSummary per run (a load_run plus a
+    manifest read each) and `delta` runs a whole compare_runs. The workspace
+    renders none of those four fields, so it was paying ~13s for data it
+    discarded -- on the app's primary screen, before any tab content.
+    """
+    project_id: str
+    project_label: str
+    basis_run: RunRef | None
+    basis_note: str
+    counts: list[CountStat]
+    confidence: list[Measure]
+    empty_reason: str | None = None

@@ -84,7 +84,9 @@ def main() -> int:
         body = page.inner_text("body")
         body_lower = body.lower()
         # Group headers are rendered uppercase via CSS text-transform.
-        for group in ["Workspace", "Research", "Intelligence", "Engineering", "Settings"]:
+        # Slice 15 collapsed Research/Intelligence into workspace TABS, so the
+        # sidebar now carries only what is not run-scoped.
+        for group in ["Workspace", "Across runs", "Settings"]:
             check(f"shell: nav group '{group}' present", group.lower() in body_lower)
         check("shell: 'Governance' nav group absent", "governance" not in body_lower)
         page.screenshot(path=str(SCREENSHOT_DIR / "02_dashboard.png"), full_page=True)

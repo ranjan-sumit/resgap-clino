@@ -7,6 +7,7 @@ export type RunManifestView = components["schemas"]["RunManifestView"];
 export type TraceStep = components["schemas"]["TraceStep"];
 export type ProjectSummary = components["schemas"]["ProjectSummary"];
 export type ProjectDashboard = components["schemas"]["ProjectDashboard"];
+export type WorkspaceHeader = components["schemas"]["WorkspaceHeader"];
 export type RunComparison = components["schemas"]["RunComparison"];
 export type TechnicalLineage = components["schemas"]["TechnicalLineage"];
 export type ScientificLineage = components["schemas"]["ScientificLineage"];
@@ -19,6 +20,7 @@ export type QualityView = components["schemas"]["QualityView"];
 export type PaperCompleteness = components["schemas"]["PaperCompleteness"];
 export type TrustStatusCount = components["schemas"]["TrustStatusCount"];
 export type PaperDetail = components["schemas"]["PaperDetail"];
+export type RunOption = components["schemas"]["RunOption"];
 export type RunJobView = components["schemas"]["RunJobView"];
 export type NewRunConfig = components["schemas"]["NewRunConfig"];
 export type SearchResponse = components["schemas"]["SearchResponse"];
@@ -58,12 +60,24 @@ async function get<T>(path: string): Promise<T> {
   return res.json();
 }
 
+// "?run_id=..." or "". A helper rather than inline so no call site has to
+// remember whether run_id is the first query param on that particular path.
+function runParam(runId?: string): string {
+  return runId ? `?run_id=${encodeURIComponent(runId)}` : "";
+}
+
 export const api = {
   health: () => get<components["schemas"]["HealthResponse"]>("/api/health"),
   listProjects: () => get<ProjectSummary[]>("/api/projects"),
-  getDashboard: (projectId: string) =>
-    get<ProjectDashboard>(`/api/projects/${encodeURIComponent(projectId)}/dashboard`),
+  getDashboard: (projectId: string, runId?: string) =>
+    get<ProjectDashboard>(`/api/projects/${encodeURIComponent(projectId)}/dashboard${runParam(runId)}`),
+  // Slim header for /workspace. See WorkspaceHeader in the API for why
+  // this is not getDashboard().
+  workspaceHeader: (projectId: string, runId?: string) =>
+    get<WorkspaceHeader>(`/api/projects/${encodeURIComponent(projectId)}/workspace${runParam(runId)}`),
   listRuns: (limit = 50) => get<RunListResponse>(`/api/runs?limit=${limit}`),
+  // Cheap sidebar list. See RunOption in the API for why this is not listRuns().
+  runOptions: (limit = 50) => get<RunOption[]>(`/api/run-options?limit=${limit}`),
   getRun: (runId: string) => get<RunDetail>(`/api/runs/${encodeURIComponent(runId)}`),
   compare: (baseline: string, candidate: string) =>
     get<RunComparison>(
@@ -75,17 +89,22 @@ export const api = {
     get<ScientificLineage>(
       `/api/runs/${encodeURIComponent(runId)}/lineage/scientific${gapId ? `?gap_id=${encodeURIComponent(gapId)}` : ""}`,
     ),
-  corpus: (projectId: string) => get<CorpusView>(`/api/projects/${encodeURIComponent(projectId)}/corpus`),
-  paper: (projectId: string, filename: string) =>
+  corpus: (projectId: string, runId?: string) =>
+    get<CorpusView>(`/api/projects/${encodeURIComponent(projectId)}/corpus${runParam(runId)}`),
+  paper: (projectId: string, filename: string, runId?: string) =>
     get<PaperDetail>(
-      `/api/projects/${encodeURIComponent(projectId)}/corpus/papers/${encodeURIComponent(filename)}`,
+      `/api/projects/${encodeURIComponent(projectId)}/corpus/papers/${encodeURIComponent(filename)}${runParam(runId)}`,
     ),
-  quality: (projectId: string) => get<QualityView>(`/api/projects/${encodeURIComponent(projectId)}/quality`),
-  evidence: (projectId: string) => get<EvidenceView>(`/api/projects/${encodeURIComponent(projectId)}/evidence`),
-  graph: (projectId: string) => get<GraphView>(`/api/projects/${encodeURIComponent(projectId)}/graph`),
-  challenger: (projectId: string) =>
-    get<ChallengerView>(`/api/projects/${encodeURIComponent(projectId)}/challenger`),
-  council: (projectId: string) => get<ResearchCouncilView>(`/api/projects/${encodeURIComponent(projectId)}/council`),
+  quality: (projectId: string, runId?: string) =>
+    get<QualityView>(`/api/projects/${encodeURIComponent(projectId)}/quality${runParam(runId)}`),
+  evidence: (projectId: string, runId?: string) =>
+    get<EvidenceView>(`/api/projects/${encodeURIComponent(projectId)}/evidence${runParam(runId)}`),
+  graph: (projectId: string, runId?: string) =>
+    get<GraphView>(`/api/projects/${encodeURIComponent(projectId)}/graph${runParam(runId)}`),
+  challenger: (projectId: string, runId?: string) =>
+    get<ChallengerView>(`/api/projects/${encodeURIComponent(projectId)}/challenger${runParam(runId)}`),
+  council: (projectId: string, runId?: string) =>
+    get<ResearchCouncilView>(`/api/projects/${encodeURIComponent(projectId)}/council${runParam(runId)}`),
   artifacts: () => get<ArtifactListResponse>("/api/artifacts"),
   reportUrl: (runId: string, format: "html" | "pdf" | "markdown" | "json") =>
     `${BASE}/api/runs/${encodeURIComponent(runId)}/report?format=${format}`,

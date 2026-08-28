@@ -83,8 +83,10 @@ def main() -> int:
         # but no graph_quality score must say so honestly, not claim no
         # graph exists at all (a real bug caught by screenshot review --
         # the stats tiles right above it show 61 real entities).
-        page.goto(f"{WEB_BASE}/knowledge-graph", wait_until="networkidle", timeout=20000)
-        confidence_text = page.locator("text=Graph Confidence").locator("..").inner_text()
+        page.goto(f"{WEB_BASE}/workspace?tab=graph", wait_until="networkidle", timeout=20000)
+        # .first: the workspace also lists this measure inside its collapsed
+        # "not recorded -- why" disclosure, so the bare text matches twice.
+        confidence_text = page.locator("text=Graph Confidence").locator("..").first.inner_text()
         check(
             "knowledge-graph: unscored-but-real graph is described honestly",
             "No knowledge graph was built" not in confidence_text,
@@ -115,7 +117,7 @@ def main() -> int:
 
         # --- Corpus: reference funnel stages render in the fixed, correct
         # order (not Postgres JSONB's arbitrary round-trip order).
-        page.goto(f"{WEB_BASE}/corpus", wait_until="networkidle", timeout=20000)
+        page.goto(f"{WEB_BASE}/workspace?tab=corpus", wait_until="networkidle", timeout=20000)
         # textContent (unlike innerText) does NOT reflect the CSS
         # uppercase transform, so this compares against the real,
         # un-transformed Title Case label text.
@@ -137,7 +139,7 @@ def main() -> int:
         # per edge -- a fallback-built graph's ~60 "paper mentions concept"
         # edges collapse to a small number of source groups instead of a
         # near-identical-looking wall of 60 rows.
-        page.goto(f"{WEB_BASE}/knowledge-graph", wait_until="networkidle", timeout=20000)
+        page.goto(f"{WEB_BASE}/workspace?tab=graph", wait_until="networkidle", timeout=20000)
         group_count, edge_count = page.evaluate("""() => {
             const heading = [...document.querySelectorAll('h2')].find(h => h.textContent.includes('Relationships'));
             const list = heading ? heading.parentElement.querySelector('ul') : null;

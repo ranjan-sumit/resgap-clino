@@ -5,8 +5,10 @@ import { usePathname } from "next/navigation";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { NAV_GROUPS } from "@/components/shell/nav-config";
+import { RunHistory } from "@/components/shell/run-history";
+import type { RunOption } from "@/lib/api";
 
-export function SideNav({ productName }: { productName: string }) {
+export function SideNav({ productName, runs = [] }: { productName: string; runs?: RunOption[] }) {
   const pathname = usePathname();
 
   // Longest-prefix match across every live href, so a nested route (e.g.
@@ -28,7 +30,7 @@ export function SideNav({ productName }: { productName: string }) {
     >
       <div className="pointer-events-none absolute inset-0 bg-brand-glow opacity-60" aria-hidden />
 
-      <Link href="/dashboard" className="relative z-10 mb-10 flex items-center gap-2.5 px-2">
+      <Link href="/workspace" className="relative z-10 mb-8 flex items-center gap-2.5 px-2">
         <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-gradient-to-br from-clinova-cyan to-clinova-light shadow-glow-sm">
           <span className="font-display text-sm text-clinova-deep">C</span>
         </span>
@@ -83,6 +85,10 @@ export function SideNav({ productName }: { productName: string }) {
             </ul>
           </div>
         ))}
+
+        {/* Below the nav groups, not above: the nav is fixed and short, the
+            run list grows. Streamlit put it in exactly this position. */}
+        <RunHistory runs={runs} />
       </div>
 
       <div className="relative z-10 mt-auto pt-6">

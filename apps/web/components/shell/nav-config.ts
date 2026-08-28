@@ -15,46 +15,27 @@ export interface NavGroup {
   hiddenReason?: string;
 }
 
+// Slice 15 restructure. The nav previously listed nine run-scoped screens as
+// nine separate destinations, so reading a gap and then its supporting graph
+// meant two full navigations and losing your place. Those nine are now tabs
+// inside /workspace (which the sidebar's run history scopes to one run), and
+// the sidebar keeps only what is genuinely NOT run-scoped: starting a run,
+// and comparing/tracing across runs.
 export const NAV_GROUPS: NavGroup[] = [
   {
     label: "Workspace",
     items: [
+      { label: "Workspace", href: "/workspace", status: "live" },
       { label: "Dashboard", href: "/dashboard", status: "live" },
       { label: "Projects", status: "planned" },
     ],
   },
   {
-    label: "Research",
+    label: "Across runs",
     items: [
-      { label: "Corpus", href: "/corpus", status: "live" },
-      // Was marked "planned" on the belief that per-paper completeness is
-      // never persisted. Half true: the field grid was being discarded (now
-      // saved), but the ADR-007 trust breakdown, the per-paper reference
-      // diagnostics and the corpus quality metrics were already being
-      // written on every run and shown nowhere.
-      { label: "Data Quality", href: "/quality", status: "live" },
-      { label: "Evidence", href: "/evidence", status: "live" },
-      { label: "Knowledge Graph", href: "/knowledge-graph", status: "live" },
-    ],
-  },
-  {
-    label: "Intelligence",
-    items: [
-      { label: "Research Gaps", href: "/gaps", status: "live" },
-      { label: "Gap Challenger", href: "/gap-challenger", status: "live" },
-      { label: "Research Council", href: "/council", status: "live" },
-      // Deep-links straight to the Council page's modelling tab. It lived
-      // only as a tab label before, so anyone scanning the sidebar for
-      // "computational modelling" found nothing and concluded it was missing.
-      { label: "Computational Modelling", href: "/council/modelling", status: "live" },
-      { label: "Proposals", href: "/proposals", status: "live" },
-    ],
-  },
-  {
-    label: "Engineering",
-    items: [
-      // First entry in the group: starting a run is the primary verb of
-      // this product, and it had no entry point in the web app at all.
+      // Starting a run is the primary verb of this product. Streamlit had it
+      // above the fold; here it is the first sidebar entry that is not the
+      // workspace itself, and it also appears as a button on the workspace.
       { label: "New Run", href: "/runs/new", status: "live" },
       { label: "Runs", href: "/runs", status: "live" },
       { label: "Compare", href: "/runs/compare", status: "live" },

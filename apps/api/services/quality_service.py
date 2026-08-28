@@ -25,7 +25,7 @@ from apps.api.models.quality import (
 )
 from apps.api.services.copy_text import no_runs_in_project
 from apps.api.services.corpus_service import _reference_funnel
-from apps.api.services.project_runs import get_basis_run
+from apps.api.services.project_runs import get_basis
 from apps.api.services.runs_service import _GATE_ICON, _GATE_TONE
 
 # ADR-007's five statuses, in trust order. Each carries what it MEANS --
@@ -162,14 +162,16 @@ def _per_paper_completeness(scores: list[dict] | None) -> list[PaperCompleteness
     return rows
 
 
-def get_project_quality(project_id: str) -> QualityView:
-    basis_row, results = get_basis_run(project_id)
-    if basis_row is None:
+def get_project_quality(project_id: str, run_id: str | None = None) -> QualityView:
+    basis = get_basis(project_id, run_id)
+    if basis is None:
         return QualityView(
             project_id=project_id, basis_run=None,
             basis_note="No runs exist for this project yet.",
             empty_reason=no_runs_in_project(), **_EMPTY_KWARGS,
         )
+
+    basis_row, results = basis.row, basis.results
 
     basis_run = RunRef(run_id=basis_row["id"], name=basis_row["name"],
                         created_at=str(basis_row["created_at"]))

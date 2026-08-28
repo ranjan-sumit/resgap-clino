@@ -37,7 +37,11 @@ class GapChallengeView(BaseModel):
 
 
 class ChallengerView(BaseModel):
-    run: RunRef | None
+    # Named basis_run, not run, to match CorpusView/QualityView/
+    # ProjectDashboard/WorkspaceHeader. Four models called the same concept
+    # "run" and four called it "basis_run", so no caller could rely on either
+    # -- found when one test tried to assert the field across all of them.
+    basis_run: RunRef | None
     basis_note: str
     gaps: list[GapChallengeView]
     empty_reason: str | None = None

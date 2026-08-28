@@ -69,12 +69,23 @@ def main():
         page.keyboard.press("ArrowDown")
         page.wait_for_timeout(200)
         page.keyboard.press("Enter")
-        page.wait_for_timeout(2500)
+        # Wait on the post-condition, not a fixed sleep: a cold dev-server
+        # render takes ~8s here, so 2500ms was a race that happened to pass.
+        # wait_for_function can THROW here rather than time out: a hit whose
+        # href redirects navigates twice, and the second navigation destroys
+        # the execution context the polling runs in. So the wait is
+        # best-effort and page.url -- which survives both navigations -- is
+        # what the check actually reads.
+        try:
+            page.wait_for_function("location.pathname !== '/dashboard'", timeout=30000)
+        except Exception:
+            pass
+        page.wait_for_load_state("networkidle")
         check("palette: selecting a content hit navigates",
               page.url.rstrip("/") != f"{WEB_BASE}/dashboard", page.url)
 
         # --- Graph image export ------------------------------------------
-        page.goto(f"{WEB_BASE}/knowledge-graph", wait_until="networkidle", timeout=30000)
+        page.goto(f"{WEB_BASE}/workspace?tab=graph", wait_until="networkidle", timeout=30000)
         page.wait_for_timeout(4500)
 
         for label, ext, min_bytes in [("SVG", "svg", 2000), ("PNG", "png", 10000)]:

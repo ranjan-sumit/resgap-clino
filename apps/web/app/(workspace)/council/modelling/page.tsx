@@ -1,57 +1,16 @@
 import type { Metadata } from "next";
-import Link from "next/link";
-import { PageHero } from "@/components/shell/page-hero";
-import { CountStatView } from "@/components/data/count-stat";
-import { EmptyState } from "@/components/data/empty-state";
-import { ModellingPanel } from "@/components/council/modelling-panel";
-import { api } from "@/lib/api";
-import { getSelectedProject } from "@/lib/project";
-import { common } from "@/lib/copy";
+import { redirect } from "next/navigation";
 
 export const metadata: Metadata = { title: "Computational Modelling" };
 
-export default async function ComputationalModellingPage() {
-  const project = await getSelectedProject();
-  if (!project) {
-    return <EmptyState title={common.no_projects_title} description={common.no_projects_body} />;
-  }
-
-  const council = await api.council(project.project_id);
-
-  return (
-    <div className="mx-auto max-w-6xl space-y-8">
-      <PageHero
-        eyebrow="Intelligence"
-        title="Computational Modelling"
-        description="Simulation results from the parameters extracted across this project's papers — which algorithms ran, what each produced per scenario, and which parameters moved the outcome most."
-        actions={
-          <Link
-            href="/council"
-            className="rounded-md border border-border px-3 py-1.5 text-sm text-clinova-deep hover:bg-secondary"
-          >
-            Research Council &rarr;
-          </Link>
-        }
-      />
-
-      {council.empty_reason ? (
-        <EmptyState title="No council run yet" description={council.empty_reason} />
-      ) : (
-        <>
-          <div className="grid grid-cols-5 gap-4">
-            {council.params_summary.map((c) => (
-              <CountStatView key={c.key} stat={c} />
-            ))}
-          </div>
-          {council.n_excluded_low_confidence > 0 && (
-            <p className="text-xs text-neutral">
-              {council.n_excluded_low_confidence} parameter(s) excluded from simulation — confidence too low.
-            </p>
-          )}
-
-          <ModellingPanel council={council} />
-        </>
-      )}
-    </div>
-  );
+/**
+ * Slice 15: this screen is now a tab of /workspace, so that reading it and
+ * then reading a related one costs a tab click instead of a full navigation.
+ * The route is kept as a redirect rather than deleted -- external links,
+ * bookmarks, and the server-generated hrefs in search results and gap
+ * cross-links all still point here, and a 404 would be a worse answer than
+ * landing on the same content in its new home.
+ */
+export default async function ComputationalModellingRedirect() {
+  redirect("/workspace?tab=modelling");
 }

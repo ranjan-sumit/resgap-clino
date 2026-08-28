@@ -1,4 +1,10 @@
 """
+Slice 15 note: entity/gap/proposal hits now point straight at their workspace
+tab rather than at the pre-Slice-15 standalone route. Those routes still work
+(they redirect), but sending every search result through a redirect meant two
+navigations per result -- and on a dev render that is ~8s of extra wait for
+something the server already knows the final address of.
+
 Cross-screen content search (Clinova Phase 5, Epic 5.7).
 
 The command palette could previously only find nav destinations and runs by
@@ -113,7 +119,7 @@ def search_project(project_id: str, query: str, limit: int = MAX_HITS) -> Search
             hits.append(SearchHit(
                 kind="entity", title=entity.get("name", ""),
                 subtitle=f"Entity · {entity.get('type', 'unknown')}",
-                href="/knowledge-graph", matched_on=field, score=score,
+                href="/workspace?tab=graph", matched_on=field, score=score,
             ))
 
     for gap in results.get("gaps") or []:
@@ -124,7 +130,7 @@ def search_project(project_id: str, query: str, limit: int = MAX_HITS) -> Search
             hits.append(SearchHit(
                 kind="gap", title=gap.get("title", ""),
                 subtitle=f"Gap · {gap.get('validation_status', 'unknown')}",
-                href="/gaps", matched_on=field, score=score,
+                href="/workspace?tab=gaps", matched_on=field, score=score,
             ))
 
     for proposal in results.get("proposals") or []:
@@ -137,7 +143,7 @@ def search_project(project_id: str, query: str, limit: int = MAX_HITS) -> Search
         if score:
             hits.append(SearchHit(
                 kind="proposal", title=proposal.get("title", ""),
-                subtitle="Proposal", href="/proposals", matched_on=field, score=score,
+                subtitle="Proposal", href="/workspace?tab=proposals", matched_on=field, score=score,
             ))
 
     hits.sort(key=lambda h: (-h.score, h.title.lower()))

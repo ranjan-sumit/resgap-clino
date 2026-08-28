@@ -24,7 +24,7 @@ def main():
         page.on("pageerror", lambda exc: errors.append(str(exc)))
 
         # --- Knowledge Graph: real force-directed visual, not just lists ---
-        page.goto(f"{WEB_BASE}/knowledge-graph", wait_until="networkidle", timeout=20000)
+        page.goto(f"{WEB_BASE}/workspace?tab=graph", wait_until="networkidle", timeout=20000)
         check("knowledge-graph: 'Graph explorer' section present", page.locator("text=Graph explorer").count() > 0)
         page.wait_for_timeout(4200)  # let the force simulation settle
         node_count = page.locator("svg circle[stroke='white']").count()
@@ -44,18 +44,31 @@ def main():
         check("knowledge-graph: hover highlight dims unrelated nodes", dimmed)
 
         # --- Research Council: Computational modelling is an unmissable tab ---
-        page.goto(f"{WEB_BASE}/council", wait_until="networkidle", timeout=20000)
-        modelling_tab = page.get_by_role("tab", name="Computational modelling")
-        findings_tab = page.get_by_role("tab", name="Findings & debate")
-        check("council: 'Computational modelling' tab exists", modelling_tab.count() == 1)
-        check("council: tab is active by default (not buried)", modelling_tab.get_attribute("data-state") == "active")
-        check("council: model results table visible without clicking anything", page.locator("text=Sensitivity").count() > 0)
-        findings_tab.click()
-        page.wait_for_timeout(300)
-        check("council: Findings tab switches content", findings_tab.get_attribute("data-state") == "active")
+        # Slice 15 pins every workspace tab to the selected run, and the
+        # newest run did not use the Computational Lab -- so this opens the
+        # run that did, which is the run the empty state now names.
+        page.goto(f"{WEB_BASE}/workspace?tab=council&run=916eb3489e10",
+                  wait_until="networkidle", timeout=30000)
+        # Slice 15 removed the council's INNER tab pair. Modelling is a
+        # workspace tab in its own right now, so keeping a second tab with
+        # the same label on the same screen was the very confusion the
+        # top-level tab existed to fix. Council renders findings directly and
+        # links across; the original requirement -- modelling must not be
+        # buried behind a click -- is now checked on the workspace tab.
+        check("council: findings render directly, no inner tab to click through",
+              page.locator("text=Council debate").count() > 0
+              or page.locator("text=Clinical insights").count() > 0)
+        check("council: links across to the modelling results",
+              page.get_by_role("link", name="Computational modelling results").count() == 1)
+
+        page.goto(f"{WEB_BASE}/workspace?tab=modelling&run=916eb3489e10",
+                  wait_until="networkidle", timeout=30000)
+        check("modelling: results table visible without clicking anything",
+              page.locator("text=Sensitivity").count() > 0)
 
         # --- Number formatting: en-US grouping, not locale-leaked lakh grouping ---
-        page.goto(f"{WEB_BASE}/council", wait_until="networkidle", timeout=20000)
+        page.goto(f"{WEB_BASE}/workspace?tab=council&run=916eb3489e10",
+                  wait_until="networkidle", timeout=30000)
         body = page.inner_text("body")
         check("council: no lakh-style number grouping (e.g. '11,89,94,772')", "11,89,94,772" not in body)
 

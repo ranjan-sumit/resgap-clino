@@ -84,14 +84,17 @@ def main():
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.on("response", lambda r: errors.append(f"{r.status} {r.url}") if r.status >= 500 else None)
 
-        # Reachable from the sidebar -- the whole reason the previous
-        # "planned" marker was a problem is that nothing led here.
-        page.goto(f"{WEB_BASE}/dashboard", wait_until="networkidle", timeout=30000)
-        nav_link = page.get_by_role("navigation", name="Primary").get_by_role("link", name="Data Quality")
-        check("nav: Data Quality is a real link, not a 'Later' placeholder",
-              nav_link.count() == 1)
-        nav_link.first.click()
-        page.wait_for_url("**/quality", timeout=20000)
+        # Reachable by name without knowing a URL -- the whole reason the
+        # previous "planned" marker was a problem is that nothing led here.
+        # Slice 15: Data Quality is a workspace tab rather than its own
+        # route. The check is unchanged in spirit -- it must be reachable by
+        # name without knowing a URL -- only the mechanism moved.
+        page.goto(f"{WEB_BASE}/workspace", wait_until="networkidle", timeout=30000)
+        tab = page.get_by_role("tab", name="Data Quality")
+        check("workspace: Data Quality is a real tab, not a 'Later' placeholder",
+              tab.count() == 1)
+        tab.first.click()
+        page.wait_for_function("location.search.includes('tab=quality')", timeout=20000)
 
         page.wait_for_timeout(1200)
         text = page.inner_text("body")

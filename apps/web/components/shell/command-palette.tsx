@@ -9,11 +9,20 @@ import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { NAV_GROUPS } from "@/components/shell/nav-config";
+import { WORKSPACE_TABS, workspaceHref } from "@/components/workspace/tab-config";
 import { api, type SearchHit } from "@/lib/api";
 
-const NAV_DESTINATIONS = NAV_GROUPS.filter((g) => !g.hidden)
-  .flatMap((g) => g.items)
-  .filter((item): item is typeof item & { href: string } => item.status === "live" && !!item.href);
+// Sidebar entries PLUS the nine workspace tabs. Deriving destinations from
+// NAV_GROUPS alone silently dropped all nine the moment Slice 15 turned them
+// into tabs -- searching "corpus" or "gaps" in the palette found nothing,
+// even though both screens still existed.
+const NAV_DESTINATIONS: { label: string; href: string }[] = [
+  ...NAV_GROUPS.filter((g) => !g.hidden)
+    .flatMap((g) => g.items)
+    .filter((item): item is typeof item & { href: string } => item.status === "live" && !!item.href)
+    .map((item) => ({ label: item.label, href: item.href })),
+  ...WORKSPACE_TABS.map((t) => ({ label: t.label, href: workspaceHref(t.key) })),
+];
 
 type Result = {
   kind: "nav" | SearchHit["kind"];

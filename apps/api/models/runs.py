@@ -25,6 +25,26 @@ class RunListResponse(BaseModel):
     empty_reason: str | None = None
 
 
+class RunOption(BaseModel):
+    """A run as the sidebar's run switcher needs it: enough to tell runs
+    apart, nothing more.
+
+    Exists because building a RunSummary costs a full load_run() plus a
+    manifest read PER RUN (it carries derived status, version fields and
+    quality gates). That is right for the Runs table, which shows all of it,
+    but the switcher renders in the layout on EVERY page -- serving
+    RunSummary there put ~6s of JSONB loading in front of every screen in the
+    app. Every field below already sits in list_runs()' own row, so this
+    costs one query and zero run loads.
+    """
+    run_id: str
+    name: str
+    created_at: str
+    project_id: str
+    n_papers: int
+    n_gaps: int
+
+
 class PaperRef(BaseModel):
     filename: str
     title: str | None

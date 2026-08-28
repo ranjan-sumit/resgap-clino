@@ -36,7 +36,7 @@ def main():
         page.on("pageerror", lambda exc: errors.append(str(exc)))
 
         # --- Sticky sidebar -------------------------------------------------
-        page.goto(f"{WEB_BASE}/knowledge-graph", wait_until="networkidle", timeout=25000)
+        page.goto(f"{WEB_BASE}/workspace?tab=graph", wait_until="networkidle", timeout=25000)
         page.wait_for_timeout(4500)
 
         nav_box_before = page.locator("nav[aria-label='Primary']").bounding_box()
@@ -85,14 +85,26 @@ def main():
         check("knowledge-graph: chips carry a real background tint", tinted > 5, f"{tinted} tinted")
 
         # --- Computational Modelling is its own reachable screen ------------
-        page.goto(f"{WEB_BASE}/knowledge-graph", wait_until="networkidle", timeout=25000)
-        nav_link = page.locator("nav[aria-label='Primary'] a", has_text="Computational Modelling")
-        check("nav: 'Computational Modelling' is a real sidebar link", nav_link.count() == 1)
-        nav_link.first.click()
-        page.wait_for_url("**/council/modelling", timeout=15000)
+        page.goto(f"{WEB_BASE}/workspace?tab=graph", wait_until="networkidle", timeout=25000)
+        # Slice 15: this is a workspace tab rather than a sidebar link. The
+        # original complaint was that "computational modelling" appeared
+        # nowhere you could scan for it -- that requirement is unchanged, only
+        # the surface it lives on moved.
+        tab = page.get_by_role("tab", name="Computational Modelling")
+        check("workspace: 'Computational Modelling' is a real, labelled destination "
+              "(a tab since Slice 15, a sidebar link before)", tab.count() == 1)
+        tab.first.click()
+        page.wait_for_function("location.search.includes('tab=modelling')", timeout=30000)
         page.wait_for_load_state("networkidle")
-        check("modelling page: has its own heading", page.locator("h1", has_text="Computational Modelling").count() > 0)
-        check("modelling page: shows real model results", page.locator("text=Sensitivity").count() > 0)
+        check("modelling tab: renders its own content, not an empty panel",
+              len(page.locator("main").inner_text().strip()) > 200)
+
+        # Every workspace tab is pinned to the selected run, and the newest
+        # run did not use the Computational Lab -- so real model results live
+        # on the run that did. Reaching them is a run switch, not a bug.
+        page.goto(f"{WEB_BASE}/workspace?tab=modelling&run=916eb3489e10",
+                  wait_until="networkidle", timeout=30000)
+        check("modelling tab: shows real model results", page.locator("text=Sensitivity").count() > 0)
         page.screenshot(path=str(SCREENSHOT_DIR / "16_modelling_page.png"), full_page=True)
 
         # --- Project selection is real, not decorative ----------------------
@@ -114,7 +126,7 @@ def main():
         page.context.add_cookies([
             {"name": "clinova_project", "value": "Healthcare AI", "url": WEB_BASE},
         ])
-        page.goto(f"{WEB_BASE}/corpus", wait_until="networkidle", timeout=25000)
+        page.goto(f"{WEB_BASE}/workspace?tab=corpus", wait_until="networkidle", timeout=25000)
         check(
             "project selection: a stored selection drives the rendered project",
             "AuDHD" in page.inner_text("body"),
@@ -123,7 +135,7 @@ def main():
         page.context.add_cookies([
             {"name": "clinova_project", "value": "no-such-project-xyz", "url": WEB_BASE},
         ])
-        page.goto(f"{WEB_BASE}/corpus", wait_until="networkidle", timeout=25000)
+        page.goto(f"{WEB_BASE}/workspace?tab=corpus", wait_until="networkidle", timeout=25000)
         check(
             "project selection: an unknown stored project falls back instead of erroring",
             "AuDHD" in page.inner_text("body"),

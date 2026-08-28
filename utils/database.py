@@ -529,6 +529,62 @@ def load_run(run_id: str) -> dict:
     return row["results_json"]
 
 
+def load_run_gate_fields_bulk(run_ids: list[str]) -> dict[str, dict]:
+    """The two `results` keys run-status derivation needs, for many runs in
+    ONE query (Clinova Phase 5, Slice 15).
+
+    Additive: load_run() is unchanged and remains what app.py and every
+    full-run reader use.
+
+    Two separate savings, and the second is the one that mattered. Deriving a
+    run's status reads only results.gate_blocked / results.gate_block_reasons,
+    while load_run() ships the whole results JSONB (papers, sections, graph,
+    evidence) to get them -- so this extracts just those keys server-side.
+    But measurement showed payload was NOT the bottleneck: _get_conn() opens
+    and closes a fresh connection per call at ~0.75s each, so a 5-run list
+    spent ~7.5s in connection setup alone. Hence bulk: one connection and one
+    query for the whole list instead of one per run.
+    """
+    if not run_ids:
+        return {}
+    init_db()
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, "
+        "       results_json->'results'->'gate_blocked'       AS gate_blocked, "
+        "       results_json->'results'->'gate_block_reasons' AS gate_block_reasons "
+        "FROM runs WHERE id = ANY(%s)",
+        (list(run_ids),),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return {
+        r["id"]: {
+            "gate_blocked": r["gate_blocked"],
+            "gate_block_reasons": r["gate_block_reasons"] or [],
+        }
+        for r in rows
+    }
+
+
+def get_run_manifests_bulk(run_ids: list[str]) -> dict[str, dict]:
+    """Manifests for many runs in one query. Same reasoning as
+    load_run_gate_fields_bulk: get_run_manifest() costs a connection per call.
+    Runs with no manifest are simply absent from the result, which callers
+    must treat as None (a missing manifest is a real, meaningful state -- see
+    derive_run_status's NO_MANIFEST branch)."""
+    if not run_ids:
+        return {}
+    init_db()
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM run_manifests WHERE run_id = ANY(%s)", (list(run_ids),))
+    rows = cur.fetchall()
+    conn.close()
+    return {r["run_id"]: dict(r) for r in rows}
+
+
 def delete_run(run_id: str) -> None:
     init_db()
     conn = _get_conn()

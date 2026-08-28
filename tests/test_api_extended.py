@@ -143,8 +143,11 @@ class CouncilRouteTests(unittest.TestCase):
         # The project's newest run overall has no comp_results -- this
         # must resolve to the older run that actually ran the lab, not
         # dashboard_service's basis_run.
-        if body["run"] is not None:
-            self.assertIn("Computational Lab", body["run"]["name"])
+        # Renamed `run` -> `basis_run` in Slice 15: four project-scoped views
+        # called this field `run` and four called it `basis_run`, so no caller
+        # could rely on either.
+        if body["basis_run"] is not None:
+            self.assertIn("Computational Lab", body["basis_run"]["name"])
             self.assertGreater(len(body["params_summary"]), 0)
 
     def test_model_results_are_parsed_into_real_scenario_tables(self):

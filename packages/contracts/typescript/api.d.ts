@@ -45,6 +45,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/run-options": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Run Options
+         * @description Cheap run list for the sidebar's run switcher, which renders on every
+         *     page. GET /runs costs a full load_run() + manifest read per run; this
+         *     costs one query.
+         */
+        get: operations["run_options_api_run_options_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/runs/{run_id}": {
         parameters: {
             query?: never;
@@ -161,8 +183,32 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Dashboard */
+        /**
+         * Get Dashboard
+         * @description Optional run_id pins every workspace tab to the same run. Omitted = the most recent run, which is what every screen did before the workspace gained a run switcher (Slice 15).
+         */
         get: operations["get_dashboard_api_projects__project_id__dashboard_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/projects/{project_id}/workspace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Workspace
+         * @description The workspace header strip. Deliberately not the full dashboard --
+         *     that costs ~14.7s building four fields the workspace never renders.
+         */
+        get: operations["get_workspace_api_projects__project_id__workspace_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -229,7 +275,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Project Corpus */
+        /**
+         * Project Corpus
+         * @description Optional run_id pins every workspace tab to the same run. Omitted = the most recent run, which is what every screen did before the workspace gained a run switcher (Slice 15).
+         */
         get: operations["project_corpus_api_projects__project_id__corpus_get"];
         put?: never;
         post?: never;
@@ -263,7 +312,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Project Evidence */
+        /**
+         * Project Evidence
+         * @description Optional run_id pins every workspace tab to the same run. Omitted = the most recent run, which is what every screen did before the workspace gained a run switcher (Slice 15).
+         */
         get: operations["project_evidence_api_projects__project_id__evidence_get"];
         put?: never;
         post?: never;
@@ -280,7 +332,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Project Graph */
+        /**
+         * Project Graph
+         * @description Optional run_id pins every workspace tab to the same run. Omitted = the most recent run, which is what every screen did before the workspace gained a run switcher (Slice 15).
+         */
         get: operations["project_graph_api_projects__project_id__graph_get"];
         put?: never;
         post?: never;
@@ -297,7 +352,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Project Challenger */
+        /**
+         * Project Challenger
+         * @description Optional run_id pins every workspace tab to the same run. Omitted = the most recent run, which is what every screen did before the workspace gained a run switcher (Slice 15).
+         */
         get: operations["project_challenger_api_projects__project_id__challenger_get"];
         put?: never;
         post?: never;
@@ -314,7 +372,12 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Project Council */
+        /**
+         * Project Council
+         * @description Optional run_id pins every workspace tab to the same run. Omitted = the
+         *     most recent run that has Computational Lab output, which is not
+         *     necessarily the most recent run overall.
+         */
         get: operations["project_council_api_projects__project_id__council_get"];
         put?: never;
         post?: never;
@@ -450,7 +513,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Project Quality */
+        /**
+         * Project Quality
+         * @description Optional run_id pins every workspace tab to the same run. Omitted = the most recent run, which is what every screen did before the workspace gained a run switcher (Slice 15).
+         */
         get: operations["project_quality_api_projects__project_id__quality_get"];
         put?: never;
         post?: never;
@@ -587,7 +653,7 @@ export interface components {
         };
         /** ChallengerView */
         ChallengerView: {
-            run: components["schemas"]["RunRef"] | null;
+            basis_run: components["schemas"]["RunRef"] | null;
             /** Basis Note */
             basis_note: string;
             /** Gaps */
@@ -727,7 +793,7 @@ export interface components {
         };
         /** EvidenceView */
         EvidenceView: {
-            run: components["schemas"]["RunRef"] | null;
+            basis_run: components["schemas"]["RunRef"] | null;
             /** Basis Note */
             basis_note: string;
             /** Items */
@@ -908,7 +974,7 @@ export interface components {
         };
         /** GraphView */
         GraphView: {
-            run: components["schemas"]["RunRef"] | null;
+            basis_run: components["schemas"]["RunRef"] | null;
             /** Basis Note */
             basis_note: string;
             /** Entities */
@@ -1401,7 +1467,7 @@ export interface components {
         };
         /** ResearchCouncilView */
         ResearchCouncilView: {
-            run: components["schemas"]["RunRef"] | null;
+            basis_run: components["schemas"]["RunRef"] | null;
             /** Basis Note */
             basis_note: string;
             /** Params Summary */
@@ -1626,6 +1692,33 @@ export interface components {
             warnings: string[];
             /** Created At */
             created_at: string | null;
+        };
+        /**
+         * RunOption
+         * @description A run as the sidebar's run switcher needs it: enough to tell runs
+         *     apart, nothing more.
+         *
+         *     Exists because building a RunSummary costs a full load_run() plus a
+         *     manifest read PER RUN (it carries derived status, version fields and
+         *     quality gates). That is right for the Runs table, which shows all of it,
+         *     but the switcher renders in the layout on EVERY page -- serving
+         *     RunSummary there put ~6s of JSONB loading in front of every screen in the
+         *     app. Every field below already sits in list_runs()' own row, so this
+         *     costs one query and zero run loads.
+         */
+        RunOption: {
+            /** Run Id */
+            run_id: string;
+            /** Name */
+            name: string;
+            /** Created At */
+            created_at: string;
+            /** Project Id */
+            project_id: string;
+            /** N Papers */
+            n_papers: number;
+            /** N Gaps */
+            n_gaps: number;
         };
         /**
          * RunRef
@@ -1873,6 +1966,31 @@ export interface components {
             note?: string | null;
         };
         /**
+         * WorkspaceHeader
+         * @description Just what the workspace's header strip shows, above its tab bar.
+         *
+         *     The workspace first reused ProjectDashboard, which measures ~14.7s:
+         *     `recent_runs` rebuilds a full RunSummary per run (a load_run plus a
+         *     manifest read each) and `delta` runs a whole compare_runs. The workspace
+         *     renders none of those four fields, so it was paying ~13s for data it
+         *     discarded -- on the app's primary screen, before any tab content.
+         */
+        WorkspaceHeader: {
+            /** Project Id */
+            project_id: string;
+            /** Project Label */
+            project_label: string;
+            basis_run: components["schemas"]["RunRef"] | null;
+            /** Basis Note */
+            basis_note: string;
+            /** Counts */
+            counts: components["schemas"]["CountStat"][];
+            /** Confidence */
+            confidence: components["schemas"]["Measure"][];
+            /** Empty Reason */
+            empty_reason?: string | null;
+        };
+        /**
          * LinkedRef
          * @description A cross-screen link resolved server-side. `href` is None when the
          *     referenced thing exists in the data but has no screen of its own to
@@ -1943,6 +2061,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RunListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    run_options_api_run_options_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunOption"][];
                 };
             };
             /** @description Validation Error */
@@ -2126,7 +2275,9 @@ export interface operations {
     };
     get_dashboard_api_projects__project_id__dashboard_get: {
         parameters: {
-            query?: never;
+            query?: {
+                run_id?: string | null;
+            };
             header?: never;
             path: {
                 project_id: string;
@@ -2142,6 +2293,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProjectDashboard"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_workspace_api_projects__project_id__workspace_get: {
+        parameters: {
+            query?: {
+                run_id?: string | null;
+            };
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceHeader"];
                 };
             };
             /** @description Validation Error */
@@ -2253,7 +2437,9 @@ export interface operations {
     };
     project_corpus_api_projects__project_id__corpus_get: {
         parameters: {
-            query?: never;
+            query?: {
+                run_id?: string | null;
+            };
             header?: never;
             path: {
                 project_id: string;
@@ -2284,7 +2470,9 @@ export interface operations {
     };
     project_corpus_paper_api_projects__project_id__corpus_papers__filename__get: {
         parameters: {
-            query?: never;
+            query?: {
+                run_id?: string | null;
+            };
             header?: never;
             path: {
                 project_id: string;
@@ -2316,7 +2504,9 @@ export interface operations {
     };
     project_evidence_api_projects__project_id__evidence_get: {
         parameters: {
-            query?: never;
+            query?: {
+                run_id?: string | null;
+            };
             header?: never;
             path: {
                 project_id: string;
@@ -2347,7 +2537,9 @@ export interface operations {
     };
     project_graph_api_projects__project_id__graph_get: {
         parameters: {
-            query?: never;
+            query?: {
+                run_id?: string | null;
+            };
             header?: never;
             path: {
                 project_id: string;
@@ -2378,7 +2570,9 @@ export interface operations {
     };
     project_challenger_api_projects__project_id__challenger_get: {
         parameters: {
-            query?: never;
+            query?: {
+                run_id?: string | null;
+            };
             header?: never;
             path: {
                 project_id: string;
@@ -2409,7 +2603,9 @@ export interface operations {
     };
     project_council_api_projects__project_id__council_get: {
         parameters: {
-            query?: never;
+            query?: {
+                run_id?: string | null;
+            };
             header?: never;
             path: {
                 project_id: string;
@@ -2631,7 +2827,9 @@ export interface operations {
     };
     project_quality_api_projects__project_id__quality_get: {
         parameters: {
-            query?: never;
+            query?: {
+                run_id?: string | null;
+            };
             header?: never;
             path: {
                 project_id: string;

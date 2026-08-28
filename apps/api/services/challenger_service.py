@@ -7,7 +7,7 @@ run_challenge() -- app.py merges it directly onto the gap dict under
 from apps.api.models.challenger import ChallengeFunnelView, ChallengerView, GapChallengeView, JudgedCandidateView
 from apps.api.models.common import RunRef
 from apps.api.services.copy_text import no_runs_in_project
-from apps.api.services.project_runs import get_basis_run
+from apps.api.services.project_runs import get_basis
 from apps.api.services.runs_service import _CHALLENGE_CHIPS, _NOT_CHALLENGED_CHIP
 
 
@@ -38,16 +38,18 @@ def _funnel_view(f: dict | None) -> ChallengeFunnelView | None:
     )
 
 
-def get_project_challenger(project_id: str) -> ChallengerView:
-    basis_row, results = get_basis_run(project_id)
-    if basis_row is None:
+def get_project_challenger(project_id: str, run_id: str | None = None) -> ChallengerView:
+    basis = get_basis(project_id, run_id)
+    if basis is None:
         return ChallengerView(
-            run=None, basis_note="No runs exist for this project yet.", gaps=[],
+            basis_run=None, basis_note="No runs exist for this project yet.", gaps=[],
             empty_reason=no_runs_in_project(),
         )
 
+    basis_row, results = basis.row, basis.results
+
     run = RunRef(run_id=basis_row["id"], name=basis_row["name"], created_at=str(basis_row["created_at"]))
-    basis_note = f"Reflects run \"{basis_row['name']}\" ({basis_row['id'][:8]}) — the most recent run in this project."
+    basis_note = basis.note("Gap Challenger")
 
     gaps = results.get("gaps") or []
     views = [
@@ -62,4 +64,4 @@ def get_project_challenger(project_id: str) -> ChallengerView:
     ]
 
     empty_reason = "No gaps were extracted for this run." if not gaps else None
-    return ChallengerView(run=run, basis_note=basis_note, gaps=views, empty_reason=empty_reason)
+    return ChallengerView(basis_run=run, basis_note=basis_note, gaps=views, empty_reason=empty_reason)

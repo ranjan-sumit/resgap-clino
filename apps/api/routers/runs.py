@@ -4,10 +4,10 @@ from fastapi import APIRouter, Query
 
 from apps.api.errors import NotFoundError
 from apps.api.models.artifacts import ArtifactView
-from apps.api.models.runs import RunDetail, RunListResponse, TraceStep
+from apps.api.models.runs import RunDetail, RunListResponse, RunOption, TraceStep
 from apps.api.services.artifacts_service import promote_run_pipeline_artifact
 from apps.api.services.run_status import trace_status_chip
-from apps.api.services.runs_service import build_run_detail, list_run_summaries
+from apps.api.services.runs_service import build_run_detail, list_run_options, list_run_summaries
 from utils.database import load_run
 
 router = APIRouter(tags=["runs"])
@@ -18,6 +18,17 @@ def list_runs_endpoint(limit: int = Query(50, ge=1, le=200)) -> RunListResponse:
     summaries = list_run_summaries(limit=limit)
     empty_reason = "No runs have been saved yet." if not summaries else None
     return RunListResponse(runs=summaries, empty_reason=empty_reason)
+
+
+# NOT /runs/options: a single segment there is captured by GET /runs/{run_id}
+# below (whichever registers first wins), silently serving a run-detail 404
+# instead of the list -- the same collision /api/jobs was moved to avoid.
+@router.get("/run-options", response_model=list[RunOption])
+def run_options(limit: int = Query(50, ge=1, le=200)) -> list[RunOption]:
+    """Cheap run list for the sidebar's run switcher, which renders on every
+    page. GET /runs costs a full load_run() + manifest read per run; this
+    costs one query."""
+    return list_run_options(limit=limit)
 
 
 @router.get("/runs/{run_id}", response_model=RunDetail)

@@ -45,18 +45,35 @@ _EMPTY_KWARGS = dict(
 )
 
 
-def get_project_council(project_id: str) -> ResearchCouncilView:
+def get_project_council(project_id: str, run_id: str | None = None) -> ResearchCouncilView:
     runs = list_project_runs(project_id)
     if not runs:
         return ResearchCouncilView(
-            run=None, basis_note="No runs exist for this project yet.",
+            basis_run=None, basis_note="No runs exist for this project yet.",
             empty_reason=no_runs_in_project(),
             **_EMPTY_KWARGS,
         )
 
+    # When the workspace has a run pinned, this tab must show THAT run or say
+    # it has no Computational Lab output -- silently falling back to some
+    # other run would make one tab describe a different run than the eight
+    # beside it, which is exactly the confusion the run switcher exists to
+    # remove. Only the unpinned case scans for the most recent comp run.
+    #
+    # An id that matches NO run in this project (a truncated id pasted from
+    # the 8-character display form, a stale bookmark) is treated as unpinned,
+    # matching project_runs.get_basis(). Honouring it literally made this
+    # service state "No run in this project has used the Computational Lab"
+    # while a run that had was sitting in the list -- a false claim, which is
+    # worse than either falling back or erroring.
+    pinned_row = next((r for r in runs if r["id"] == run_id), None) if run_id else None
+    if run_id and pinned_row is None:
+        run_id = None
+
     comp_row = None
     comp = None
-    for row in runs:
+    candidates = [pinned_row] if pinned_row is not None else runs
+    for row in candidates:
         if not row.get("has_comp"):
             continue
         loaded = load_run(row["id"]) or {}
@@ -65,15 +82,45 @@ def get_project_council(project_id: str) -> ResearchCouncilView:
             break
 
     if comp is None:
+        pinned = pinned_row
+        if pinned is not None:
+            # Naming a run that DOES have Council output turns a dead end into
+            # a next step. "Another run may have" was true but useless -- it
+            # left the reader to open five runs to find out which, and the
+            # answer is already known here.
+            alternative = next(
+                (r for r in runs
+                 if r["id"] != pinned["id"] and r.get("has_comp")
+                 and (load_run(r["id"]) or {}).get("comp_results")),
+                None,
+            )
+            pointer = (
+                f" Run \"{alternative['name']}\" ({alternative['id'][:8]}) does — select it in the "
+                "sidebar's run history to see its Council output."
+                if alternative else
+                " No run in this project has used it yet."
+            )
+            return ResearchCouncilView(
+                basis_run=None,
+                basis_note=f"Run \"{pinned['name']}\" ({pinned['id'][:8]}) has no Computational Lab output.",
+                empty_reason=(
+                    f"The selected run, \"{pinned['name']}\", did not use the Computational Lab.{pointer}"
+                ),
+                **_EMPTY_KWARGS,
+            )
         return ResearchCouncilView(
-            run=None, basis_note="No Computational Lab run exists for this project yet.",
+            basis_run=None, basis_note="No Computational Lab run exists for this project yet.",
             empty_reason="No run in this project has used the Computational Lab (Research Council) "
                           "feature yet -- it runs from the Streamlit sidebar, not this API.",
             **_EMPTY_KWARGS,
         )
 
     run = RunRef(run_id=comp_row["id"], name=comp_row["name"], created_at=str(comp_row["created_at"]))
-    basis_note = f"Reflects the most recent Computational Lab run, \"{comp_row['name']}\" ({comp_row['id'][:8]})."
+    basis_note = (
+        f"Reflects Computational Lab run \"{comp_row['name']}\" ({comp_row['id'][:8]})."
+        if run_id else
+        f"Reflects the most recent Computational Lab run, \"{comp_row['name']}\" ({comp_row['id'][:8]})."
+    )
 
     params_summary = [
         CountStat(key="params", label="Parameters", value=len(comp.get("params") or []),
@@ -137,7 +184,7 @@ def get_project_council(project_id: str) -> ResearchCouncilView:
     ]
 
     return ResearchCouncilView(
-        run=run, basis_note=basis_note, params_summary=params_summary,
+        basis_run=run, basis_note=basis_note, params_summary=params_summary,
         n_excluded_low_confidence=len(sim.get("excluded_low_confidence") or []),
         model_selection=model_selection, scenarios_run=sim.get("scenarios_run") or [],
         models_run=models_run, sensitivity_ranking=sensitivity_ranking,
