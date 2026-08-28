@@ -457,6 +457,16 @@ Full suite **747 passing** (from 719 at the start of this round), `tsc` clean, n
 
 **Deliberately still deferred:** Data Quality (its per-paper content is never persisted by `app.py`), Experiments (no real evaluation-run registry), and the Projects multi-project switcher (this dataset has exactly one project, so a switcher would be speculative UI). No real pipeline run has been executed from the new screen — that spends real LLM credits and is the user's call.
 
+## Phase 5 — Slice 13 (one shared title matcher; cross-links finished), 2026-08-28
+
+Started as a verification pass over the four Slice 10-12 bugs, all four confirmed genuinely fixed by functional check rather than by re-reading the diff: `pipeline_trace` present in the results dict independently of any caller callback; `GET /api/jobs` returning 200 and a list with no `/runs/jobs` route left; dash-normalised matching yielding 8 paper + 4 proposal links on real data (was 0); zero hardcoded copies of the stale "Runs created in the Streamlit workspace" sentence.
+
+**The verification found a fifth bug that had not been noticed.** The title-matching rule existed as **two identical private copies** — `runs_service._normalise_title` and `dashboard_service._normalise`. Two copies of a matching rule is precisely how cross-links silently stop working later: one copy gets a fix, the other doesn't, and the failure mode is *an empty list rather than an error*, so nothing looks broken. Consolidated into `apps/api/services/title_match.py::normalise_title`, imported by both; the test compares **function identity**, not behaviour, so a re-introduced copy fails the suite rather than passing until the two drift. While consolidating, the fold was widened to every typographic dash this pipeline actually emits (U+2010, U+2011, U+2012, U+2013, U+2014) instead of only the non-breaking hyphen that happened to be the one that bit.
+
+**Cross-linking finished** — Slice 12 had only done Gaps, leaving the work half-complete. Proposals now link to the gap they address; the pipeline records that relationship by *title*, not id, so it resolves by normalised-title match against the run's own gaps, and a gap named but absent from this run renders as plain text rather than a link that would 404 (the existing id line is kept for provenance). 4/4 real proposals link. Evidence now links to its source paper and needed **no backend change at all** — `EvidenceItemView.paper_filename` was already exactly the Paper Detail route param; 56/56 real items link, verified by clicking through rather than by inspecting the href.
+
+5 new backend tests, full suite **752 passing** (from 747), `tsc` clean, nine Playwright suites green (135 checks).
+
 ## Key decisions already made (don't re-litigate without a new ADR)
 
 - Architecture: **Option C, Staged Hybrid** (ADR-000) — infrastructure introduced per-phase, not upfront.
@@ -476,4 +486,10 @@ Full suite **747 passing** (from 719 at the start of this round), `tsc` clean, n
 
 ## Next action
 
-Awaiting your review of this planning set. Once reviewed/adjusted, Phase 0 (Epic 0.1, `09-epics-and-stories.md`) is the first implementation work — starting with generating a real baseline report from the existing pipeline.
+*(This section had gone stale — it still said "Phase 0 is the first implementation work" thirteen Phase 5 slices later. Corrected 2026-08-28.)*
+
+Phases 0-4 are complete; Phase 5 is at Slice 13 (see the per-slice sections above). Three things are open, none of them blocked on effort:
+
+1. **No real pipeline run has ever been started from the web app's `/runs/new` screen.** The screen is built and its job registry is tested, but pressing "Start run" spends real LLM credits, so the first live execution is deliberately left as your call.
+2. **Three screens remain deferred for lack of data, not lack of work:** Data Quality (per-paper completeness is a local variable in `app.py`, never persisted — the screen would be near-empty), Experiments (no evaluation-run registry exists to list), and the Projects multi-project switcher (this dataset has exactly one project). Each would need a backend change first, or would ship as speculative UI.
+3. Phase 6 (governance) still has no trigger — do not build it speculatively.
