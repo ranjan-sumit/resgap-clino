@@ -63,6 +63,19 @@ _CONTRADICTORY_RELATION_PAIRS = {
     frozenset({"aligned_with", "biased_toward"}),
 }
 
+# Relations that are directional INVERSES of another relation in
+# _CONTRADICTORY_RELATION_PAIRS: "X underperforms_on Y" states exactly the
+# same claim as "Y outperforms X". Conflicting-claim detection pools
+# relations by unordered entity pair, so these must first be flipped into
+# the canonical relation's direction -- otherwise two papers stating the
+# same claim in opposite syntactic forms look like a fabricated conflict.
+# Value: (canonical relation, flip endpoints). Only genuine directional
+# inverses belong here; symmetric opposites (extends/contradicts, ...)
+# mean opposite things regardless of direction and are NOT flipped.
+_INVERSE_RELATION_CANONICALIZATION = {
+    "underperforms_on": ("outperforms", True),
+}
+
 # Cap how many candidates any one signal can emit -- mirrors the existing
 # orphans[:10]/bridges[:10] truncation convention already used when this
 # graph data is fed into the LLM prompt (pipeline/gap_detector.py), so this
@@ -206,6 +219,11 @@ def _conflicting_relationship_gaps(entities: list, relationships: list) -> list[
         relation = (rel.get("relation") or "").strip().lower()
         if not relation:
             continue
+        canonical = _INVERSE_RELATION_CANONICALIZATION.get(relation)
+        if canonical:
+            relation, flip = canonical
+            if flip:
+                src, tgt = tgt, src
         pair_key = frozenset({_entity_key(src), _entity_key(tgt)})
         pair_relations.setdefault(pair_key, []).append((
             relation, rel.get("paper", ""), src.get("name", ""), tgt.get("name", ""),
@@ -215,7 +233,15 @@ def _conflicting_relationship_gaps(entities: list, relationships: list) -> list[
     gaps = []
     for pair_key, seen in pair_relations.items():
         relation_set = {s[0] for s in seen}
-        if len(relation_set) < 2:
+        # After inverse-relation canonicalization a genuine orientation
+        # conflict surfaces as the SAME canonical relation asserted in BOTH
+        # directions between the pair ("A outperforms B" vs "B outperforms
+        # A") -- still a contradiction, just not a name-level one, so the
+        # opposite-pairs check alone can't see it. Relations on a self-loop
+        # (x→x) have no orientation and can't conflict this way.
+        oriented = {(s[0], s[2], s[3]) for s in seen if s[2] and s[3] and s[2] != s[3]}
+        has_orientation_conflict = any((a, y, x) in oriented for (a, x, y) in oriented)
+        if len(relation_set) < 2 and not has_orientation_conflict:
             continue
         conflict_found = None
         for a in relation_set:
@@ -225,11 +251,25 @@ def _conflicting_relationship_gaps(entities: list, relationships: list) -> list[
                     break
             if conflict_found:
                 break
+        orientation_conflict = False
+        if not conflict_found and has_orientation_conflict:
+            # Same canonical relation in both directions -- a real
+            # orientation conflict. Report it as `a` vs the reversed `a`.
+            a = next(a for (a, x, y) in oriented if (a, y, x) in oriented)
+            conflict_found = (a, f"{a} (opposite direction)")
+            orientation_conflict = True
         if not conflict_found:
             continue
         a, b = conflict_found
         entries_a = [s for s in seen if s[0] == a]
         entries_b = [s for s in seen if s[0] == b]
+        if orientation_conflict:
+            # entries_a/entries_b above both match relation `a`; split them
+            # by direction so the description/evidence show both orientations.
+            dirs = {(s[2], s[3]) for s in entries_a}
+            (x_name, y_name) = next(iter(dirs))
+            entries_b = [s for s in entries_a if (s[2], s[3]) == (y_name, x_name)]
+            entries_a = [s for s in entries_a if (s[2], s[3]) == (x_name, y_name)]
         name_pair = f"{entries_a[0][2]} ↔ {entries_a[0][3]}"
         papers = sorted({s[1] for s in seen if s[1]})
         conflicting_entries = entries_a + entries_b
@@ -286,8 +326,9 @@ def _untested_combination_gaps(entities: list, relationships: list) -> list[dict
             papers2 = set(e2.get("papers", []))
             if papers1 & papers2:
                 continue  # co-mentioned in a shared paper -- not untested
-            # Require each to be non-trivially connected elsewhere -- an
-            # isolated entity is the orphan signal's job, not this one's.
+            # Require each to be connected elsewhere at all (>= 1 relation)
+            # -- a completely isolated entity is the orphan signal's job,
+            # not this one's.
             if connection_count.get(k1, 0) < 1 or connection_count.get(k2, 0) < 1:
                 continue
             gaps.append(_make_gap(

@@ -230,6 +230,31 @@ class ChatResultTests(unittest.TestCase):
         self.assertIsInstance(result, Failure)
         self.assertEqual(result.error.kind, "api_error")
 
+    def test_deadline_is_computed_before_create_is_invoked(self):
+        # create() itself can block up to TIMEOUT_SECS waiting for response
+        # headers -- the wall-clock deadline must start before create() is
+        # called, or the effective per-call timeout is up to 2x TIMEOUT_SECS.
+        import time as time_module
+        events = []
+
+        def fake_monotonic():
+            events.append("monotonic")
+            return 1000.0
+
+        def fake_create(*args, **kwargs):
+            events.append("create")
+            return _fake_stream("ok")
+
+        self.mock_client.chat.completions.create.side_effect = fake_create
+        with patch.object(time_module, "monotonic", fake_monotonic):
+            result = self.client.chat("system", "user")
+        self.assertIsInstance(result, Success)
+        # First monotonic read is the deadline computation; create() must
+        # come after it (the later monotonic reads are the stream loop's
+        # per-chunk deadline checks).
+        self.assertEqual(events[0], "monotonic")
+        self.assertEqual(events[1], "create")
+
     def test_vision_success_returns_success(self):
         self.mock_client.chat.completions.create.return_value = _fake_stream("a cat")
         result = self.client.vision("system", "what is this?", b"fake-image-bytes")

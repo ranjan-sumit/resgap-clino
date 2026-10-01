@@ -39,7 +39,7 @@ from pipeline.docling_parser import DOCLING_STAGE_VERSION, extract_with_docling
 from pipeline.evidence_extractor import extract_evidence_cached
 from pipeline.extraction_reconciler import reconcile_paper
 from pipeline.gap_challenger import GAP_CHALLENGER_STAGE_VERSION, run_challenge
-from pipeline.gap_detector import detect_gaps
+from pipeline.gap_detector import GapDetectionError, detect_gaps
 from pipeline.graph_builder import build_knowledge_graph
 from pipeline.graph_persistence import (
     GRAPH_PERSISTENCE_VERSION, connect_ok as arcadedb_connect_ok, save_graph_snapshot,
@@ -179,6 +179,7 @@ def run_full_pipeline(
     ref_resolution_diagnostics = None
     if options.extract_refs:
         progress("Stage 1B — Extracting & enriching references (50+ paper corpus)…", 14)
+        client.set_stage("Stage 1B — Reference Extraction")
 
         def ref_upd(_current, _total, msg):
             progress(f"Stage 1B — {msg}", 14)
@@ -299,6 +300,7 @@ def run_full_pipeline(
 
     # ── Stage 2C: Evidence Extraction (always runs) ───────────────────────
     progress("Stage 2C — Extracting evidence objects…", 35)
+    client.set_stage("Stage 2C — Evidence Extraction")
     evidence_objects: dict = {}
     total_evidence = 0
     for i, paper in enumerate(all_papers):
@@ -336,13 +338,29 @@ def run_full_pipeline(
 
         progress("Stage 4 — Detecting research gaps…", 50)
         client.set_stage("Stage 4 — Gap Detection")
-        gaps = detect_gaps(wiki, graph, context, client, domain_config=domain_cfg,
-                           evidence_objects=evidence_objects)
+        gap_detection_error = None
+        try:
+            gaps = detect_gaps(wiki, graph, context, client, domain_config=domain_cfg,
+                               evidence_objects=evidence_objects)
+        except GapDetectionError as e:
+            # B19 makes GapDetectionError deliberate (never fabricate gaps
+            # from an unparseable LLM response), but it must not kill the run
+            # before save_run and discard everything already fetched --
+            # degrade to the two non-LLM gap sources only, with the failure
+            # recorded, same philosophy as the B23 gate-blocked path.
+            gap_detection_error = str(e)
+            warn(f"LLM gap detection failed ({e}) -- using deterministic + "
+                 "graph-structural gap candidates only.")
+            gaps = []
         # Two additional, independent candidate-gap sources (no LLM call):
         # the deterministic pattern library and graph-structural signals.
         det_gaps = detect_deterministic_gaps(evidence_objects, context.get("domain", ""))
         graph_gaps = detect_graph_structural_gaps(graph)
         gaps = gaps + det_gaps + graph_gaps
+        if gap_detection_error:
+            _trace("Stage 4 — Gap Detection (LLM failed)",
+                  "degraded to deterministic + graph-structural sources",
+                  gap_detection_error, status="⚠️")
         # FR-7: a DEGRADED/FALLBACK graph downgrades confidence for gaps
         # whose entire evidentiary basis is that graph.
         gaps = apply_graph_quality_to_gaps(gaps, graph_quality)
@@ -399,6 +417,15 @@ def run_full_pipeline(
         progress("Saving fetched data", 75)
 
     corpus = assign_tiers(all_papers, ref_papers)
+
+    # build_wiki() contract: one page per parsed paper. zip() would silently
+    # truncate results["papers"] if that invariant ever broke -- say so
+    # loudly instead of dropping papers from a saved run.
+    if len(wiki["pages"]) != len(all_papers):
+        raise RuntimeError(
+            f"Wiki page count ({len(wiki['pages'])}) does not match parsed paper count "
+            f"({len(all_papers)}) -- refusing to silently drop papers from the run's results."
+        )
 
     results = {
         "papers": [

@@ -31,16 +31,26 @@ SECTION_PATTERNS = [
     r"references|bibliography",
 ]
 
+# A line is a section header only if it IS the keyword (case-insensitive),
+# optionally plural ("Methods"), preceded by numbering ("3. Methods") and/or
+# followed by punctuation or a trailing number ("REFERENCES:", "Methods 3").
+# A body sentence that merely contains a keyword ("We took an approach
+# based on...") must not be treated as a header.
+_SECTION_HEADER_RE = re.compile(
+    r"^(?:[0-9]+(?:\.[0-9]+)*\.?\s+|[IVXLCDM]+\.?\s+)?"
+    r"(?:" + "|".join(f"(?:{p})s?" for p in SECTION_PATTERNS) + r")"
+    r"[.:]?(?:\s+[0-9]+)?\s*$",
+    re.IGNORECASE,
+)
+
 
 def _detect_section(text: str) -> str | None:
     """Return a normalized section name if the line looks like a section header."""
-    clean = text.strip().lower()
+    clean = text.strip()
     if len(clean) > 80 or len(clean) < 2:
         return None
-    for pattern in SECTION_PATTERNS:
-        if re.search(pattern, clean):
-            # Return clean title-cased version
-            return text.strip()
+    if _SECTION_HEADER_RE.match(clean):
+        return clean
     return None
 
 

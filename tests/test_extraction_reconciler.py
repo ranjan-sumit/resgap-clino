@@ -162,6 +162,40 @@ class TableReconciliationTests(unittest.TestCase):
         self.assertEqual(field["confidence"], "low")
 
 
+class DoiDisambiguationLengthGateTests(unittest.TestCase):
+    """Regression cases for the different-DOI disambiguation heuristic.
+    Position fractions are measured against each text's OWN length, so
+    they are only meaningful when the two extractions are comparable in
+    size (the same 0.7 ratio the full_text confidence uses). A heavily
+    truncated extraction's fractions are stretched toward 1.0 and must not
+    be compared directly against a full extraction's fractions."""
+
+    def test_truncated_pymupdf_unrelated_doi_loses_to_full_docling(self):
+        # pymupdf: 1000 chars, unrelated DOI at fraction ~0.9 (abs ~905)
+        pymupdf_text = ("p" * 900) + " doi 10.5555/unrelated-doi " + ("p" * 73)
+        # docling: 50000 chars, the paper's own DOI at fraction ~0.01 (abs ~505)
+        docling_text = ("d" * 500) + " doi 10.1234/true-doi " + ("d" * 49478)
+
+        result = reconcile_paper(_pymupdf(pymupdf_text), _docling(docling_text), "p.pdf")
+
+        field = result["fields"]["doi"]
+        self.assertEqual(field["value"], "10.1234/true-doi")
+        self.assertEqual(field["source"], "docling")
+        self.assertEqual(field["confidence"], "medium")
+
+    def test_comparable_lengths_still_use_position_order(self):
+        # Lengths within 0.7 of each other -- the earliest-fraction rule
+        # applies unchanged.
+        pymupdf_text = "10.1111/own-doi " + ("x" * 4000)
+        docling_text = ("y" * 3000) + " 10.2222/other-doi " + ("y" * 1000)
+
+        result = reconcile_paper(_pymupdf(pymupdf_text), _docling(docling_text), "p.pdf")
+
+        field = result["fields"]["doi"]
+        self.assertEqual(field["value"], "10.1111/own-doi")
+        self.assertEqual(field["source"], "pymupdf")
+
+
 class DoiLlmRecoveryTests(unittest.TestCase):
     def test_recovery_skipped_when_doi_already_resolved(self):
         text = "10.1038/s41598-026-35440-6"

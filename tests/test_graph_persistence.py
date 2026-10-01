@@ -4,10 +4,13 @@ Mocked HTTP -- no live ArcadeDB server needed for this suite, matching
 this codebase's existing convention (live-server verification happens by
 hand, same as evals/benchmarks/ scripts).
 """
+import re
 import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
+
+import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -270,6 +273,179 @@ class DiffGraphSnapshotsTests(unittest.TestCase):
         self.assertEqual(diff["relationships_common"], [("x", "y", "predicts")])
         self.assertEqual(diff["relationships_only_in_b"], [("x", "z", "evaluated_on")])
         self.assertEqual(diff["relationships_only_in_a"], [])
+
+
+class _FakeArcadeDB:
+    """Minimal in-memory stand-in for the subset of ArcadeDB commands
+    save_graph_snapshot()/load_graph_snapshot() issue -- enough to verify
+    cross-command behavior (generational save_token scoping, delete
+    ordering) that per-call MagicMock return values can't express."""
+
+    def __init__(self):
+        self.entities = []   # dicts: @rid, run_id, save_token, entity fields
+        self.edges = []      # dicts: out/@rid pair, run_id, save_token, rel fields
+        self.runs = []       # GraphRun rows (dicts)
+        self._rid_seq = 0
+        self.call_count = 0
+        self.fail_predicate = None  # callable(cmd, params) -> raise mid-command
+
+    @staticmethod
+    def _is_stale(row, params):
+        token = row.get("save_token")
+        return token is None or token != params["save_token"]
+
+    def __call__(self, url, json=None, **kwargs):
+        self.call_count += 1
+        cmd = (json or {}).get("command", "")
+        params = (json or {}).get("params") or {}
+        if self.fail_predicate is not None and self.fail_predicate(cmd, params):
+            raise requests.exceptions.ConnectionError("simulated mid-save failure")
+        result = self._execute(cmd, params)
+        m = MagicMock()
+        m.raise_for_status.return_value = None
+        m.json.return_value = {"result": result}
+        return m
+
+    def _execute(self, cmd, params):
+        if "INSERT INTO GraphEntity" in cmd:
+            self._rid_seq += 1
+            rid = f"#1:{self._rid_seq}"
+            self.entities.append({
+                "@rid": rid, "run_id": params["run_id"],
+                "save_token": params.get("save_token"),
+                "entity_id": params["entity_id"], "name": params["name"],
+                "type": params["type"], "importance": params["importance"],
+                "papers": params["papers"],
+            })
+            return [{"@rid": rid}]
+        if "INSERT INTO GraphRun" in cmd:
+            self.runs.append(dict(params))
+            return []
+        if "UPDATE GraphRun" in cmd:
+            for r in self.runs:
+                if r["run_id"] == params["run_id"]:
+                    r.update(params)
+            return []
+        if "CREATE EDGE GraphRelation" in cmd:
+            m = re.search(r"FROM (#\d+:\d+) TO (#\d+:\d+)", cmd)
+            self.edges.append({
+                "out": m.group(1), "in": m.group(2),
+                "run_id": params["run_id"],
+                "save_token": params.get("save_token"),
+                "relation": params.get("relation"),
+                "paper": params.get("paper"), "evidence": params.get("evidence"),
+            })
+            return []
+        if "DELETE FROM GraphRelation" in cmd:
+            self.edges = [e for e in self.edges
+                          if not (e["run_id"] == params["run_id"]
+                                  and self._is_stale(e, params))]
+            return []
+        if "DELETE VERTEX FROM GraphEntity" in cmd:
+            dead = {e["@rid"] for e in self.entities
+                    if e["run_id"] == params["run_id"] and self._is_stale(e, params)}
+            self.entities = [e for e in self.entities if e["@rid"] not in dead]
+            self.edges = [e for e in self.edges
+                          if e["out"] not in dead and e["in"] not in dead]
+            return []
+        if "FROM GraphRun WHERE" in cmd:
+            return [r for r in self.runs if r["run_id"] == params["run_id"]]
+        if "FROM GraphEntity WHERE" in cmd:
+            rows = [e for e in self.entities if e["run_id"] == params["run_id"]]
+            if "save_token = :save_token" in cmd:
+                rows = [e for e in rows if e.get("save_token") == params["save_token"]]
+            return rows
+        if "FROM GraphRelation WHERE" in cmd:
+            rows = []
+            for e in self.edges:
+                if e["run_id"] != params["run_id"]:
+                    continue
+                if "save_token = :save_token" in cmd \
+                        and e.get("save_token") != params["save_token"]:
+                    continue
+                src = next((x["entity_id"] for x in self.entities if x["@rid"] == e["out"]), "")
+                tgt = next((x["entity_id"] for x in self.entities if x["@rid"] == e["in"]), "")
+                rows.append({"source": src, "target": tgt, "relation": e["relation"],
+                             "paper": e["paper"], "evidence": e["evidence"]})
+            return rows
+        # ensure_schema's CREATE ... / create database need no emulation.
+        return []
+
+
+class SnapshotAtomicityTests(unittest.TestCase):
+    """save_graph_snapshot() used to DELETE the prior snapshot before
+    inserting anything -- any mid-save failure destroyed the last good
+    snapshot. The new generation must be inserted first and the DELETE
+    scoped so it can never touch the new rows."""
+
+    def _entity(self, eid, name):
+        return {"id": eid, "name": name, "type": "concept",
+                "importance": "high", "papers": ["P1"]}
+
+    @patch("pipeline.graph_persistence.requests.post")
+    def test_mid_save_failure_preserves_prior_snapshot(self, mock_post):
+        fake = _FakeArcadeDB()
+        mock_post.side_effect = fake
+
+        v1 = {
+            "entities": [self._entity("a", "Alpha"), self._entity("b", "Beta")],
+            "relationships": [{"source": "a", "target": "b", "relation": "predicts",
+                               "paper": "P1", "evidence": "e"}],
+        }
+        save_graph_snapshot("run_1", "Run", v1, config=_TEST_CONFIG)
+        loaded = load_graph_snapshot("run_1", config=_TEST_CONFIG)
+        self.assertEqual([e["name"] for e in loaded["entities"]], ["Alpha", "Beta"])
+        self.assertEqual(len(loaded["relationships"]), 1)
+
+        # Re-save that dies partway through inserting the new generation's
+        # entities. The DELETEs must never have run yet, and load must
+        # still return exactly the prior snapshot.
+        v2 = {"entities": v1["entities"] + [self._entity("c", "Gamma")],
+              "relationships": []}
+        fake.fail_predicate = lambda cmd, params: (
+            "INSERT INTO GraphEntity" in cmd and params.get("entity_id") == "c")
+        with self.assertRaises(requests.exceptions.ConnectionError):
+            save_graph_snapshot("run_1", "Run", v2, config=_TEST_CONFIG)
+
+        loaded_after = load_graph_snapshot("run_1", config=_TEST_CONFIG)
+        self.assertEqual(loaded_after, loaded)
+
+    @patch("pipeline.graph_persistence.requests.post")
+    def test_successful_resave_replaces_prior_snapshot_completely(self, mock_post):
+        fake = _FakeArcadeDB()
+        mock_post.side_effect = fake
+
+        v1 = {
+            "entities": [self._entity("a", "Alpha"), self._entity("b", "Beta")],
+            "relationships": [{"source": "a", "target": "b", "relation": "predicts"}],
+        }
+        v2 = {
+            "entities": [self._entity("c", "Gamma")],
+            "relationships": [],
+        }
+        save_graph_snapshot("run_1", "Run", v1, config=_TEST_CONFIG)
+        save_graph_snapshot("run_1", "Run", v2, config=_TEST_CONFIG)
+
+        loaded = load_graph_snapshot("run_1", config=_TEST_CONFIG)
+        self.assertEqual([e["name"] for e in loaded["entities"]], ["Gamma"])
+        self.assertEqual(loaded["relationships"], [])
+        # Exactly one GraphRun row -- re-saving stays idempotent per run_id.
+        self.assertEqual(len(fake.runs), 1)
+
+    @patch("pipeline.graph_persistence.requests.post")
+    def test_resave_delete_is_scoped_to_prior_save_token(self, mock_post):
+        fake = _FakeArcadeDB()
+        mock_post.side_effect = fake
+
+        save_graph_snapshot("run_1", "Run",
+                            {"entities": [self._entity("a", "Alpha")], "relationships": []},
+                            config=_TEST_CONFIG)
+        delete_cmds = [c.kwargs["json"]["command"] for c in mock_post.call_args_list
+                       if "DELETE" in c.kwargs["json"]["command"]]
+        self.assertTrue(delete_cmds)
+        for cmd in delete_cmds:
+            self.assertIn("save_token != :save_token", cmd)
+            self.assertIn("run_id = :run_id", cmd)
 
 
 if __name__ == "__main__":

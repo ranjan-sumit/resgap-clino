@@ -61,18 +61,21 @@ def score_graph_quality(graph: dict, wiki: dict | None = None) -> dict:
 
     # duplicate_rate: entities sharing a normalized name with an earlier
     # entity -- the LLM extracted the same real-world concept twice under
-    # different ids/casing/whitespace.
+    # different ids/casing/whitespace. Entities with no name cannot be
+    # duplicates, so the rate is over named entities only.
     seen_names = set()
     duplicate_count = 0
+    named_count = 0
     for e in entities:
         norm = _normalize_name(e.get("name", ""))
         if not norm:
             continue
+        named_count += 1
         if norm in seen_names:
             duplicate_count += 1
         else:
             seen_names.add(norm)
-    duplicate_rate = round(duplicate_count / len(entities), 3) if entities else 0.0
+    duplicate_rate = round(duplicate_count / named_count, 3) if named_count else 0.0
 
     # unresolved_entity_rate: relationships whose source/target don't
     # resolve to any real entity by id OR normalized name -- the same

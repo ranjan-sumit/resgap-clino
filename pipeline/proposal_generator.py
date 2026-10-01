@@ -118,7 +118,13 @@ def generate_proposals(gaps: list, wiki: dict, context: dict, client, domain_con
     ]
 
     if not actionable_gaps:
-        actionable_gaps = gaps  # Use all if all are marked solved
+        # Fall back to all gaps only when every gap is explicitly marked
+        # solved -- any other status (missing, unknown, malformed) must not
+        # silently widen the proposal set beyond open/partial gaps.
+        if all(g.get("validation_status") == "solved" for g in gaps):
+            actionable_gaps = gaps
+        else:
+            return []
 
     # Compact wiki context
     pages = wiki.get("pages", [])
@@ -164,9 +170,24 @@ Generate 3-5 concrete research paper proposals.
 Prioritize gaps marked as 'open' over 'partial'.
 Make proposals specific enough that a researcher could begin working on them immediately."""
 
+    # B30 fix (2026-09-08): this call was hitting the default 120s
+    # timeout/2-retries/5000-max_tokens repeatedly in real runs (3
+    # consecutive live failures at exactly this stage this session, with
+    # 3 different immediate symptoms -- a dead fallback model, a plain
+    # timeout, then a mid-stream deadline timeout -- pointing at the same
+    # underlying cause: this call is genuinely the heaviest single LLM call
+    # in the pipeline, not a model-specific fluke). Generating up to 5
+    # detailed multi-field proposals from a "thinking" model (which spends
+    # real max_tokens budget on hidden reasoning_content before any real
+    # JSON, per B24's same finding for knowledge-graph extraction) needs
+    # more of both than the shared chat_json() defaults give it. Raised
+    # to 300s/3 retries/10000 tokens -- generous headroom, not a precise
+    # measurement (no successful timing sample exists yet to measure
+    # against), consistent with B24's own "measure later, add margin now"
+    # approach when no real measurement exists.
     raw = unwrap(client.chat_json(
         inject_domain_into_proposal_prompt(PROPOSAL_SYSTEM_PROMPT, domain_config or {}),
-        user_prompt, max_tokens=5000
+        user_prompt, max_tokens=10000, timeout_seconds=300, max_retries=3
     ))
 
     try:

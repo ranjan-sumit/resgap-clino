@@ -210,11 +210,22 @@ def compute_corpus_quality(paper_scores: list[dict], ref_diagnostics: dict,
     duplicates_skipped = d.get("duplicates_skipped", 0)
     resolved = enriched + title_only
 
+    # `unresolved` is counted per input entry by the enrichment loop itself
+    # (entries whose enrichment raised and produced no title-only
+    # resolution). Deriving it as structured_entries - resolved instead
+    # mixes units -- structured_entries is the pre-cap, pre-dedup LLM-parse
+    # count while resolved is post-cap post-dedup -- and systematically
+    # understates it. Diagnostics shapes from before that per-entry counter
+    # existed fall back to the old derived estimate.
+    unresolved = d.get("unresolved")
+    if unresolved is None:
+        unresolved = max(structured_entries - resolved, 0)
+
     reference_funnel = {
         "detected": raw_entries,
         "parsed": structured_entries,
         "resolved": resolved,
-        "unresolved": max(structured_entries - resolved, 0),
+        "unresolved": unresolved,
         # "quarantined" doesn't exist as a real status yet -- Epic 1.3's
         # resolution status model introduces VERIFIED/ACCEPTED/QUARANTINED/
         # UNRESOLVED/REJECTED. 0 here is honest (nothing is being screened

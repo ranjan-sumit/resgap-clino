@@ -106,7 +106,20 @@ def reconcile_paper(pymupdf_result: dict, docling_result: dict, filename: str) -
         # a principled signal for this case -- it happened to pick the
         # right answer on that first real paper by coincidence, not because
         # length actually indicates which DOI belongs to the paper itself.
-        if pos_pymupdf <= pos_docling:
+        # Position fractions are only trustworthy when the two texts are
+        # comparable in length (the same 0.7 ratio the full_text confidence
+        # uses): a heavily truncated extraction's positions are stretched
+        # toward 1.0, so its fraction ranking is meaningless. When they are
+        # not comparable, fall back to absolute offsets.
+        longer = max(pymupdf_chars, docling_chars)
+        shorter = min(pymupdf_chars, docling_chars)
+        texts_comparable = longer == 0 or shorter / longer >= 0.7
+        if texts_comparable:
+            pos_pymupdf_cmp, pos_docling_cmp = pos_pymupdf, pos_docling
+        else:
+            pos_pymupdf_cmp = pos_pymupdf * pymupdf_chars
+            pos_docling_cmp = pos_docling * docling_chars
+        if pos_pymupdf_cmp <= pos_docling_cmp:
             doi_value, doi_source = doi_pymupdf, "pymupdf"
         else:
             doi_value, doi_source = doi_docling, "docling"

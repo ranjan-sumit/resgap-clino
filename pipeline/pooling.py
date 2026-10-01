@@ -57,6 +57,8 @@ def _pool(y_values: list, variances: list, tau_squared: float) -> tuple[float, f
         raise ValueError("_pool: y_values and variances must be the same length")
     weights = [1.0 / (v + tau_squared) for v in variances]
     total_weight = sum(weights)
+    if total_weight <= 0 or not np.isfinite(total_weight):
+        raise ValueError("_pool: non-positive or non-finite total weight")
     pooled_estimate = sum(w * y for w, y in zip(weights, y_values)) / total_weight
     pooled_variance = 1.0 / total_weight
     return pooled_estimate, pooled_variance
@@ -94,7 +96,13 @@ def pool_risk_ratios(params: list) -> dict:
 
         lo = p.get("ci_lower")
         hi = p.get("ci_upper")
-        if lo is not None and hi is not None and lo > 0 and hi > lo:
+        try:
+            lo = float(lo) if lo is not None else None
+            hi = float(hi) if hi is not None else None
+        except (TypeError, ValueError):
+            lo, hi = None, None
+        if (lo is not None and hi is not None and np.isfinite(lo)
+                and np.isfinite(hi) and lo > 0 and hi > lo):
             se = (np.log(hi) - np.log(lo)) / (2 * Z_95)
         else:
             # No usable CI (missing, or an inverted/zero-width pair --

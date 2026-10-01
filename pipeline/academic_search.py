@@ -323,7 +323,19 @@ Return ONLY JSON: {{"status": "open|partial|solved", "reasoning": "1 sentence ex
     # Fallback: if we found recent papers, call it partial. Never cache
     # this -- it's reached by an LLMCallError, a response with no JSON
     # match, AND malformed JSON alike, none of which are a real assessment.
-    recent = [p for p in found_papers if p.get("year") and p["year"] >= 2022]
+    # "Recent" is relative to the current year so the heuristic doesn't
+    # silently rot as the calendar advances; a missing or non-numeric year
+    # just doesn't count as recent.
+    from datetime import datetime
+    recent_cutoff = datetime.now().year - 4
+    recent = []
+    for p in found_papers:
+        try:
+            year = int(p.get("year"))
+        except (TypeError, ValueError):
+            continue
+        if year >= recent_cutoff:
+            recent.append(p)
     if len(recent) >= 2:
         return {"status": "partial", "reasoning": "Related recent work found but gap may still exist."}, False
     return {"status": "open", "reasoning": "No directly relevant recent papers found."}, False
@@ -377,10 +389,17 @@ def validate_gaps(gaps: list, client, domain_config: dict = None, ss_api_key: st
             query = f"{query} {boost}"
             query = _truncate_at_word_boundary(query, 150)  # keep query length reasonable
 
-        # Search both sources
-        ss_papers = _search_semantic_scholar(query, limit=5, api_key=ss_api_key)
+        # Search both sources -- the status-aware variants, so a provider
+        # outage is distinguishable from a genuine empty result. Both
+        # providers failing means the search itself never happened; whatever
+        # _assess_coverage concludes from an empty paper list is a degraded
+        # guess, not a real "gap is open" verdict, and must not be cached
+        # (AD-2 -- a transient outage frozen into the cache would serve
+        # "open" forever).
+        ss_papers, ss_ok = _search_semantic_scholar_with_status(query, limit=5, api_key=ss_api_key)
         time.sleep(0.5)
-        arxiv_papers = _search_arxiv(query, limit=3)
+        arxiv_papers, arxiv_ok = _search_arxiv_with_status(query, limit=3)
+        providers_failed = not ss_ok and not arxiv_ok
 
         all_papers = ss_papers + arxiv_papers
 
@@ -392,8 +411,9 @@ def validate_gaps(gaps: list, client, domain_config: dict = None, ss_api_key: st
         gap["search_query_used"] = query
 
         # B18 fix: only cache a genuine, confident assessment -- never the
-        # degraded heuristic fallback (AD-2).
-        if cacheable_gap and cacheable:
+        # degraded heuristic fallback (AD-2), and never a both-providers-
+        # failed "no papers" guess.
+        if cacheable_gap and cacheable and not providers_failed:
             save_cached_gap_validation(cache_key, gap_hash, domain_hash, GAP_VALIDATION_STAGE_VERSION, {
                 "validation_status": gap["validation_status"],
                 "validation_reasoning": gap["validation_reasoning"],

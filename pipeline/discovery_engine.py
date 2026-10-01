@@ -7,7 +7,7 @@ Produces novel, testable hypotheses with full evidence chains.
 """
 import json
 import re
-from utils.azure_client import unwrap, LLMCallError
+from utils.azure_client import unwrap
 
 FINGERPRINT_PROMPT = """You are a research analyst. For this single research paper,
 identify what it UNIQUELY contributes that is NOT commonly known.
@@ -138,11 +138,15 @@ def extract_paper_fingerprints(wiki: dict, client, domain_config: dict = None) -
             ))
             fp = _robust_parse(raw, dict)
             if not fp:
-                fp = {"paper_title": title, "unique_contribution": "Could not extract"}
-        except LLMCallError:
+                fp = {"paper_title": title, "unique_contribution": "Could not extract",
+                      "_extract_failed": True}
+        except Exception:
             # B12 fix: one paper's failed LLM call must not abort fingerprinting
             # for the rest of the corpus — same stub as the empty-parse case.
-            fp = {"paper_title": title, "unique_contribution": "Could not extract"}
+            # Any failure (LLMCallError or an unexpected error from the client
+            # or parser) degrades this page to the stub, never the whole loop.
+            fp = {"paper_title": title, "unique_contribution": "Could not extract",
+                  "_extract_failed": True}
         fingerprints.append(fp)
 
     return fingerprints
@@ -212,9 +216,14 @@ def run_discovery_engine(
     Returns fingerprints, combinations, and novel hypotheses.
     """
     fingerprints  = extract_paper_fingerprints(wiki, client, domain_config)
-    combinations  = generate_cross_paper_combinations(fingerprints, wiki, client)
+    # Failed stubs ("Could not extract") are tagged with _extract_failed and
+    # must never reach combination/hypothesis generation or be counted as
+    # real fingerprints -- they carry no actual paper content.
+    usable        = [fp for fp in fingerprints if not fp.get("_extract_failed")]
+    failed        = len(fingerprints) - len(usable)
+    combinations  = generate_cross_paper_combinations(usable, wiki, client)
     hypotheses    = generate_novel_hypotheses(
-        combinations, fingerprints, params, wiki, context, client
+        combinations, usable, params, wiki, context, client
     )
 
     return {
@@ -222,8 +231,9 @@ def run_discovery_engine(
         "combinations":  combinations,
         "hypotheses":    hypotheses,
         "stats": {
-            "papers_fingerprinted": len(fingerprints),
-            "combinations_found":   len(combinations),
-            "hypotheses_generated": len(hypotheses),
+            "papers_fingerprinted":        len(usable),
+            "papers_fingerprint_failed":   failed,
+            "combinations_found":          len(combinations),
+            "hypotheses_generated":        len(hypotheses),
         },
     }

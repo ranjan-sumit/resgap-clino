@@ -61,6 +61,16 @@ def _any_keyword(text_lower: str, keywords: tuple) -> bool:
     return any(kw in text_lower for kw in keywords)
 
 
+def _negation_guarded_text(text_lower: str, negation_phrases: tuple) -> str:
+    """Blank out negated occurrences of an availability-style keyword so a
+    statement like "data not publicly available" can't suppress the
+    no_data_code_availability gap it actually affirms. See that pattern's
+    `negation_phrases` entry."""
+    for phrase in negation_phrases:
+        text_lower = text_lower.replace(phrase, " ")
+    return text_lower
+
+
 # Each pattern: id, name, gap_type (matches the existing lowercase UI enum
 # used by pipeline/gap_detector.py's LLM prompt: methodology|application|
 # dataset|evaluation|theory|benchmark), why, and a trigger spec.
@@ -247,6 +257,14 @@ PATTERNS = [
         "keywords": ("code available", "data available", "github.com", "open-source",
                      "open source", "data access", "upon reasonable request",
                      "publicly available", "repository"),
+        # Negation guard: "data not publicly available" / "no repository"
+        # AFFIRMS this gap, but it still contains the positive keyword --
+        # negated occurrences are blanked before the keyword check so they
+        # can't suppress the gap.
+        "negation_phrases": ("not publicly available", "not made publicly available",
+                             "not available", "no repository", "not released",
+                             "not open-source", "not open source",
+                             "code not available", "data not available"),
     },
     {
         "id": "unreported_class_imbalance_handling", "gap_type": "evaluation",
@@ -311,7 +329,7 @@ def _matching_evidence(evidence_objects_by_paper: dict, types: tuple, keywords: 
             elif etype == _FUTURE_INTENT_TYPE:
                 continue
             if _any_keyword(_norm(o.get("text", "")), keywords):
-                hits.append({**o, "paper_id": o.get("paper_id", paper_id)})
+                hits.append({**o, "paper_id": o.get("paper_id") or paper_id})
     return hits
 
 
@@ -380,6 +398,9 @@ def detect_deterministic_gaps(evidence_objects_by_paper: dict, domain: str) -> l
             if not _corpus_has_type(evidence_objects_by_paper, pattern["requires_types"]):
                 continue  # nothing to evaluate against -- an extraction gap, not this gap
             text = _corpus_text(evidence_objects_by_paper, pattern["search_types"])
+            negation_phrases = pattern.get("negation_phrases")
+            if negation_phrases:
+                text = _negation_guarded_text(text, negation_phrases)
             if not _any_keyword(text, pattern["keywords"]):
                 gaps.append(_make_gap(pattern, all_paper_ids))
             continue

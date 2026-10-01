@@ -86,37 +86,52 @@ class AgentConfig:
 # Real, measured values already in production at each site, not
 # invented here -- see each config's own comment for provenance.
 
+# B30 fix (2026-09-08): timeout_seconds raised 120->300, max_retries 2->3
+# on all three configs below. Real live evidence, not a guess: 4 real
+# pipeline runs this session against the same 3-paper corpus each failed
+# on a timeout, but at a DIFFERENT stage each time it got far enough to
+# matter (Stage 6 proposal generation twice, then Stage 4 gap detection)
+# -- ruling out a single slow call site and pointing instead at this
+# NVIDIA account's endpoint being broadly slow/degraded right now,
+# matching this codebase's own prior documented finding of the same
+# symptom (module docstring above, and RESUME.md's B22 section: "master
+# model took 38.3s then 230.1s for a trivial call"). 120s/2 retries
+# (effectively ~1-2 real attempts before falling back) isn't enough
+# margin under these conditions for ANY of the three real LLM call sites
+# below, not just whichever one happened to fail first.
 EVIDENCE_EXTRACTOR = AgentConfig(
     role="Evidence Extractor",
     # pipeline/evidence_extractor.py's extract_llm_evidence(): raised
     # 800->1500 (2026-08-21) to fit ~15 items across the 7 LLM-covered
     # evidence types without truncation -- see that file's own comment.
     max_tokens=1500,
-    timeout_seconds=120,
-    max_retries=2,
+    timeout_seconds=300,
+    max_retries=3,
     model="openai/gpt-oss-20b",  # MASTER_MODEL, utils/azure_client.py
 )
 
 GAP_GENERATOR = AgentConfig(
     role="Gap Generator",
-    # pipeline/gap_detector.py's detect_gaps(): unchanged from its
-    # existing inline literal (4000) -- not a B24-style measured
-    # bottleneck like graph extraction's 24000, no evidence this needs
-    # raising.
+    # pipeline/gap_detector.py's detect_gaps(): max_tokens unchanged from
+    # its existing inline literal (4000) -- not a B24-style measured
+    # token-budget bottleneck like graph extraction's 24000; this
+    # session's real failure here was a plain wall-clock timeout, not a
+    # truncated/malformed response, so only timeout_seconds/max_retries
+    # needed raising (see B30 comment above).
     max_tokens=4000,
-    timeout_seconds=120,
-    max_retries=2,
+    timeout_seconds=300,
+    max_retries=3,
     model="openai/gpt-oss-20b",
 )
 
 GAP_CHALLENGER = AgentConfig(
     role="Gap Challenger",
-    # pipeline/gap_challenger.py's judge_candidates(): unchanged from
-    # its existing inline literal (2000), one scoped call per gap,
-    # capped at max_candidates=8 -- see that file's own comment.
+    # pipeline/gap_challenger.py's judge_candidates(): max_tokens
+    # unchanged from its existing inline literal (2000), one scoped call
+    # per gap, capped at max_candidates=8 -- see that file's own comment.
     max_tokens=2000,
-    timeout_seconds=120,
-    max_retries=2,
+    timeout_seconds=300,
+    max_retries=3,
     max_search_calls=2,  # Semantic Scholar + arXiv, per query family
     model="openai/gpt-oss-20b",
 )

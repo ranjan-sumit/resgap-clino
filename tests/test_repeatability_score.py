@@ -76,6 +76,19 @@ class RankingCorrelationTests(unittest.TestCase):
         self.assertIsNotNone(corr)
         self.assertLess(corr, 0)
 
+    def test_identical_gaps_get_distinct_ranks_not_first_match(self):
+        # Two gap dicts with the SAME title in one run: equality-based
+        # list.index() collapsed both onto the first-match position, giving
+        # duplicate ranks and a distorted correlation. Positional identity
+        # pairing keeps each occurrence's true position.
+        from scipy.stats import spearmanr
+        run_a = [_g("A"), _g("A"), _g("B")]
+        run_b = [_g("B"), _g("A"), _g("A")]   # B moves first; the two A's swap
+        corr = _ranking_correlation(run_a, run_b)
+        self.assertIsNotNone(corr)
+        expected, _ = spearmanr([0, 1, 2], [1, 1, 0])  # true distinct positions
+        self.assertAlmostEqual(corr, float(expected), places=6)
+
 
 class ConfidenceDriftTests(unittest.TestCase):
     def test_no_common_gaps_is_undefined(self):

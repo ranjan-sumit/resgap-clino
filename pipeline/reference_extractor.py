@@ -14,6 +14,7 @@ import re
 import json
 import time
 import html
+import difflib
 import requests
 import urllib.parse
 from typing import Optional
@@ -23,6 +24,13 @@ from utils.database import compute_cache_key, get_cached_reference, save_cached_
 # Bumped whenever enrich_reference's lookup/normalization logic changes, so
 # old cached entries don't silently keep serving stale-logic results (AD-3).
 REFERENCE_STAGE_VERSION = 1
+
+# Minimum normalized title similarity for a search-API candidate to be
+# accepted as the same paper the reference's title points at. Without this,
+# the first hit carrying an abstract wins even when its title belongs to a
+# different paper, and the wrong metadata gets cached under the queried
+# title.
+_TITLE_MATCH_THRESHOLD = 0.85
 
 # ── API constants ──────────────────────────────────────────────────────────────
 SS_SEARCH   = "https://api.semanticscholar.org/graph/v1/paper/search"
@@ -97,7 +105,11 @@ def _entry_to_reference(entry: str) -> dict:
         before_year = clean[:year_match.start()].strip(" .;:-")
         # Vancouver/MDPI style often has authors first, then title, then journal/year.
         parts = [p.strip() for p in re.split(r'\.\s+', before_year) if p.strip()]
-        if len(parts) >= 2:
+        if len(parts) >= 3:
+            # authors. title. journal. -- the journal name is the LAST
+            # segment, so parts[-1] would cite the journal as the title.
+            title = parts[-2]
+        elif len(parts) == 2:
             title = parts[-1]
         elif after_year:
             title = after_year.split(". ")[0].strip()
@@ -210,16 +222,38 @@ def _safe_parse_list(raw: str) -> list:
 
 # ── Academic API lookups ───────────────────────────────────────────────────────
 
+def _normalize_title_text(title) -> str:
+    t = re.sub(r'[^a-z0-9 ]', ' ', str(title or '').lower())
+    return re.sub(r'\s+', ' ', t).strip()
+
+
+def _title_similarity(a: str, b: str) -> float:
+    na, nb = _normalize_title_text(a), _normalize_title_text(b)
+    if not na or not nb:
+        return 0.0
+    return difflib.SequenceMatcher(None, na, nb).ratio()
+
+
 def _ss_search_by_title(title: str) -> Optional[dict]:
-    """Search Semantic Scholar by title. Returns best match or None."""
+    """Search Semantic Scholar by title. Returns the best title match or
+    None when no candidate clears the similarity threshold -- abstract
+    presence breaks near-ties only, it never substitutes for a title match."""
     try:
-        params = {"query": title[:200], "limit": 3, "fields": SS_FIELDS}
+        params = {"query": title[:200], "limit": 5, "fields": SS_FIELDS}
         r = requests.get(SS_SEARCH, params=params, headers=_HEADERS, timeout=_TIMEOUT)
         if r.status_code == 200:
             items = r.json().get("data", [])
+            best, best_key = None, None
             for item in items:
-                if item.get("title") and item.get("abstract"):
-                    return item
+                if not item.get("title"):
+                    continue
+                score = _title_similarity(title, item["title"])
+                if score < _TITLE_MATCH_THRESHOLD:
+                    continue
+                key = (score, bool(item.get("abstract")))
+                if best_key is None or key > best_key:
+                    best, best_key = item, key
+            return best
     except Exception:
         pass
     return None
@@ -308,6 +342,10 @@ def _crossref_search(title: str) -> Optional[dict]:
             items = r.json().get("message", {}).get("items", [])
             if items:
                 item = items[0]
+                cand_title = ((item.get("title") or [""])[0]
+                              if isinstance(item.get("title"), list) else item.get("title", ""))
+                if _title_similarity(title, cand_title) < _TITLE_MATCH_THRESHOLD:
+                    return None
                 doi = item.get("DOI", "")
                 return {
                     "title":    ((item.get("title") or [""])[0]
@@ -576,6 +614,7 @@ def extract_and_enrich_references(
         "doi_entries": 0,
         "enriched": 0,
         "title_only": 0,
+        "unresolved": 0,
         "duplicates_skipped": 0,
         "errors": [],
     }
@@ -655,6 +694,7 @@ def extract_and_enrich_references(
                 enriched = enrich_reference(ref, delay=0.25)
             except Exception as e:
                 diagnostics["errors"].append(f"{filename}: enrichment failed for {ref.get('title','Unknown')[:80]}: {e}")
+                diagnostics["unresolved"] += 1
                 enriched = {
                     **ref,
                     "abstract": "",
@@ -665,10 +705,24 @@ def extract_and_enrich_references(
             enriched["found_in_paper"] = filename
             enriched.setdefault("raw_reference", ref.get("raw_reference", ""))
 
-            if doi_key:
-                seen_dois.add(doi_key)
-            if title_key and len(title_key) > 10:
-                seen_titles.add(title_key)
+            # Recompute the dedupe identity from what enrichment actually
+            # RESOLVED, not from the raw input: two entries citing the same
+            # paper via different titles (or a typo'd DOI) resolve to one
+            # DOI and must be emitted once, under the resolved identity.
+            out_doi_key   = _norm(enriched.get("doi")) or doi_key
+            out_title_key = (_norm(enriched.get("title")) or title_key)[:60]
+
+            if out_doi_key and out_doi_key in seen_dois:
+                diagnostics["duplicates_skipped"] += 1
+                continue
+            if out_title_key and len(out_title_key) > 10 and out_title_key in seen_titles:
+                diagnostics["duplicates_skipped"] += 1
+                continue
+
+            if out_doi_key:
+                seen_dois.add(out_doi_key)
+            if out_title_key and len(out_title_key) > 10:
+                seen_titles.add(out_title_key)
 
             if enriched.get("tier") == 2 and enriched.get("abstract"):
                 diagnostics["enriched"] += 1

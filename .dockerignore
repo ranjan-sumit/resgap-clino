@@ -1,0 +1,18 @@
+# VCS / agent infra
+.git
+.claude
+.pytest_cache
+**/__pycache__
+**/*.pyc
+
+
+# Never bake secrets into images (.env is mounted at runtime / read by compose env_file)
+.env
+.env.*
+!*.example
+
+# Local data / archives
+data
+*.zip
+_bmad-output
+storage

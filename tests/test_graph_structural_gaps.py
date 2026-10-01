@@ -108,6 +108,42 @@ class ConflictingRelationshipTests(unittest.TestCase):
         conflict_gaps = [g for g in gaps if g["pattern_id"] == "graph_conflicting_relationship"]
         self.assertEqual(len(conflict_gaps), 1)
 
+    def test_same_claim_in_opposite_syntactic_forms_does_not_fire(self):
+        # "Model A outperforms Dataset X" and "Dataset X underperforms_on
+        # Model A" are the SAME directional claim from two papers -- the
+        # inverse-relation canonicalization must merge them, not flag them.
+        entities = [_entity("m1", "Model A", "model", ["P1"]),
+                    _entity("d1", "Dataset X", "dataset", ["P1", "P2"])]
+        relationships = [
+            _rel("m1", "d1", "outperforms", paper="P1"),
+            _rel("d1", "m1", "underperforms_on", paper="P2"),
+        ]
+        graph = {"entities": entities, "relationships": relationships,
+                 "orphan_concepts": [], "missing_bridges": []}
+        gaps = detect_graph_structural_gaps(graph)
+        conflict_gaps = [g for g in gaps if g["pattern_id"] == "graph_conflicting_relationship"]
+        self.assertEqual(conflict_gaps, [])
+
+    def test_same_orientation_opposite_relations_still_fire(self):
+        # "Model A outperforms Dataset X" (P1) vs "Model A underperforms_on
+        # Dataset X" (P2) is a GENUINE conflict: same endpoints, same
+        # orientation, opposite claims. Canonicalizing the inverse relation
+        # turns it into "outperforms" asserted in both directions -- which
+        # must still emit a contradictory-claims gap.
+        entities = [_entity("m1", "Model A", "model", ["P1"]),
+                    _entity("d1", "Dataset X", "dataset", ["P1", "P2"])]
+        relationships = [
+            _rel("m1", "d1", "outperforms", paper="P1"),
+            _rel("m1", "d1", "underperforms_on", paper="P2"),
+        ]
+        graph = {"entities": entities, "relationships": relationships,
+                 "orphan_concepts": [], "missing_bridges": []}
+        gaps = detect_graph_structural_gaps(graph)
+        conflict_gaps = [g for g in gaps if g["pattern_id"] == "graph_conflicting_relationship"]
+        self.assertEqual(len(conflict_gaps), 1)
+        self.assertIn("Model A", conflict_gaps[0]["title"])
+        self.assertIn("Dataset X", conflict_gaps[0]["title"])
+
 
 class UntestedCombinationTests(unittest.TestCase):
     def test_two_disconnected_differently_typed_high_importance_entities_fire(self):

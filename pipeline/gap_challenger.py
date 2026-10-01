@@ -36,9 +36,10 @@ stage's order unchanged -- the funnel never breaks because a stage
 didn't work.
 """
 import json
+import os
 import re
 
-from utils.azure_client import unwrap
+from utils.azure_client import LLMCallError, unwrap
 from pipeline.academic_search import (
     _search_semantic_scholar_with_status, _search_arxiv_with_status,
     _truncate_at_word_boundary, _strip_negation_framing,
@@ -225,31 +226,37 @@ def run_search_funnel(query_families: list[str], ss_api_key: str = "",
     """
     provider_success = {p: False for p in _PROVIDERS}
     all_candidates = []
+    families_executed = 0
 
     for query in query_families:
+        family_executed = False
         ss_results, ss_ok = _search_semantic_scholar_with_status(query, limit=per_query_limit, api_key=ss_api_key)
         if ss_ok:
             provider_success["semantic_scholar"] = True
+            family_executed = True
         all_candidates.extend(ss_results)
 
         arxiv_results, arxiv_ok = _search_arxiv_with_status(query, limit=max(2, per_query_limit // 2))
         if arxiv_ok:
             provider_success["arxiv"] = True
+            family_executed = True
         all_candidates.extend(arxiv_results)
+
+        if family_executed:
+            families_executed += 1
 
     deduped = _dedupe_by_title(all_candidates)
     filtered, metadata_filtered_count = _filter_by_metadata(deduped, year_from=year_from, year_to=year_to)
     reranked, rerank_used = _rerank_candidates(rerank_query, filtered, nvidia_api_key)
 
     providers_responded = sum(1 for ok in provider_success.values() if ok)
-    query_family_execution_rate = 1.0 if query_families else 0.0
+    query_family_execution_rate = (families_executed / len(query_families)) if query_families else 0.0
     provider_response_rate = providers_responded / len(_PROVIDERS)
     # §5.2's exact formula: fraction of planned query families executed x
-    # fraction of queried providers that responded successfully. Every
-    # planned query family IS executed here (no batching/rate-limit queue
-    # yet), so that factor is always 1.0 today -- kept as an explicit,
-    # separate factor (not simplified away) so a future queued/batched
-    # search path can populate it honestly without changing this formula.
+    # fraction of queried providers that responded successfully. A query
+    # family counts as executed only if at least one provider call in it
+    # succeeded (ok=True) -- a family where every provider call failed was
+    # planned but not actually executed.
     search_coverage_score = round(query_family_execution_rate * provider_response_rate, 3)
 
     return {
@@ -280,12 +287,31 @@ For EACH candidate paper below, judge:
   IMPORTANT: do NOT set this true just because a paper's finding is the opposite of how the gap is phrased. Many gaps are phrased as an absence ("X is missing", "X is unestablished") -- a paper that directly demonstrates X is exactly the evidence that CLOSES that kind of gap, not a contradiction. Only use contradicts_gap for papers that disagree with OTHER papers in this same candidate list.
 - "confidence": "high", "medium", or "low" -- how confident are you this paper genuinely addresses the gap (not just keyword-matches)
 
-Return ONLY a JSON array, one entry per candidate paper, same order as given:
+Return ONLY a JSON array, one entry per candidate paper, same order as given.
+Each entry MUST carry the candidate's title copied verbatim from the list
+below (it is the join key back to the candidate) plus the judged fields:
 [
   {{"title": "...", "relevant": true, "relevance_type": "direct", "contradicts_gap": false, "confidence": "high"}}
 ]
 
+Use real JSON booleans for relevant/contradicts_gap (true/false), lowercase
+"direct"/"adjacent" for relevance_type, and lowercase "high"/"medium"/"low"
+for confidence.
+
 Candidates with weak/coincidental keyword overlap should be relevant=false -- do not inflate relevance to make the gap look more "solved" than it is."""
+
+
+def _parse_bool(value) -> bool:
+    """Strict boolean coercion -- a JSON string "false" is truthy in Python,
+    so the naive bool(j.get("relevant", False)) counted a judge marking a
+    paper irrelevant as direct evidence. Real booleans pass through; the
+    literal strings "true"/"false" are handled explicitly; anything else
+    (including "False", "0", None, missing) is False."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() == "true"
+    return False
 
 
 def _parse_judgments(raw: str) -> list | None:
@@ -313,15 +339,40 @@ def _parse_judgments(raw: str) -> list | None:
     return None
 
 
+def _norm_title(title: str) -> str:
+    return re.sub(r'\s+', ' ', (title or '').strip().lower())
+
+
+def _index_judgments_by_title(judgments: list) -> dict:
+    """Judge output is keyed to candidates by the title field each judgment
+    carries, not by list position -- position silently misaligns whenever
+    the judge reorders, drops, or adds an entry. Later duplicate titles
+    overwrite earlier ones (the last judgment wins)."""
+    by_title = {}
+    for j in judgments:
+        if not isinstance(j, dict):
+            continue
+        key = _norm_title(j.get("title", ""))
+        if key:
+            by_title[key] = j
+    return by_title
+
+
 def judge_candidates(gap: dict, candidates: list, client, max_candidates: int = 8) -> list:
     """§5.1's CHALLENGED state: "relevance judgment and contradiction
     analysis have both completed against the searched results." One
     scoped LLM call for the whole candidate set (not one call per
     candidate), per the LLM-use discipline. Returns the candidates capped
-    to `max_candidates`, each annotated with the judged fields; on any
-    parse/call failure, every candidate gets `relevant: False` (never
-    silently counted as supporting evidence it wasn't actually judged to
-    provide -- a failure here must not accidentally read as CLOSED)."""
+    to `max_candidates`, each annotated with the judged fields plus a
+    `judged` flag.
+
+    A candidate is `judged` only if the call succeeded AND its judgment was
+    actually located in the parsed output (matched by normalized title).
+    Unjudged candidates get `relevant: False` -- never silently counted as
+    supporting evidence it wasn't actually judged to provide -- and are
+    excluded from apply_decision_table() by run_challenge(), so a judge
+    failure resolves to INSUFFICIENT_EVIDENCE (ADR-008) instead of
+    masquerading as "searched, nothing found" -> OPEN."""
     capped = candidates[:max_candidates]
     if not capped:
         return []
@@ -335,25 +386,34 @@ def judge_candidates(gap: dict, candidates: list, client, max_candidates: int = 
         title=gap.get("title", ""), description=gap.get("description", ""),
     )
 
+    raw = None
     try:
         raw = unwrap(client.chat_json(
             system_prompt, user_prompt, max_tokens=GAP_CHALLENGER.max_tokens,
             timeout_seconds=GAP_CHALLENGER.timeout_seconds, max_retries=GAP_CHALLENGER.max_retries,
         ))
-    except Exception:
+    except LLMCallError:
         raw = None
 
     judgments = _parse_judgments(raw) if raw else None
+    by_title = _index_judgments_by_title(judgments) if judgments else {}
 
     judged = []
-    for i, c in enumerate(capped):
-        j = judgments[i] if judgments and i < len(judgments) and isinstance(judgments[i], dict) else {}
+    for c in capped:
+        j = by_title.get(_norm_title(c.get("title", "")))
+        if j is None:
+            judged.append({**c, "relevant": False, "relevance_type": None,
+                           "contradicts_gap": False, "confidence": "low", "judged": False})
+            continue
+        relevant = _parse_bool(j.get("relevant"))
+        relevance_type = (j.get("relevance_type") or "").strip().lower() or None
         judged.append({
             **c,
-            "relevant": bool(j.get("relevant", False)),
-            "relevance_type": j.get("relevance_type") if j.get("relevant") else None,
-            "contradicts_gap": bool(j.get("contradicts_gap", False)) if j.get("relevant") else False,
-            "confidence": j.get("confidence", "low"),
+            "relevant": relevant,
+            "relevance_type": relevance_type if relevant else None,
+            "contradicts_gap": _parse_bool(j.get("contradicts_gap")) if relevant else False,
+            "confidence": (j.get("confidence") or "low").strip().lower(),
+            "judged": True,
         })
     return judged
 
@@ -412,14 +472,17 @@ def apply_decision_table(search_coverage_score: float, judged_candidates: list) 
     }
 
 
-def run_challenge(gap: dict, client, ss_api_key: str = "", domain_config: dict = None) -> dict:
+def run_challenge(gap: dict, client, ss_api_key: str = "", domain_config: dict = None,
+                  nvidia_api_key: str = "") -> dict:
     """Runs the full GENERATED -> ... -> terminal-status pipeline for one
     gap. Returns a dict with the lifecycle state reached, the terminal
     status (once CHALLENGED), and the full inspectable funnel (§5.3) --
     merged into the gap dict's own keys by the caller, not returned as a
     replacement for the gap.
 
-    Does NOT mutate `gap` -- returns a fresh dict the caller merges in,
+    `nvidia_api_key` is the key for the rerank endpoint -- NOT the LLM
+    `client`'s key (that one belongs to a different provider and gets a
+    401 from NVIDIA). Falls back to the NVIDIA_API_KEY env var. Does NOT mutate `gap` -- returns a fresh dict the caller merges in,
     consistent with how deterministic_gap_patterns.py/graph_structural_
     gaps.py build new dicts rather than mutating shared state."""
     # Clinova Phase 4, Epic 4.4 (Scientific Lineage): makes the challenge
@@ -443,10 +506,13 @@ def run_challenge(gap: dict, client, ss_api_key: str = "", domain_config: dict =
         result["challenger_reason"] = "No usable query text could be generated from this gap."
         return result
 
-    rerank_query = f"{gap.get('title', '')}. {gap.get('description', '')}".strip()
+    rerank_query = _strip_negation_framing(
+        f"{gap.get('title', '')}. {gap.get('description', '')}".strip()
+    )
+    rerank_key = nvidia_api_key or os.environ.get("NVIDIA_API_KEY", "")
     funnel = run_search_funnel(
         query_families, ss_api_key=ss_api_key,
-        rerank_query=rerank_query, nvidia_api_key=getattr(client, "api_key", ""),
+        rerank_query=rerank_query, nvidia_api_key=rerank_key,
     )
     result["challenger_state"] = "SEARCHED"
     result["challenge_funnel"] = {
@@ -465,6 +531,21 @@ def run_challenge(gap: dict, client, ss_api_key: str = "", domain_config: dict =
     judged = judge_candidates(gap, funnel["candidates"], client)
     result["challenger_state"] = "CHALLENGED"
 
+    if not all(c.get("judged") for c in judged):
+        # ADR-008: the judge LLM call or JSON parse failed (or returned
+        # judgments that couldn't be matched back to candidates) -- these
+        # candidates were never actually judged, so the decision table must
+        # not run on them. Unjudged input is not evidence of anything and
+        # resolves to INSUFFICIENT_EVIDENCE, never to OPEN ("searched,
+        # nothing found") or CLOSED.
+        result["challenger_status"] = "INSUFFICIENT_EVIDENCE"
+        result["challenger_reason"] = ("Relevance judgment failed or could not be matched to "
+                                       "candidates -- evidence is insufficient, not negative.")
+        result["challenge_funnel"]["judged"] = False
+        result["challenge_funnel"]["judged_candidates"] = judged[:10]
+        return result
+
+    result["challenge_funnel"]["judged"] = True
     decision = apply_decision_table(funnel["search_coverage_score"], judged)
     result["challenger_status"] = decision["status"]
     result["challenge_funnel"]["relevant_count"] = decision["relevant_count"]

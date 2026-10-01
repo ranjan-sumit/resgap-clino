@@ -120,7 +120,7 @@ def _robust_parse(raw: str, expected: type = list):
 def extract_parameters(wiki: dict, papers: list, client) -> list:
     """Extract all quantitative parameters including linguistic conversions."""
     all_params = []
-    wiki_pages = wiki.get("pages", [])
+    wiki_pages = list(wiki.get("pages", []))
 
     # B6 FIX: zip() silently truncates to the shorter list.
     # If wiki compilation failed for any paper, we'd silently lose those papers.
@@ -154,7 +154,7 @@ def extract_parameters(wiki: dict, papers: list, client) -> list:
                 context_parts.append(f"[{sec_name}]\n{str(sec_text)[:3000]}")
 
         for tbl in paper.get("tables", [])[:6]:
-            context_parts.append(f"[Table p.{tbl['page']}]\n{tbl['content'][:1200]}")
+            context_parts.append(f"[Table p.{tbl.get('page')}]\n{tbl['content'][:1200]}")
 
         context = "\n\n".join(context_parts)
 

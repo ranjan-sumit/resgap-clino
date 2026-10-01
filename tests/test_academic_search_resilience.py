@@ -125,8 +125,8 @@ class ValidateGapsApiKeyThreadingTests(unittest.TestCase):
 
     def test_ss_api_key_is_passed_through_to_search(self):
         client = MagicMock()
-        with patch("pipeline.academic_search._search_semantic_scholar", return_value=[]) as mock_ss, \
-             patch("pipeline.academic_search._search_arxiv", return_value=[]), \
+        with patch("pipeline.academic_search._search_semantic_scholar_with_status", return_value=([], True)) as mock_ss, \
+             patch("pipeline.academic_search._search_arxiv_with_status", return_value=([], True)), \
              patch("pipeline.academic_search.time.sleep"):
             gap = {"title": "A Gap Title", "description": "A description."}
             validate_gaps([gap], client, domain_config=None, ss_api_key="my-ss-key")

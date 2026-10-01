@@ -120,6 +120,29 @@ class DoclingCacheTests(unittest.TestCase):
         self.assertEqual(segments[0], {"text": "www.nature.com/scientificreports", "page": 1, "label": "page_header"})
         self.assertEqual(segments[2], {"text": "A real body paragraph.", "page": 2, "label": "text"})
 
+    @patch("pipeline.docling_parser.save_cached_docling_extraction")
+    @patch("pipeline.docling_parser.get_cached_docling_extraction")
+    def test_cache_write_failure_does_not_discard_conversion_result(self, mock_get_cached, mock_save_cached):
+        # A docling conversion takes ~90s on this machine -- a cache-write
+        # error after all that work must not throw away the real result
+        # (mirrors pipeline/reference_extractor.py's save guard).
+        mock_get_cached.return_value = None
+        mock_save_cached.side_effect = Exception("db locked")
+
+        fake_doc = MagicMock()
+        fake_doc.export_to_markdown.return_value = "extracted markdown text"
+        fake_doc.tables = []
+        fake_doc.texts = []
+        fake_module = MagicMock()
+        fake_module.DocumentConverter.return_value = fake_converter = MagicMock()
+        fake_converter.convert.return_value = MagicMock(document=fake_doc)
+
+        with patch.dict("sys.modules", {"docling.document_converter": fake_module}):
+            result = extract_with_docling(self.tmp.name, "p.pdf")
+
+        self.assertFalse(result["from_cache"])
+        self.assertEqual(result["full_text"], "extracted markdown text")
+
 
 if __name__ == "__main__":
     unittest.main()

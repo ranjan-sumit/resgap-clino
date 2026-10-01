@@ -153,5 +153,20 @@ class ApplyGraphQualityToGapsTests(unittest.TestCase):
         self.assertEqual(gaps[0]["confidence"], "high")
 
 
+class DuplicateRateNamedEntitiesTests(unittest.TestCase):
+    def test_empty_named_entities_are_excluded_from_the_denominator(self):
+        # Entities with no name cannot be duplicates; counting them in the
+        # denominator biased the rate downward.
+        entities = [
+            {"id": "e1", "name": "Model A", "papers": []},
+            {"id": "e2", "name": "model a", "papers": []},
+            {"id": "e3", "name": "", "papers": []},
+            {"id": "e4", "papers": []},  # no name key at all
+        ]
+        result = score_graph_quality(_graph(entities, []))
+        # 1 duplicate over 2 named entities, not 1 over 4 total entities
+        self.assertEqual(result["duplicate_rate"], round(1 / 2, 3))
+
+
 if __name__ == "__main__":
     unittest.main()

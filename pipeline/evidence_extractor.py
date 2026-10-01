@@ -44,7 +44,11 @@ from packages.research_schemas.evidence_object import (
 # the "4 of 13 evidence types unextracted" gap. Cached evidence lists from
 # before this change are missing these types entirely -- must not be
 # served as if they were extracted (AD-3's stage_logic_version convention).
-EVIDENCE_STAGE_VERSION = 2
+# Bumped 2 -> 3: the cache key now includes the Docling text_segments hash.
+# A result cached from a run without Docling (Provenance.page=None
+# everywhere) must not be served to a later run that has Docling segments
+# and could resolve real provenance -- and vice versa.
+EVIDENCE_STAGE_VERSION = 3
 
 _DETERMINISTIC_FIELD_MAP = {
     "methods": "Method",
@@ -80,6 +84,17 @@ Rules:
 - Omit a type entirely if it is genuinely not stated in the paper. Never invent a value to fill every type."""
 
 
+# Docling labels that tag NON-body content. Provenance must never resolve
+# against these: a running header or page number is repeated on every page,
+# so first-match-in-document-order would cite evidence to page 1 (or the
+# nearest header page) instead of the page the quote actually appears on.
+_NON_BODY_LABELS = frozenset({"page_header", "page_footer", "page_number"})
+
+# Minimum normalized length for a segment to win by being a substring of a
+# longer quote -- shorter substrings are too weak as provenance evidence.
+_MIN_SEGMENT_MATCH_CHARS = 20
+
+
 def _build_section_map(text_segments: list) -> list:
     """Returns [{"text", "page", "section"}, ...] -- `section` is the most
     recent section_header segment's text seen before this one, so a body
@@ -89,6 +104,8 @@ def _build_section_map(text_segments: list) -> list:
     for seg in text_segments or []:
         if seg.get("label") == "section_header":
             current_section = seg.get("text")
+            continue
+        if seg.get("label") in _NON_BODY_LABELS:
             continue
         mapped.append({"text": seg.get("text", ""), "page": seg.get("page"), "section": current_section})
     return mapped
@@ -101,7 +118,9 @@ def _resolve_provenance(quote: str, mapped_segments: list) -> Provenance:
 
     for seg in mapped_segments:
         seg_norm = seg["text"].lower()
-        if quote_norm in seg_norm or seg_norm in quote_norm:
+        if quote_norm in seg_norm:
+            return Provenance(page=seg["page"], section=seg["section"], text_span=None)
+        if len(seg_norm) >= _MIN_SEGMENT_MATCH_CHARS and seg_norm in quote_norm:
             return Provenance(page=seg["page"], section=seg["section"], text_span=None)
 
     # No exact/substring match (the wiki-compiled or LLM-derived text is a
@@ -251,8 +270,14 @@ def extract_evidence(paper_id: str, wiki_page: dict, docling_result: dict = None
     return det_objects + llm_objects, {"deterministic": det_diag, "llm": llm_diag}
 
 
-def _evidence_content_hash(paper_id: str, wiki_page: dict) -> str:
-    canonical = json.dumps({"paper_id": paper_id, "wiki_page": wiki_page},
+def _evidence_content_hash(paper_id: str, wiki_page: dict, docling_result: dict = None) -> str:
+    segments = (docling_result or {}).get("text_segments") or []
+    segment_material = [
+        {"text": s.get("text", ""), "page": s.get("page"), "label": s.get("label")}
+        for s in segments
+    ]
+    canonical = json.dumps({"paper_id": paper_id, "wiki_page": wiki_page,
+                            "docling_segments": segment_material},
                             sort_keys=True, default=str)
     return hashlib.sha256(canonical.encode()).hexdigest()
 
@@ -261,22 +286,22 @@ def extract_evidence_cached(paper_id: str, wiki_page: dict, docling_result: dict
                              client=None, use_llm: bool = True):
     """Story 2.2.1: cache-aside wrapper around extract_evidence(), same
     AD-2/AD-3 pattern as every other Epic-2-style cache in this codebase.
-    Content-addressed on (paper_id, wiki_page) -- text_segments influence
-    *provenance* quality, not *which* evidence is extracted, so they are
-    deliberately excluded from the hash (matches this codebase's existing
-    convention of hashing only what actually changes the extraction
-    decision, not every input that happens to be available).
+    Content-addressed on (paper_id, wiki_page, docling text_segments) --
+    the text_segments decide which provenance pages get resolved, so a
+    result extracted without Docling (page=None everywhere) must not be
+    served to a run that has Docling segments, and vice versa.
 
     Returns (evidence_dicts, diagnostics, from_cache). Evidence Objects are
     always returned as dicts (via to_dict()) -- consistent shape whether
     served from cache or freshly extracted, so callers don't need to
-    special-case reconstruction.
+    special-case reconstruction. `diagnostics` always carries a
+    "from_cache" flag (True/False) regardless of which path produced it.
 
     Never caches a result where the LLM half failed (AD-2's "never cache a
     failure" rule) -- the deterministic-only evidence would otherwise be
     permanently frozen in place of what should have been a fuller result
     once the transient failure clears."""
-    content_hash = _evidence_content_hash(paper_id, wiki_page)
+    content_hash = _evidence_content_hash(paper_id, wiki_page, docling_result)
     cache_key = f"{content_hash}:none:{EVIDENCE_STAGE_VERSION}"
 
     cached = get_cached_evidence_objects(cache_key)
@@ -284,6 +309,7 @@ def extract_evidence_cached(paper_id: str, wiki_page: dict, docling_result: dict
         return cached, {"deterministic": None, "llm": None, "from_cache": True}, True
 
     objects, diagnostics = extract_evidence(paper_id, wiki_page, docling_result, client, use_llm)
+    diagnostics["from_cache"] = False
     evidence_dicts = [to_dict(o) for o in objects]
 
     llm_diag = diagnostics.get("llm")

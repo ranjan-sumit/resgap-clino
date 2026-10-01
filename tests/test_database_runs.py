@@ -153,5 +153,34 @@ class GetRunPapersTests(_IsolatedSchemaTestCase):
         self.assertEqual(result[0]["filename"], "b.pdf")
 
 
+class SameSecondSaveRunTests(_IsolatedSchemaTestCase):
+    def test_two_same_name_runs_started_in_the_same_second_both_survive(self):
+        # Regression: run_id was md5(name + second-resolution timestamp),
+        # so two runs with the same name started in the same second (API
+        # double-submit, two tabs) collided -- the second save's ON CONFLICT
+        # DO UPDATE silently overwrote the first run's row AND deleted its
+        # papers while both jobs reported success.
+        import datetime as datetime_module
+
+        papers_a = [{"filename": "a.pdf", "wiki": {"title": "Paper A"}, "tier": 1}]
+        papers_b = [{"filename": "b.pdf", "wiki": {"title": "Paper B"}, "tier": 1}]
+        frozen_now = datetime_module.datetime(2026, 1, 1, 12, 0, 0)
+        with patch.object(db, "datetime") as mock_datetime:
+            mock_datetime.now.return_value = frozen_now
+            rid_a = db.save_run("Double Submit", _results(papers=papers_a))
+            rid_b = db.save_run("Double Submit", _results(papers=papers_b))
+
+        # Distinct 12-hex-char ids, and the FIRST run's row + papers were
+        # not overwritten by the second save.
+        self.assertNotEqual(rid_a, rid_b)
+        self.assertRegex(rid_a, r"^[0-9a-f]{12}$")
+        self.assertRegex(rid_b, r"^[0-9a-f]{12}$")
+        self.assertEqual(db.load_run(rid_a)["results"]["papers"], papers_a)
+        self.assertEqual(db.load_run(rid_b)["results"]["papers"], papers_b)
+        self.assertEqual({p["filename"] for p in db.get_run_papers(rid_a)}, {"a.pdf"})
+        self.assertEqual({p["filename"] for p in db.get_run_papers(rid_b)}, {"b.pdf"})
+        self.assertEqual(len(db.list_runs()), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

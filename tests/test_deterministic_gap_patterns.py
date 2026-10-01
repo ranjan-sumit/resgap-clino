@@ -165,6 +165,34 @@ class FutureWorkNotCountedAsDoneTests(unittest.TestCase):
         self.assertNotIn("no_prospective_deployment_evidence", ids)
 
 
+class AvailabilityNegationGuardTests(unittest.TestCase):
+    """A paper stating its data/code is NOT available affirms the
+    no_data_code_availability gap -- the negated statement still contains
+    the positive keyword ("not publicly available" contains "publicly
+    available") and must not suppress it."""
+
+    def test_negated_availability_statement_still_fires_the_gap(self):
+        corpus = {"P1": [_ev("Method",
+                             "the source data is not publicly available and no repository is provided")]}
+        gaps = detect_deterministic_gaps(corpus, "Healthcare AI")
+        self.assertIn("no_data_code_availability", [g["pattern_id"] for g in gaps])
+
+    def test_positive_availability_statement_still_suppresses_the_gap(self):
+        corpus = {"P1": [_ev("Method", "our code is available on github.com")]}
+        gaps = detect_deterministic_gaps(corpus, "Healthcare AI")
+        self.assertNotIn("no_data_code_availability", [g["pattern_id"] for g in gaps])
+
+    def test_positive_availability_in_another_paper_still_suppresses_corpus_wide(self):
+        # Corpus-level semantics unchanged: a genuinely positive statement
+        # anywhere suppresses the gap, even next to a negated one.
+        corpus = {
+            "P1": [_ev("Method", "the clinical data is not publicly available", paper_id="P1")],
+            "P2": [_ev("Method", "code available on github.com", paper_id="P2")],
+        }
+        gaps = detect_deterministic_gaps(corpus, "Healthcare AI")
+        self.assertNotIn("no_data_code_availability", [g["pattern_id"] for g in gaps])
+
+
 class PatternLibraryIntegrityTests(unittest.TestCase):
     def test_every_pattern_has_a_unique_id(self):
         ids = [p["id"] for p in PATTERNS]

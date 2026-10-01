@@ -200,5 +200,33 @@ class SamplePooledRiskTests(unittest.TestCase):
         self.assertLess(mean, pooled["pooled_ratio"] * 2)
 
 
+class PoolCiGuardTests(unittest.TestCase):
+    def test_all_infinite_cis_fall_back_to_default_se_no_nan(self):
+        # inf bounds used to pass hi > lo -> se=inf -> weight 0 for every
+        # param -> total_weight 0 -> division by zero -> NaN pooled estimate.
+        params = [_ratio(2.0, float("inf"), float("inf")),
+                  _ratio(3.0, float("inf"), float("inf"))]
+        result = pool_risk_ratios(params)
+        self.assertEqual(result["n_studies"], 2)
+        self.assertTrue(np.isfinite(result["pooled_ratio"]))
+        self.assertTrue(np.isfinite(result["ci_lower"]))
+        self.assertTrue(np.isfinite(result["ci_upper"]))
+
+    def test_infinite_ci_behaves_identically_to_no_ci(self):
+        good = _ratio(2.0, 1.8, 2.2)
+        inf_ci = _ratio(5.0, float("inf"), float("inf"))
+        no_ci = _ratio(5.0)
+        result_inf = pool_risk_ratios([good, inf_ci])
+        result_no_ci = pool_risk_ratios([good, no_ci])
+        self.assertAlmostEqual(result_inf["tau_squared"], result_no_ci["tau_squared"], places=6)
+        self.assertAlmostEqual(result_inf["pooled_ratio"], result_no_ci["pooled_ratio"], places=6)
+
+    def test_string_ci_bounds_do_not_raise_uncaught(self):
+        params = [_ratio(2.0, "not-a-number", "also-not"), _ratio(3.0, 1.0, 5.0)]
+        result = pool_risk_ratios(params)
+        self.assertEqual(result["n_studies"], 2)
+        self.assertTrue(np.isfinite(result["pooled_ratio"]))
+
+
 if __name__ == "__main__":
     unittest.main()

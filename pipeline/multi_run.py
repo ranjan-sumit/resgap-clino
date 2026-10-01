@@ -194,8 +194,13 @@ def merge_council_runs(runs: list) -> dict:
     """
     Merge N council run results into one unified result.
     Every unique finding is preserved. Confidence tagged by frequency.
+    Runs that errored out contribute no findings and are not counted in
+    the frequency denominator -- 2 agreeing successes out of 3 attempts
+    is a Consensus, not a Likely.
     """
     n = len(runs)
+    n_success = sum(1 for r in runs if not r.get("error"))
+    n_runs = n_success if n_success > 0 else n
 
     # Collect all items across runs
     raw_novel    = []
@@ -236,12 +241,12 @@ def merge_council_runs(runs: list) -> dict:
             all_agents.append(agent)
 
     # Group and tag everything
-    novel_groups    = _group_novel_findings(raw_novel, n)
-    clinical_groups = _group_items(raw_clinical, n)
-    research_groups = _group_items(raw_research, n)
-    steps_groups    = _group_items(raw_steps, n)
-    limits_groups   = _group_items(raw_limits, n)
-    uncert_groups   = _group_items(raw_uncerts, n)
+    novel_groups    = _group_novel_findings(raw_novel, n_runs)
+    clinical_groups = _group_items(raw_clinical, n_runs)
+    research_groups = _group_items(raw_research, n_runs)
+    steps_groups    = _group_items(raw_steps, n_runs)
+    limits_groups   = _group_items(raw_limits, n_runs)
+    uncert_groups   = _group_items(raw_uncerts, n_runs)
 
     # Build summary stats
     consensus_count = sum(1 for g in novel_groups if g["confidence"] == "Consensus")

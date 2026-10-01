@@ -1,0 +1,32 @@
+{
+  "$schema": "internal://clinova/branding-theme-v1",
+  "product_name": "Clinova Research Intelligence Platform",
+  "product_wordmark": "Clinova",
+  "product_descriptor": "Research Intelligence",
+  "tagline": "Evidence → Gaps → Hypotheses → Studies",
+  "engine_codename": "resgap-core",
+  "colors": {
+    "clinova_blue": "#0000C9",
+    "clinova_deep_blue": "#0000A0",
+    "clinova_light_blue": "#85BDFB",
+    "clinova_cyan": "#3D96F7",
+    "brand_tint": "#F0F2FF",
+    "brand_tint_deep": "#EEF1FF",
+    "brand_border": "#D9DEF8",
+    "success": "#0E9F6E",
+    "warning": "#D97706",
+    "critical": "#DC2626",
+    "neutral_gray": "#4A4A6A",
+    "white": "#FFFFFF",
+    "chrome_bg": "#0B0D14",
+    "chrome_bg_deep": "#08090F",
+    "chrome_border": "#1E2230",
+    "chrome_text": "#E8EAF2",
+    "chrome_muted": "#8B90A8"
+  },
+  "fonts": {
+    "display": "'DM Serif Display', serif",
+    "body": "'DM Sans', sans-serif",
+    "mono": "'DM Mono', monospace"
+  }
+}

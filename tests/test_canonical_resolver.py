@@ -91,6 +91,15 @@ class PriorityChainTests(unittest.TestCase):
         r2 = resolve_canonical_identity({"doi": "10.1038/s41598-026-35440-6"})
         self.assertEqual(r1["identity_key"], r2["identity_key"])
 
+    def test_int_and_float_year_produce_same_identity(self):
+        # JSON round-trips can turn 2020 into 2020.0 -- the title+author+year
+        # fallback key must not treat them as different papers.
+        base = {"title": "Some Real Paper Title", "authors": ["Smith J"]}
+        r1 = resolve_canonical_identity({**base, "year": 2020})
+        r2 = resolve_canonical_identity({**base, "year": 2020.0})
+        self.assertEqual(r1["identity_level"], "title_author_year")
+        self.assertEqual(r1["identity_key"], r2["identity_key"])
+
 
 class ResolveStatusTests(unittest.TestCase):
     def test_status_mapping(self):

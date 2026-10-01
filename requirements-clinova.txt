@@ -4,7 +4,6 @@
 -r requirements.txt
 docling>=2.121.0
 
-# Phase 5, Epic 5.1 (apps/api) -- FastAPI thin wrapper over pipeline/utils.
-# pydantic arrives transitively with fastapi; not pinned separately.
-fastapi>=0.115.0
-uvicorn[standard]>=0.32.0
+# fastapi/uvicorn removed 2026-10-01: apps/api was archived (Streamlit-only
+# going forward, see _archive/react-fastapi-stack/README.md). Re-add if
+# that stack is ever restored.

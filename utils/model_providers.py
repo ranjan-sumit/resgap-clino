@@ -60,10 +60,25 @@ PROVIDER_REGISTRY = {
     "nvidia": ProviderConfig(
         key="nvidia", label="NVIDIA NIM (current default)",
         base_url="https://integrate.api.nvidia.com/v1", api_key_env="NVIDIA_API_KEY",
-        default_model="openai/gpt-oss-20b", fallback_model="openai/gpt-oss-120b",
+        # B28 fix (2026-09-08): openai/gpt-oss-120b reached NVIDIA end-of-life
+        # on 2026-09-03 (live HTTP 410 Gone) -- removed from known_models.
+        # B29 (2026-09-08): tried swapping to genuinely smaller models
+        # (meta/llama-3.2-3b-instruct, ibm/granite-3.0-8b-instruct, plus 6
+        # more candidates) -- ALL returned live HTTP 404 "not found for
+        # account" on a real chat/completions call, despite some appearing
+        # in NVIDIA's /v1/models catalog. This account's real entitlement
+        # is a small fixed allowlist; gpt-oss-20b is already the fastest
+        # model in it per this codebase's own prior live benchmarking
+        # (see utils/azure_client.py's MASTER_MODEL comment). Reverted
+        # default_model to gpt-oss-20b; fallback_model is now kimi-k3
+        # (live-tested HTTP 200 just now) instead of deepseek-v4-flash-0731
+        # (entitled but timed out on a trivial live test call -- kept in
+        # known_models as a manually-selectable option, just not the
+        # default fallback while it's unreliable).
+        default_model="openai/gpt-oss-20b", fallback_model="moonshotai/kimi-k3",
         known_models=(
-            "openai/gpt-oss-20b", "openai/gpt-oss-120b",
-            "deepseek-ai/deepseek-v4-flash-0731", "moonshotai/kimi-k3",
+            "openai/gpt-oss-20b",
+            "moonshotai/kimi-k3", "deepseek-ai/deepseek-v4-flash-0731",
         ),
         verified_live=True,
     ),

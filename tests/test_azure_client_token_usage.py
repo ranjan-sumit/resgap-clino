@@ -119,5 +119,70 @@ class TokenUsageInstrumentationTests(unittest.TestCase):
         self.assertEqual(result.value, "recovered")
 
 
+class VisionTokenUsageTests(unittest.TestCase):
+    """vision() now honors the same token-instrumentation contract as
+    chat(): stream_options is only requested when a TokenMeter is present,
+    captured usage is recorded (attributed to VISION_MODEL, not the text
+    master model), and a provider that rejects stream_options degrades
+    once to an unmetered -- never fabricated -- call."""
+
+    def setUp(self):
+        self._support_patcher = patch.dict("utils.azure_client._STREAM_OPTIONS_SUPPORT", {}, clear=True)
+        self._support_patcher.start()
+        self.addCleanup(self._support_patcher.stop)
+        with patch("utils.azure_client.make_nvidia_client") as mock_make_client:
+            self.mock_client = mock_make_client.return_value
+            self.client_no_meter = AzureOpenAIClient(api_key="fake-key")
+            self.client_with_meter = AzureOpenAIClient(api_key="fake-key", token_meter=TokenMeter())
+            self.client_with_meter.client = self.mock_client
+
+    def test_no_token_meter_does_not_request_stream_options(self):
+        self.mock_client.chat.completions.create.return_value = _fake_stream_with_usage("a cat")
+        result = self.client_no_meter.vision("system", "what is this?", b"img")
+        self.assertIsInstance(result, Success)
+        call_kwargs = self.mock_client.chat.completions.create.call_args.kwargs
+        self.assertNotIn("stream_options", call_kwargs)
+
+    def test_token_meter_requests_stream_options_and_records_usage(self):
+        from utils.azure_client import VISION_MODEL
+        self.mock_client.chat.completions.create.return_value = \
+            _fake_stream_with_usage("a cat", total_tokens=42)
+        self.client_with_meter.set_stage("Stage 1 — PDF Parse")
+        result = self.client_with_meter.vision("system", "what is this?", b"img")
+        self.assertIsInstance(result, Success)
+
+        call_kwargs = self.mock_client.chat.completions.create.call_args.kwargs
+        self.assertEqual(call_kwargs["stream_options"], {"include_usage": True})
+        self.assertEqual(call_kwargs["model"], VISION_MODEL)
+
+        manifest = self.client_with_meter.token_meter.to_manifest_dict()
+        self.assertEqual(manifest["total"], 42)
+        self.assertEqual(manifest["by_model"], {VISION_MODEL: 42})
+        self.assertEqual(manifest["by_stage"], {"Stage 1 — PDF Parse": 42})
+
+    def test_stream_options_rejection_degrades_once_and_stays_unmetered(self):
+        # First call raises a stream_options-specific error; vision()
+        # retries once without stream_options (not counted against
+        # MAX_RETRIES) and succeeds -- with token_usage honestly absent,
+        # not estimated.
+        self.mock_client.chat.completions.create.side_effect = [
+            Exception("400 Bad Request: Unrecognized request argument supplied: stream_options"),
+            _fake_stream_with_usage("a cat"),
+        ]
+        result = self.client_with_meter.vision("system", "what is this?", b"img")
+        self.assertIsInstance(result, Success)
+        self.assertEqual(self.mock_client.chat.completions.create.call_count, 2)
+
+        from utils.azure_client import NVIDIA_BASE_URL
+        self.assertFalse(_STREAM_OPTIONS_SUPPORT[NVIDIA_BASE_URL])
+        self.assertIsNone(self.client_with_meter.token_meter.to_manifest_dict())
+
+        self.mock_client.chat.completions.create.side_effect = None
+        self.mock_client.chat.completions.create.return_value = _fake_stream_with_usage("a cat")
+        self.client_with_meter.vision("system", "what is this?", b"img")
+        second_call_kwargs = self.mock_client.chat.completions.create.call_args.kwargs
+        self.assertNotIn("stream_options", second_call_kwargs)
+
+
 if __name__ == "__main__":
     unittest.main()

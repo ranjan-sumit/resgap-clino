@@ -117,7 +117,10 @@ def resolve_canonical_identity(ref: dict) -> dict:
 
     norm_title = _normalize_title(ref.get("title"))
     author = _first_author_surname(ref.get("authors"))
-    year = str(ref.get("year") or "").strip()
+    year = ref.get("year")
+    if isinstance(year, float):
+        year = int(year) if year.is_integer() else str(year)
+    year = str(year or "").strip()
 
     if norm_title and author and year:
         composite = f"title:{norm_title}|author:{author}|year:{year}"

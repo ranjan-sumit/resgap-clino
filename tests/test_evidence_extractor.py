@@ -287,5 +287,106 @@ class CachingWrapperTests(unittest.TestCase):
         mock_save.assert_called_once()
 
 
+class NonBodySegmentProvenanceTests(unittest.TestCase):
+    """Regression cases for the two ways evidence got cited to the wrong
+    page: (1) running headers / page numbers are in Docling's
+    text_segments and used to win first-match-in-document-order whenever
+    the quote contained the repeated header text (citing page 1); (2) any
+    very short segment could win by being a substring of a longer quote."""
+
+    def test_quote_containing_running_header_does_not_resolve_to_header_page(self):
+        segments = [
+            {"text": "Journal of Example Studies", "page": 1, "label": "page_header"},
+            {"text": "A real body paragraph about the cohort study.", "page": 5, "label": "text"},
+        ]
+        quote = "As reported in the Journal of Example Studies, cohorts differ."
+        prov = _resolve_provenance(quote, _build_section_map(segments))
+        self.assertIsNone(prov.page)
+
+    def test_page_number_segments_are_filtered_from_the_map(self):
+        segments = [{"text": "12", "page": 12, "label": "page_number"}]
+        self.assertEqual(_build_section_map(segments), [])
+        footer = [{"text": "Downloaded from example.org", "page": 3, "label": "page_footer"}]
+        self.assertEqual(_build_section_map(footer), [])
+
+    def test_body_match_still_resolves_real_page_when_headers_present(self):
+        segments = [
+            {"text": "Journal of Example Studies", "page": 1, "label": "page_header"},
+            {"text": "Restricted to European ancestry cohorts, limiting generalizability.",
+             "page": 6, "label": "text"},
+        ]
+        objects, diag = extract_deterministic_evidence(
+            "paper1", _wiki_page(), docling_result=_docling_result(segments),
+        )
+        limitation = next(o for o in objects if o.evidence_type == "Limitation")
+        self.assertEqual(limitation.provenance.page, 6)
+
+    def test_very_short_segment_does_not_win_as_substring_of_longer_quote(self):
+        segments = [{"text": "See Table 2.", "page": 3, "label": "text"}]
+        quote = "For full details see Table 2 and the supplementary appendix notes."
+        prov = _resolve_provenance(quote, _build_section_map(segments))
+        self.assertIsNone(prov.page)
+
+
+class CacheKeyDoclingSensitivityTests(unittest.TestCase):
+    """Regression case: the cache key used to cover (paper_id, wiki_page)
+    only, so a run without Docling cached page=None provenance and every
+    later run with Docling got that cache hit -- provenance was never
+    gained. The key now includes the Docling text_segments content."""
+
+    @patch("pipeline.evidence_extractor.save_cached_evidence_objects")
+    @patch("pipeline.evidence_extractor.get_cached_evidence_objects")
+    def test_cache_key_differs_when_docling_segments_differ(self, mock_get, mock_save):
+        mock_get.return_value = None
+        client = MagicMock()
+        client.chat_json.return_value = Success("[]")
+
+        segs_a = [{"text": "body text one", "page": 2, "label": "text"}]
+        segs_b = segs_a + [{"text": "more body text", "page": 3, "label": "text"}]
+
+        extract_evidence_cached("paper1", _wiki_page(),
+                                docling_result=_docling_result(segs_a), client=client)
+        extract_evidence_cached("paper1", _wiki_page(),
+                                docling_result=_docling_result(segs_b), client=client)
+
+        key_a = mock_save.call_args_list[0][0][0]
+        key_b = mock_save.call_args_list[1][0][0]
+        self.assertNotEqual(key_a, key_b)
+
+    @patch("pipeline.evidence_extractor.save_cached_evidence_objects")
+    @patch("pipeline.evidence_extractor.get_cached_evidence_objects")
+    def test_no_docling_and_with_docling_do_not_share_a_cache_key(self, mock_get, mock_save):
+        mock_get.return_value = None
+        client = MagicMock()
+        client.chat_json.return_value = Success("[]")
+
+        extract_evidence_cached("paper1", _wiki_page(), docling_result=None, client=client)
+        segs = [{"text": "body text one", "page": 2, "label": "text"}]
+        extract_evidence_cached("paper1", _wiki_page(),
+                                docling_result=_docling_result(segs), client=client)
+
+        key_without = mock_save.call_args_list[0][0][0]
+        key_with = mock_save.call_args_list[1][0][0]
+        self.assertNotEqual(key_without, key_with)
+
+    @patch("pipeline.evidence_extractor.save_cached_evidence_objects")
+    @patch("pipeline.evidence_extractor.get_cached_evidence_objects")
+    def test_diagnostics_always_include_from_cache_flag(self, mock_get, mock_save):
+        mock_get.return_value = None
+        client = MagicMock()
+        client.chat_json.return_value = Success("[]")
+
+        _, diag, from_cache = extract_evidence_cached("paper1", _wiki_page(), client=client)
+        self.assertFalse(from_cache)
+        self.assertIn("from_cache", diag)
+        self.assertFalse(diag["from_cache"])
+
+        mock_get.return_value = []
+        _, diag, from_cache = extract_evidence_cached("paper1", _wiki_page(), client=client)
+        self.assertTrue(from_cache)
+        self.assertIn("from_cache", diag)
+        self.assertTrue(diag["from_cache"])
+
+
 if __name__ == "__main__":
     unittest.main()

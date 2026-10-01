@@ -90,6 +90,13 @@ def _modifier(scenario: str) -> float:
     return 1.0
 
 
+# Scenario modifiers for survival-type quantities (probabilities where
+# HIGHER is better) run in the opposite direction to adverse-outcome
+# modifiers (where lower is better): "Optimistic" must raise survival.
+def _survival_modifier(scenario: str) -> float:
+    return 1.0 / _modifier(scenario)
+
+
 # ── 1. Monte Carlo ────────────────────────────────────────────────────────────
 
 def run_monte_carlo(params: list, scenarios: list) -> dict:
@@ -111,10 +118,11 @@ def run_monte_carlo(params: list, scenarios: list) -> dict:
 
         distributions = []
         for p in outcome_p[:8]:
-            samples = _sample(p, N_SIM) * mod
+            pmod = _survival_modifier(scenario) if p.get("category") == "survival" else mod
+            samples = _sample(p, N_SIM) * pmod
             name    = p.get("name", p.get("category", "outcome"))
             sr[name] = {**_stats(samples), "source": p.get("source_paper", "")}
-            distributions.append((name, samples))
+            distributions.append((name, samples, p))
 
         if risk_p and distributions:
             # AD-6 / Story 3.2: pool cross-paper risk ratios via
@@ -134,27 +142,28 @@ def run_monte_carlo(params: list, scenarios: list) -> dict:
                 pooled = None
             if pooled is not None:
                 combined_risk = sample_pooled_risk(pooled, N_SIM)
-                _, base = distributions[0]
+                _, base, _ = distributions[0]
                 adjusted = base * combined_risk / np.maximum(np.mean(combined_risk), 1e-9)
                 sr["risk_adjusted_outcome"] = _stats(adjusted)
                 sr["risk_pooling"] = pooled
 
         if efficacy_p and distributions:
-            _, base = distributions[0]
+            _, base, _ = distributions[0]
             for ep in efficacy_p[:2]:
                 eff = np.clip(_sample(ep, N_SIM) / 100.0, 0, 1)
                 sr[f"with_treatment_{ep.get('name','tx')}"] = _stats(base * (1 - eff) * mod)
 
         scenario_results[skey] = sr
 
-        # Sensitivity: correlate each input with combined output
+        # Sensitivity: correlate each input's already-drawn samples with the
+        # combined output -- redrawing fresh independent samples here would
+        # correlate noise against signal and rank parameters arbitrarily.
         if distributions:
-            combined = np.mean(np.stack([s for _, s in distributions], axis=0), axis=0)
-            for p in outcome_p[:8]:
-                s = _sample(p, N_SIM)
+            combined = np.mean(np.stack([s for _, s, _ in distributions], axis=0), axis=0)
+            for name, s, _ in distributions:
                 corr = (float(np.corrcoef(s, combined)[0, 1])
                         if np.std(combined) > 0 and np.std(s) > 0 else 0.0)
-                sensitivity[p.get("name", "param")] = abs(corr)
+                sensitivity[name] = abs(corr)
 
     sensitivity_ranked = sorted(sensitivity.items(), key=lambda x: x[1], reverse=True)
 
@@ -276,15 +285,16 @@ def run_markov(params: list, scenarios: list) -> dict:
 
 def run_survival_analysis(params: list, scenarios: list) -> dict:
     _seed_rng()   # B1 fix
-    survival_p = _by_cat(params, "survival", "hazard_ratio", "rate")
-    if not survival_p:
+    survival_p = _by_cat(params, "survival")
+    hazard_p   = _by_cat(params, "hazard_ratio")
+    if not survival_p and not hazard_p:
         survival_p = [p for p in params if p.get("value") is not None][:3]
 
     time_points = list(range(0, N_YEARS + 1))
     scenario_results = {}
 
     for scenario in scenarios:
-        mod  = _modifier(scenario)
+        smod = _survival_modifier(scenario)
         skey = scenario.lower().replace(" ", "_")
 
         # Weibull survival: S(t) = exp(-(t/λ)^k)
@@ -294,12 +304,26 @@ def run_survival_analysis(params: list, scenarios: list) -> dict:
             v = float(p.get("value", 50)) / 100.0
             base_surv = min(base_surv, max(v, 0.01))
 
+        # Clamp into (0, 1): survival probabilities at/above 1 or at/below 0
+        # make -log(s) degenerate (flat curve / NaN respectively).
+        s = min(max(base_surv * smod, 1e-6), 0.999)
+
         k      = 1.5
-        lam    = 5.0 / ((-np.log(base_surv * mod)) ** (1 / k) + 1e-9)
+        lam    = 5.0 / ((-np.log(s)) ** (1 / k) + 1e-9)
         lam    = max(lam, 0.5)
 
         curve  = [round(float(np.exp(-((t / lam) ** k))), 4) for t in time_points]
         median = round(float(lam * (np.log(2) ** (1 / k))), 2)
+
+        # Hazard ratios scale the hazard, so survival is S(t) ** hr
+        # (proportional-hazards: h'(t) = hr * h(t) => S'(t) = S(t)^hr).
+        # Rate-category params are not survival/hazard quantities -- they do
+        # not calibrate this curve.
+        for hp in hazard_p[:2]:
+            hr = float(hp.get("value", 1.0))
+            if np.isfinite(hr) and hr > 0:
+                curve = [round(float(c) ** hr, 4) for c in curve]
+                median = round(float(median * (np.log(2) ** ((1 - hr) / k))), 2)
 
         scenario_results[skey] = {
             "time_points":    time_points,
@@ -334,7 +358,10 @@ def run_bayesian_network(params: list, scenarios: list) -> dict:
     risk_p   = _by_cat(params, "odds_ratio", "relative_risk")
     prev_p   = _by_cat(params, "prevalence", "incidence")
 
-    baseline = float(prev_p[0].get("value", 15)) / 100.0 if prev_p else 0.15
+    if prev_p:
+        baseline = min(max(float(prev_p[0].get("value", 15)) / 100.0, 1e-6), 1 - 1e-6)
+    else:
+        baseline = 0.15
     scenario_results = {}
 
     for scenario in scenarios:
@@ -411,10 +438,16 @@ def run_bootstrap(params: list, scenarios: list, n_boot: int = 5000) -> dict:
             for _ in range(n_boot)
         ])
 
+        boot_mean = float(np.mean(boot_means))
+        boot_std  = float(np.std(boot_means))
+        # A mean of exactly 0 must not by itself label the result unstable
+        # (the threshold is relative to |mean|); zero spread is stable.
+        stable = (abs(boot_mean) > 1e-9 and boot_std < 0.1 * abs(boot_mean)) or boot_std == 0.0
+
         scenario_results[skey] = {
             **_stats(boot_means),
             "n_bootstrap": n_boot,
-            "stability":   "stable" if float(np.std(boot_means)) < 0.1 * abs(float(np.mean(boot_means))) else "unstable",
+            "stability":   "stable" if stable else "unstable",
         }
 
     return {
@@ -459,9 +492,13 @@ def run_tornado(params: list, scenarios: list) -> dict:
         if central == 0:
             continue   # skip zero-value params — % deviation undefined
 
-        # Use CI if available, else ±20% of central value
-        lo = float(p.get("ci_lower", central * 0.80))
-        hi = float(p.get("ci_upper", central * 1.20))
+        # Use CI if available, else ±20% of central value. `or` (not a
+        # default) because the schema defines ci_lower/ci_upper as
+        # <float or null> -- an explicit None must fall back like a missing key.
+        lo = float(p.get("ci_lower") or central * 0.80)
+        hi = float(p.get("ci_upper") or central * 1.20)
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+            lo, hi = central * 0.80, central * 1.20
 
         # B4 FIX: swing expressed as % of central value (normalised, unit-free)
         swing_lo  = abs(central - lo) / abs(central) * 100  # % below central
@@ -623,12 +660,26 @@ def run_all_applicable(params: list, council_decision: dict, sufficiency: dict) 
         except Exception as e:
             all_results[model_key] = {"model_used": model_key, "error": str(e)}
 
-    # Combined sensitivity across all models
+    # Combined sensitivity across all models. Tornado importance
+    # (swing_total/100, an unbounded %-scale value) is normalised into
+    # [0, 1] by the largest tornado importance in this run before merging
+    # with Monte Carlo's |correlation| -- both merge on the same scale.
+    tornado_max = max(
+        (s.get("importance", 0)
+         for r in all_results.values()
+         if r.get("model_used") == "Tornado Sensitivity"
+         for s in r.get("sensitivity_ranking", [])),
+        default=0,
+    )
     all_sens = {}
     for r in all_results.values():
+        is_tornado = r.get("model_used") == "Tornado Sensitivity"
         for s in r.get("sensitivity_ranking", []):
-            p = s.get("parameter", "")
-            all_sens[p] = max(all_sens.get(p, 0), s.get("importance", 0))
+            p   = s.get("parameter", "")
+            imp = s.get("importance", 0)
+            if is_tornado and tornado_max > 0:
+                imp = min(imp / tornado_max, 1.0)
+            all_sens[p] = max(all_sens.get(p, 0), imp)
     combined_sens = sorted(all_sens.items(), key=lambda x: x[1], reverse=True)
 
     return {

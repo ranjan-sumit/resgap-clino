@@ -68,6 +68,41 @@ class AssessCoverageCacheableSignalTests(unittest.TestCase):
         self.assertFalse(cacheable)
 
 
+class RecentPaperHeuristicTests(unittest.TestCase):
+    """The degraded fallback's 'recent paper' check must stay relative to
+    the current year -- a hardcoded cutoff silently rots as the calendar
+    advances -- and must not blow up on missing/non-numeric years."""
+
+    def _fallback(self, papers):
+        client = MagicMock()
+        client.chat_json.return_value = Failure(ErrorInfo(kind="api_error", detail="down"))
+        return _assess_coverage({"title": "Gap"}, papers, client)
+
+    def test_papers_from_cutoff_year_count_as_recent(self):
+        from datetime import datetime
+        year = datetime.now().year - 4
+        result, _ = self._fallback([_paper(year=year), _paper(year=year)])
+        self.assertEqual(result["status"], "partial")
+
+    def test_papers_older_than_cutoff_do_not_count_as_recent(self):
+        from datetime import datetime
+        year = datetime.now().year - 5
+        result, _ = self._fallback([_paper(year=year), _paper(year=year)])
+        self.assertEqual(result["status"], "open")
+
+    def test_missing_and_non_numeric_years_are_skipped_not_fatal(self):
+        from datetime import datetime
+        year = datetime.now().year - 5
+        papers = [
+            _paper(year=None),
+            _paper(year="unknown"),
+            _paper(year=year),
+            _paper(year=year),
+        ]
+        result, _ = self._fallback(papers)
+        self.assertEqual(result["status"], "open")
+
+
 class ValidateGapsCacheTests(unittest.TestCase):
     def setUp(self):
         self.schema = new_test_schema()
@@ -85,8 +120,8 @@ class ValidateGapsCacheTests(unittest.TestCase):
     def test_cache_miss_then_hit_skips_search_and_llm(self):
         client = MagicMock()
         client.chat_json.return_value = Success(json.dumps({"status": "solved", "reasoning": "covered"}))
-        with patch("pipeline.academic_search._search_semantic_scholar", return_value=[_paper()]) as mock_ss, \
-             patch("pipeline.academic_search._search_arxiv", return_value=[]) as mock_arxiv, \
+        with patch("pipeline.academic_search._search_semantic_scholar_with_status", return_value=([_paper()], True)) as mock_ss, \
+             patch("pipeline.academic_search._search_arxiv_with_status", return_value=([], True)) as mock_arxiv, \
              patch("pipeline.academic_search.time.sleep"):
             gaps = [self._gap()]
             first = validate_gaps(gaps, client, domain_config=None)
@@ -106,8 +141,8 @@ class ValidateGapsCacheTests(unittest.TestCase):
 
     def test_no_papers_found_is_cached(self):
         client = MagicMock()
-        with patch("pipeline.academic_search._search_semantic_scholar", return_value=[]) as mock_ss, \
-             patch("pipeline.academic_search._search_arxiv", return_value=[]) as mock_arxiv, \
+        with patch("pipeline.academic_search._search_semantic_scholar_with_status", return_value=([], True)) as mock_ss, \
+             patch("pipeline.academic_search._search_arxiv_with_status", return_value=([], True)) as mock_arxiv, \
              patch("pipeline.academic_search.time.sleep"):
             validate_gaps([self._gap()], client, domain_config=None)
             self.assertEqual(mock_ss.call_count, 1)
@@ -119,8 +154,8 @@ class ValidateGapsCacheTests(unittest.TestCase):
     def test_fallback_result_is_never_cached(self):
         client = MagicMock()
         client.chat_json.return_value = Failure(ErrorInfo(kind="rate_limit", detail="429"))
-        with patch("pipeline.academic_search._search_semantic_scholar", return_value=[_paper()]) as mock_ss, \
-             patch("pipeline.academic_search._search_arxiv", return_value=[]), \
+        with patch("pipeline.academic_search._search_semantic_scholar_with_status", return_value=([_paper()], True)) as mock_ss, \
+             patch("pipeline.academic_search._search_arxiv_with_status", return_value=([], True)), \
              patch("pipeline.academic_search.time.sleep"):
             validate_gaps([self._gap()], client, domain_config=None)
             self.assertEqual(mock_ss.call_count, 1)
@@ -131,8 +166,8 @@ class ValidateGapsCacheTests(unittest.TestCase):
     def test_different_domain_config_is_a_cache_miss(self):
         client = MagicMock()
         client.chat_json.return_value = Success(json.dumps({"status": "solved", "reasoning": "covered"}))
-        with patch("pipeline.academic_search._search_semantic_scholar", return_value=[_paper()]) as mock_ss, \
-             patch("pipeline.academic_search._search_arxiv", return_value=[]), \
+        with patch("pipeline.academic_search._search_semantic_scholar_with_status", return_value=([_paper()], True)) as mock_ss, \
+             patch("pipeline.academic_search._search_arxiv_with_status", return_value=([], True)), \
              patch("pipeline.academic_search.time.sleep"):
             validate_gaps([self._gap()], client, domain_config={"search_boost_terms": ["genomics"]})
             self.assertEqual(mock_ss.call_count, 1)
@@ -143,8 +178,8 @@ class ValidateGapsCacheTests(unittest.TestCase):
     def test_unrelated_domain_key_does_not_cause_a_cache_miss(self):
         client = MagicMock()
         client.chat_json.return_value = Success(json.dumps({"status": "solved", "reasoning": "covered"}))
-        with patch("pipeline.academic_search._search_semantic_scholar", return_value=[_paper()]) as mock_ss, \
-             patch("pipeline.academic_search._search_arxiv", return_value=[]), \
+        with patch("pipeline.academic_search._search_semantic_scholar_with_status", return_value=([_paper()], True)) as mock_ss, \
+             patch("pipeline.academic_search._search_arxiv_with_status", return_value=([], True)), \
              patch("pipeline.academic_search.time.sleep"):
             validate_gaps([self._gap()], client, domain_config={"search_boost_terms": ["genomics"], "wiki_focus": "a"})
             self.assertEqual(mock_ss.call_count, 1)
@@ -155,8 +190,8 @@ class ValidateGapsCacheTests(unittest.TestCase):
     def test_stage_version_bump_bypasses_and_repopulates(self):
         client = MagicMock()
         client.chat_json.return_value = Success(json.dumps({"status": "solved", "reasoning": "covered"}))
-        with patch("pipeline.academic_search._search_semantic_scholar", return_value=[_paper()]) as mock_ss, \
-             patch("pipeline.academic_search._search_arxiv", return_value=[]), \
+        with patch("pipeline.academic_search._search_semantic_scholar_with_status", return_value=([_paper()], True)) as mock_ss, \
+             patch("pipeline.academic_search._search_arxiv_with_status", return_value=([], True)), \
              patch("pipeline.academic_search.time.sleep"):
             validate_gaps([self._gap()], client, domain_config=None)
             self.assertEqual(mock_ss.call_count, 1)
@@ -172,8 +207,8 @@ class ValidateGapsCacheTests(unittest.TestCase):
     def test_cache_hit_does_not_sleep(self):
         client = MagicMock()
         client.chat_json.return_value = Success(json.dumps({"status": "solved", "reasoning": "covered"}))
-        with patch("pipeline.academic_search._search_semantic_scholar", return_value=[_paper()]), \
-             patch("pipeline.academic_search._search_arxiv", return_value=[]), \
+        with patch("pipeline.academic_search._search_semantic_scholar_with_status", return_value=([_paper()], True)), \
+             patch("pipeline.academic_search._search_arxiv_with_status", return_value=([], True)), \
              patch("pipeline.academic_search.time.sleep") as mock_sleep:
             validate_gaps([self._gap()], client, domain_config=None)
             self.assertGreater(mock_sleep.call_count, 0)  # real work sleeps (0.5 between searches, 0.3 at loop end)
@@ -185,8 +220,8 @@ class ValidateGapsCacheTests(unittest.TestCase):
     def test_empty_content_gap_is_never_cached(self):
         client = MagicMock()
         client.chat_json.return_value = Success(json.dumps({"status": "solved", "reasoning": "covered"}))
-        with patch("pipeline.academic_search._search_semantic_scholar", return_value=[_paper()]) as mock_ss, \
-             patch("pipeline.academic_search._search_arxiv", return_value=[]), \
+        with patch("pipeline.academic_search._search_semantic_scholar_with_status", return_value=([_paper()], True)) as mock_ss, \
+             patch("pipeline.academic_search._search_arxiv_with_status", return_value=([], True)), \
              patch("pipeline.academic_search.time.sleep"):
             empty_gap = {"title": "", "description": ""}
             validate_gaps([dict(empty_gap)], client, domain_config=None)
@@ -194,6 +229,41 @@ class ValidateGapsCacheTests(unittest.TestCase):
 
             validate_gaps([dict(empty_gap)], client, domain_config=None)
             self.assertEqual(mock_ss.call_count, 2)  # never cached, always retried
+
+    def test_both_providers_failing_is_never_cached(self):
+        # A transient outage (both providers raising) is indistinguishable
+        # from "no papers exist" at the results level -- the old code cached
+        # the degraded {"status": "open"} guess forever. The outage result
+        # must never enter the gap_validations cache: a second call must
+        # re-run the searches.
+        client = MagicMock()
+        client.chat_json.return_value = Success(json.dumps({"status": "solved", "reasoning": "covered"}))
+        with patch("pipeline.academic_search._search_semantic_scholar_with_status", return_value=([], False)) as mock_ss, \
+             patch("pipeline.academic_search._search_arxiv_with_status", return_value=([], False)) as mock_arxiv, \
+             patch("pipeline.academic_search.time.sleep"):
+            first = validate_gaps([self._gap()], client, domain_config=None)
+            self.assertEqual(mock_ss.call_count, 1)
+            self.assertEqual(mock_arxiv.call_count, 1)
+            self.assertEqual(first[0]["validation_status"], "open")  # degraded guess, honestly returned
+
+            second = validate_gaps([self._gap()], client, domain_config=None)
+            self.assertEqual(mock_ss.call_count, 2)  # not cached -- searches re-run
+            self.assertEqual(mock_arxiv.call_count, 2)
+            self.assertEqual(second[0]["validation_status"], "open")
+
+    def test_one_provider_failing_still_caches(self):
+        # Partial coverage is a real search: SS responded (even with zero
+        # papers), so the assessment is genuine and cacheable.
+        client = MagicMock()
+        client.chat_json.return_value = Success(json.dumps({"status": "solved", "reasoning": "covered"}))
+        with patch("pipeline.academic_search._search_semantic_scholar_with_status", return_value=([], True)) as mock_ss, \
+             patch("pipeline.academic_search._search_arxiv_with_status", return_value=([], False)), \
+             patch("pipeline.academic_search.time.sleep"):
+            validate_gaps([self._gap()], client, domain_config=None)
+            self.assertEqual(mock_ss.call_count, 1)
+
+            validate_gaps([self._gap()], client, domain_config=None)
+            self.assertEqual(mock_ss.call_count, 1)  # cache hit, no second search
 
 
 if __name__ == "__main__":

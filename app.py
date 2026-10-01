@@ -702,7 +702,7 @@ with st.sidebar:
       <div style="font-family:'DM Mono',monospace;font-size:0.62rem;color:#55708f;line-height:1.9;">
         Fallback · {_fallback_short}<br>
         Council A1 · gpt-oss-20b<br>Council A2 · llama-3.2-3b<br>
-        Council A3 · nemotron-30b<br>Chair · gpt-oss-120b · NVIDIA NIM
+        Council A3 · nemotron-30b<br>Chair · kimi-k3 · NVIDIA NIM
       </div>
     </div>""", unsafe_allow_html=True)
 

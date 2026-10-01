@@ -26,6 +26,7 @@ LLM output and must never be interpolated directly into SQL/Cypher.
 """
 import os
 import re
+import uuid
 from datetime import datetime, timezone
 
 import requests
@@ -100,6 +101,9 @@ def ensure_schema(config: dict = None) -> None:
     _command(config, "CREATE PROPERTY GraphEntity.run_id IF NOT EXISTS STRING")
     _command(config, "CREATE PROPERTY GraphEntity.name_normalized IF NOT EXISTS STRING")
     _command(config, "CREATE PROPERTY GraphRun.run_id IF NOT EXISTS STRING")
+    _command(config, "CREATE PROPERTY GraphRun.save_token IF NOT EXISTS STRING")
+    _command(config, "CREATE PROPERTY GraphEntity.save_token IF NOT EXISTS STRING")
+    _command(config, "CREATE PROPERTY GraphRelation.save_token IF NOT EXISTS STRING")
     _command(config, "CREATE INDEX IF NOT EXISTS ON GraphEntity (run_id) NOTUNIQUE")
     _command(config, "CREATE INDEX IF NOT EXISTS ON GraphRun (run_id) UNIQUE")
 
@@ -131,36 +135,24 @@ def save_graph_snapshot(run_id: str, run_name: str, graph: dict, config: dict = 
     relationships = graph.get("relationships", [])
     quality = quality or {}
 
-    # Replace any prior snapshot for this run_id (edges first -- ArcadeDB
-    # won't delete a vertex that still has edges attached).
-    _command(config, "DELETE VERTEX FROM GraphEntity WHERE run_id = :run_id", {"run_id": run_id})
-    _command(config, "DELETE VERTEX FROM GraphRun WHERE run_id = :run_id", {"run_id": run_id})
-
-    _command(config, """
-        INSERT INTO GraphRun SET run_id = :run_id, name = :name,
-            saved_at = :saved_at, entity_count = :entity_count,
-            relationship_count = :relationship_count,
-            graph_persistence_version = :version,
-            build_status = :build_status, quality_score = :quality_score
-    """, {
-        "run_id": run_id, "name": run_name,
-        "saved_at": datetime.now(timezone.utc).isoformat(),
-        "entity_count": len(entities), "relationship_count": len(relationships),
-        "version": GRAPH_PERSISTENCE_VERSION,
-        "build_status": quality.get("build_status"),
-        "quality_score": quality.get("quality_score"),
-    })
+    # Insert the new generation FIRST, tagged with a per-save token, and
+    # only delete the prior generation afterwards -- a failure mid-save
+    # must never destroy the last good snapshot. The DELETEs below are
+    # scoped to rows whose save_token differs from this save's token, so
+    # the new rows being written are never the ones removed.
+    save_token = uuid.uuid4().hex
 
     # entity_id -> ArcadeDB @rid, needed to wire up edges below.
     rid_by_entity_id = {}
     for e in entities:
         eid = e.get("id") or e.get("name", "")
         result = _command(config, """
-            INSERT INTO GraphEntity SET run_id = :run_id, entity_id = :entity_id,
-                name = :name, name_normalized = :name_normalized, type = :type,
-                importance = :importance, papers = :papers
+            INSERT INTO GraphEntity SET run_id = :run_id, save_token = :save_token,
+                entity_id = :entity_id, name = :name, name_normalized = :name_normalized,
+                type = :type, importance = :importance, papers = :papers
         """, {
-            "run_id": run_id, "entity_id": eid, "name": e.get("name", ""),
+            "run_id": run_id, "save_token": save_token, "entity_id": eid,
+            "name": e.get("name", ""),
             "name_normalized": _normalize_name(e.get("name", "")),
             "type": e.get("type", ""), "importance": e.get("importance", ""),
             "papers": e.get("papers", []),
@@ -180,12 +172,53 @@ def save_graph_snapshot(run_id: str, run_name: str, graph: dict, config: dict = 
             continue  # relationship references an entity not in this graph -- skip, don't guess
         _command(config, f"""
             CREATE EDGE GraphRelation FROM {src_rid} TO {tgt_rid}
-            SET run_id = :run_id, relation = :relation, paper = :paper, evidence = :evidence
+            SET run_id = :run_id, save_token = :save_token,
+                relation = :relation, paper = :paper, evidence = :evidence
         """, {
-            "run_id": run_id, "relation": r.get("relation", ""),
+            "run_id": run_id, "save_token": save_token,
+            "relation": r.get("relation", ""),
             "paper": r.get("paper", ""), "evidence": r.get("evidence", ""),
         })
         edge_count += 1
+
+    run_fields = {
+        "run_id": run_id, "name": run_name,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "entity_count": len(entities), "relationship_count": len(relationships),
+        "version": GRAPH_PERSISTENCE_VERSION,
+        "save_token": save_token,
+        "build_status": quality.get("build_status"),
+        "quality_score": quality.get("quality_score"),
+    }
+    existing = _command(config, "SELECT FROM GraphRun WHERE run_id = :run_id", {"run_id": run_id})
+    if existing:
+        _command(config, """
+            UPDATE GraphRun SET name = :name, saved_at = :saved_at,
+                entity_count = :entity_count, relationship_count = :relationship_count,
+                graph_persistence_version = :version, save_token = :save_token,
+                build_status = :build_status, quality_score = :quality_score
+            WHERE run_id = :run_id
+        """, run_fields)
+    else:
+        _command(config, """
+            INSERT INTO GraphRun SET run_id = :run_id, name = :name,
+                saved_at = :saved_at, entity_count = :entity_count,
+                relationship_count = :relationship_count,
+                graph_persistence_version = :version, save_token = :save_token,
+                build_status = :build_status, quality_score = :quality_score
+        """, run_fields)
+
+    # Edges first -- ArcadeDB won't delete a vertex that still has edges
+    # attached. Rows saved before save_token existed have it as NULL, so
+    # the IS NULL branch keeps the cleanup scoped to them too.
+    _command(config, """
+        DELETE FROM GraphRelation WHERE run_id = :run_id
+            AND (save_token IS NULL OR save_token != :save_token)
+    """, {"run_id": run_id, "save_token": save_token})
+    _command(config, """
+        DELETE VERTEX FROM GraphEntity WHERE run_id = :run_id
+            AND (save_token IS NULL OR save_token != :save_token)
+    """, {"run_id": run_id, "save_token": save_token})
 
     return {"run_id": run_id, "entity_count": len(entities), "relationship_count": edge_count}
 
@@ -198,8 +231,32 @@ def load_graph_snapshot(run_id: str, config: dict = None) -> dict:
     error) if run_id was never saved -- an honest "nothing here", the
     same convention this codebase uses elsewhere for a genuine absence."""
     config = config or _config()
-    entities_raw = _command(config, "SELECT FROM GraphEntity WHERE run_id = :run_id",
-                             {"run_id": run_id})
+    # Read only the generation the GraphRun row points at: rows from a
+    # newer, abandoned save (the save failed before committing its
+    # GraphRun row) share the run_id and must not leak into the result.
+    # Runs saved before save_token existed report None -> unfiltered read
+    # of the run's rows, exactly the prior behavior.
+    run_rows = _command(config, "SELECT FROM GraphRun WHERE run_id = :run_id",
+                        {"run_id": run_id})
+    save_token = run_rows[0].get("save_token") if run_rows else None
+    if save_token:
+        scope = {"run_id": run_id, "save_token": save_token}
+        entity_filter = "SELECT FROM GraphEntity WHERE run_id = :run_id AND save_token = :save_token"
+        rel_filter = """
+            SELECT @out.entity_id AS source, @in.entity_id AS target,
+                   relation, paper, evidence
+            FROM GraphRelation WHERE run_id = :run_id AND save_token = :save_token
+        """
+    else:
+        scope = {"run_id": run_id}
+        entity_filter = "SELECT FROM GraphEntity WHERE run_id = :run_id"
+        rel_filter = """
+            SELECT @out.entity_id AS source, @in.entity_id AS target,
+                   relation, paper, evidence
+            FROM GraphRelation WHERE run_id = :run_id
+        """
+
+    entities_raw = _command(config, entity_filter, scope)
     entities = [{
         "id": e.get("entity_id", ""), "name": e.get("name", ""),
         "type": e.get("type", ""), "importance": e.get("importance", ""),
@@ -210,11 +267,7 @@ def load_graph_snapshot(run_id: str, config: dict = None) -> dict:
     # @out/@in edge-link properties to dereference the connected vertex's
     # field (`out.entity_id`/`in.entity_id`, without the @, silently
     # returns null instead of erroring -- confirmed live, not assumed).
-    relationships_raw = _command(config, """
-        SELECT @out.entity_id AS source, @in.entity_id AS target,
-               relation, paper, evidence
-        FROM GraphRelation WHERE run_id = :run_id
-    """, {"run_id": run_id})
+    relationships_raw = _command(config, rel_filter, scope)
     relationships = [{
         "source": r.get("source", ""), "target": r.get("target", ""),
         "relation": r.get("relation", ""), "paper": r.get("paper", ""),

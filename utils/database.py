@@ -22,6 +22,7 @@ manual gzip step was no longer doing useful work -- see migrations/
 """
 import json
 import os
+import uuid
 import hashlib
 from datetime import datetime
 from pathlib import Path
@@ -423,7 +424,10 @@ def save_run(
     """
     init_db()
     ts  = datetime.now().isoformat(timespec="seconds")
-    rid = _run_id(name, ts)
+    # Two runs with the same name started in the same second (API double
+    # submit, two tabs) must never share a run_id -- the uuid makes the
+    # hash input unique while the 12-hex-char output format is unchanged.
+    rid = _run_id(name, f"{ts}:{uuid.uuid4().hex}")
 
     context     = results.get("context", {})
     gaps        = results.get("gaps", [])

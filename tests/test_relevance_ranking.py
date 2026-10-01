@@ -78,6 +78,39 @@ class RerankCandidatesTests(unittest.TestCase):
         ])
 
     @patch("pipeline.relevance_ranking.requests.post")
+    def test_unsorted_api_response_is_returned_sorted_by_logit(self, mock_post):
+        # Regression: the API does not guarantee ranked order -- the module
+        # must sort explicitly, not pass the response through in arrival
+        # order.
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            json=lambda: {"rankings": [
+                {"index": 1, "logit": 0.5},
+                {"index": 0, "logit": 9.0},
+                {"index": 2, "logit": -1.0},
+            ]},
+        )
+        mock_post.return_value.raise_for_status.return_value = None
+        result = rerank_candidates("q", ["a", "b", "c"], api_key="x")
+        self.assertEqual([r["index"] for r in result], [0, 1, 2])
+        self.assertEqual([r["score"] for r in result], [9.0, 0.5, -1.0])
+
+    @patch("pipeline.relevance_ranking.requests.post")
+    def test_equal_logits_keep_api_order(self, mock_post):
+        # Stable sort: ties must not be reordered relative to each other.
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            json=lambda: {"rankings": [
+                {"index": 2, "logit": 1.0},
+                {"index": 0, "logit": 1.0},
+                {"index": 1, "logit": 1.0},
+            ]},
+        )
+        mock_post.return_value.raise_for_status.return_value = None
+        result = rerank_candidates("q", ["a", "b", "c"], api_key="x")
+        self.assertEqual([r["index"] for r in result], [2, 0, 1])
+
+    @patch("pipeline.relevance_ranking.requests.post")
     def test_http_error_raises_not_swallowed(self, mock_post):
         import requests
         mock_post.return_value = MagicMock(status_code=500)

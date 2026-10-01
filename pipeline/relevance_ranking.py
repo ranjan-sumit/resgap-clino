@@ -90,4 +90,9 @@ def rerank_candidates(query: str, passages: list[str], api_key: str) -> list[dic
     )
     resp.raise_for_status()
     rankings = resp.json().get("rankings", [])
+    # Sort explicitly by descending logit -- the API does not guarantee the
+    # response is already in ranked order, and callers rely on this
+    # function's contract (first entry = most relevant). Ties keep the API's
+    # order (stable sort on the response sequence).
+    rankings = sorted(rankings, key=lambda r: r["logit"], reverse=True)
     return [{"index": r["index"], "score": r["logit"]} for r in rankings]

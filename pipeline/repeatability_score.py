@@ -95,8 +95,13 @@ def _ranking_correlation(gaps_a: list, gaps_b: list) -> float | None:
     pairs = _matched_pairs(gaps_a, gaps_b)
     if len(pairs) < 2:
         return None
-    rank_a = [gaps_a.index(g) for g, _ in pairs]
-    rank_b = [gaps_b.index(g) for _, g in pairs]
+    # Positional pairing via identity, not list.index(): with equality-based
+    # index() two identical gaps would resolve to the same first-match
+    # position and get the same rank, distorting the correlation.
+    pos_a = {id(g): i for i, g in enumerate(gaps_a)}
+    pos_b = {id(g): i for i, g in enumerate(gaps_b)}
+    rank_a = [pos_a[id(g)] for g, _ in pairs]
+    rank_b = [pos_b[id(g)] for _, g in pairs]
     if len(set(rank_a)) < 2 or len(set(rank_b)) < 2:
         return None
     corr, _ = spearmanr(rank_a, rank_b)

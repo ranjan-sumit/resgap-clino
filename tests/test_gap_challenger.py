@@ -5,6 +5,7 @@ Phase 3 testing strategy: "every cell of the decision table exercised."
 """
 import sys
 import unittest
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -116,6 +117,17 @@ class SearchFunnelTests(unittest.TestCase):
         funnel = run_search_funnel(["q1", "q2"])
         self.assertTrue(funnel["provider_success"]["semantic_scholar"])
         self.assertFalse(funnel["provider_success"]["arxiv"])
+        self.assertEqual(funnel["search_coverage_score"], 0.5)
+
+    @patch("pipeline.gap_challenger._search_arxiv_with_status")
+    @patch("pipeline.gap_challenger._search_semantic_scholar_with_status")
+    def test_a_family_where_every_provider_call_failed_is_not_executed(self, mock_ss, mock_arxiv):
+        # q1: both providers fail (planned but never executed); q2: both
+        # succeed. Execution rate 0.5 x provider rate 1.0 -> 0.5 -- the old
+        # hardcoded 1.0 execution rate would have reported 1.0 here.
+        mock_ss.side_effect = [([], False), ([_candidate("A")], True)]
+        mock_arxiv.side_effect = [([], False), ([], True)]
+        funnel = run_search_funnel(["q1", "q2"])
         self.assertEqual(funnel["search_coverage_score"], 0.5)
 
     @patch("pipeline.gap_challenger._search_arxiv_with_status")
@@ -306,6 +318,83 @@ class JudgeCandidatesTests(unittest.TestCase):
         self.assertEqual(len(judged), 8)
 
 
+class JudgeParsingHardeningTests(unittest.TestCase):
+    """Regression tests for judge-output parsing: strict booleans (a JSON
+    string "false" is truthy in Python), case normalization, and matching
+    judgments to candidates by title rather than list position."""
+
+    def test_string_false_does_not_count_as_relevant(self):
+        client = MagicMock()
+        client.chat_json.return_value = Success(
+            '[{"title": "A", "relevant": "false", "contradicts_gap": "false", "confidence": "high"}]'
+        )
+        judged = judge_candidates(_gap(), [_candidate("A")], client)
+        self.assertFalse(judged[0]["relevant"])
+        self.assertFalse(judged[0]["contradicts_gap"])
+        self.assertTrue(judged[0]["judged"])  # judgment WAS found and applied
+
+    def test_string_true_counts_as_relevant(self):
+        client = MagicMock()
+        client.chat_json.return_value = Success(
+            '[{"title": "A", "relevant": "true", "relevance_type": "direct", '
+            '"contradicts_gap": "false", "confidence": "high"}]'
+        )
+        judged = judge_candidates(_gap(), [_candidate("A")], client)
+        self.assertTrue(judged[0]["relevant"])
+
+    def test_capitalized_values_are_normalized(self):
+        client = MagicMock()
+        client.chat_json.return_value = Success(
+            '[{"title": "A", "relevant": true, "relevance_type": "Direct", '
+            '"contradicts_gap": false, "confidence": "High"}]'
+        )
+        judged = judge_candidates(_gap(), [_candidate("A")], client)
+        self.assertTrue(judged[0]["relevant"])
+        self.assertEqual(judged[0]["relevance_type"], "direct")
+        self.assertEqual(judged[0]["confidence"], "high")
+
+    def test_judgments_are_matched_by_title_not_position(self):
+        # The judge reversed the order -- position-based alignment would
+        # attribute each judgment to the wrong candidate.
+        client = MagicMock()
+        client.chat_json.return_value = Success(json.dumps([
+            {"title": "B", "relevant": True, "relevance_type": "direct",
+             "contradicts_gap": False, "confidence": "high"},
+            {"title": "A", "relevant": False, "contradicts_gap": False, "confidence": "low"},
+        ]))
+        judged = judge_candidates(_gap(), [_candidate("A"), _candidate("B")], client)
+        by_title = {j["title"]: j for j in judged}
+        self.assertFalse(by_title["A"]["relevant"])
+        self.assertTrue(by_title["B"]["relevant"])
+        self.assertEqual(by_title["B"]["relevance_type"], "direct")
+
+    def test_candidate_with_no_matching_judgment_is_unjudged(self):
+        client = MagicMock()
+        client.chat_json.return_value = Success(
+            '[{"title": "A", "relevant": true, "relevance_type": "direct", '
+            '"contradicts_gap": false, "confidence": "high"}]'
+        )
+        judged = judge_candidates(_gap(), [_candidate("A"), _candidate("B")], client)
+        by_title = {j["title"]: j for j in judged}
+        self.assertTrue(by_title["A"]["judged"])
+        self.assertFalse(by_title["B"]["judged"])
+        self.assertFalse(by_title["B"]["relevant"])
+
+    def test_llm_call_failure_marks_everything_unjudged(self):
+        client = MagicMock()
+        client.chat_json.return_value = Failure(ErrorInfo(kind="api_error", detail="down"))
+        judged = judge_candidates(_gap(), [_candidate("A")], client)
+        self.assertFalse(judged[0]["relevant"])
+        self.assertFalse(judged[0]["judged"])
+
+    def test_malformed_json_marks_everything_unjudged(self):
+        client = MagicMock()
+        client.chat_json.return_value = Success("not json at all")
+        judged = judge_candidates(_gap(), [_candidate("A")], client)
+        self.assertFalse(judged[0]["relevant"])
+        self.assertFalse(judged[0]["judged"])
+
+
 def _judged(relevant=True, relevance_type="direct", contradicts=False, confidence="high", title="P"):
     return {"title": title, "relevant": relevant, "relevance_type": relevance_type,
             "contradicts_gap": contradicts, "confidence": confidence}
@@ -422,6 +511,67 @@ class RunChallengeOrchestrationTests(unittest.TestCase):
         result = run_challenge(gap, MagicMock())
         self.assertEqual(result["challenger_state"], "SEARCH_PENDING")
         self.assertIsNone(result["challenger_status"])
+
+    @patch("pipeline.gap_challenger._search_arxiv_with_status")
+    @patch("pipeline.gap_challenger._search_semantic_scholar_with_status")
+    def test_judge_failure_resolves_to_insufficient_evidence_not_open(self, mock_ss, mock_arxiv):
+        # ADR-008: an unjudged candidate pool must never run the decision
+        # table -- "the judge call failed" is not "searched, nothing found."
+        mock_ss.return_value = ([_candidate("Paper A")], True)
+        mock_arxiv.return_value = ([], True)
+        client = MagicMock()
+        client.chat_json.return_value = Failure(ErrorInfo(kind="api_error", detail="down"))
+        result = run_challenge(_gap(confidence="high"), client)
+        self.assertEqual(result["challenger_state"], "CHALLENGED")
+        self.assertEqual(result["challenger_status"], "INSUFFICIENT_EVIDENCE")
+        self.assertFalse(result["challenge_funnel"]["judged"])
+        self.assertIn("challenger_reason", result)
+
+    @patch("pipeline.gap_challenger._search_arxiv_with_status")
+    @patch("pipeline.gap_challenger._search_semantic_scholar_with_status")
+    def test_partial_judgment_coverage_resolves_to_insufficient_evidence(self, mock_ss, mock_arxiv):
+        # Even one unjudged candidate taints the pool: the decision table
+        # may only run on fully-judged input.
+        mock_ss.return_value = ([_candidate("Paper A"), _candidate("Paper B")], True)
+        mock_arxiv.return_value = ([], True)
+        client = MagicMock()
+        client.chat_json.return_value = Success(
+            '[{"title": "Paper A", "relevant": true, "relevance_type": "direct", '
+            '"contradicts_gap": false, "confidence": "high"}]'
+        )
+        result = run_challenge(_gap(confidence="high"), client)
+        self.assertEqual(result["challenger_status"], "INSUFFICIENT_EVIDENCE")
+
+    @patch("pipeline.gap_challenger.run_search_funnel")
+    def test_explicit_nvidia_api_key_is_threaded_to_the_funnel(self, mock_funnel):
+        mock_funnel.return_value = {
+            "query_families": ["q"], "providers_queried": ["semantic_scholar", "arxiv"],
+            "provider_success": {"semantic_scholar": True, "arxiv": True},
+            "candidate_count": 0, "post_dedup_count": 0, "post_metadata_filter_count": 0,
+            "metadata_filtered_count": 0, "post_rerank_count": 0, "rerank_used": False,
+            "candidates": [], "search_coverage_score": 1.0,
+        }
+        client = MagicMock()
+        run_challenge(_gap(confidence="high"), client, nvidia_api_key="nvidia-key")
+        self.assertEqual(mock_funnel.call_args.kwargs["nvidia_api_key"], "nvidia-key")
+        # The rerank query is gap-framing-stripped, same as the search
+        # queries (B27): "Missing" must not reach the reranker.
+        self.assertNotIn("Missing", mock_funnel.call_args.kwargs["rerank_query"])
+        self.assertIn("external validation", mock_funnel.call_args.kwargs["rerank_query"])
+
+    @patch("pipeline.gap_challenger.run_search_funnel")
+    @patch.dict("os.environ", {"NVIDIA_API_KEY": "env-key"})
+    def test_nvidia_api_key_falls_back_to_env_var(self, mock_funnel):
+        mock_funnel.return_value = {
+            "query_families": ["q"], "providers_queried": ["semantic_scholar", "arxiv"],
+            "provider_success": {"semantic_scholar": True, "arxiv": True},
+            "candidate_count": 0, "post_dedup_count": 0, "post_metadata_filter_count": 0,
+            "metadata_filtered_count": 0, "post_rerank_count": 0,
+            "rerank_used": False,
+            "candidates": [], "search_coverage_score": 1.0,
+        }
+        run_challenge(_gap(confidence="high"), MagicMock())
+        self.assertEqual(mock_funnel.call_args.kwargs["nvidia_api_key"], "env-key")
 
 
 if __name__ == "__main__":

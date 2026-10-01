@@ -127,7 +127,7 @@ def to_pdf_report(results: dict, context: dict) -> bytes:
         fontName="Helvetica-Bold",
         fontSize=22,
         leading=26,
-        textColor=colors.HexColor("#111827"),
+        textColor=colors.HexColor("#0000A0"),
         spaceAfter=14,
     ))
     styles.add(ParagraphStyle(
@@ -136,7 +136,7 @@ def to_pdf_report(results: dict, context: dict) -> bytes:
         fontName="Helvetica-Bold",
         fontSize=13,
         leading=16,
-        textColor=colors.HexColor("#1f2937"),
+        textColor=colors.HexColor("#0000A0"),
         spaceBefore=12,
         spaceAfter=8,
     ))
@@ -145,7 +145,7 @@ def to_pdf_report(results: dict, context: dict) -> bytes:
         parent=styles["BodyText"],
         fontSize=8,
         leading=10,
-        textColor=colors.HexColor("#4b5563"),
+        textColor=colors.HexColor("#4A4A6A"),
     ))
 
     papers = results.get("papers", [])
@@ -172,10 +172,10 @@ def to_pdf_report(results: dict, context: dict) -> bytes:
     ]
     summary = Table(summary_rows, colWidths=[1.9 * inch, 5.0 * inch])
     summary.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f3f4f6")),
-        ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#111827")),
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F0F2FF")),
+        ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#0000A0")),
         ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d1d5db")),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#D9DEF8")),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("PADDING", (0, 0), (-1, -1), 6),
     ]))
@@ -206,9 +206,9 @@ def to_pdf_report(results: dict, context: dict) -> bytes:
             ])
         tbl = Table(ref_rows, colWidths=[4.1 * inch, 0.6 * inch, 0.45 * inch, 1.1 * inch], repeatRows=1)
         tbl.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e5e7eb")),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F0F2FF")),
             ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d1d5db")),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#D9DEF8")),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("PADDING", (0, 0), (-1, -1), 4),
         ]))
@@ -612,9 +612,9 @@ def to_enterprise_pdf_report(results: dict, context: dict, narrative: dict | Non
                             bottomMargin=0.55*inch)
     styles = getSampleStyleSheet()
     styles.add(ParagraphStyle(name="ReportTitle2", parent=styles["Title"], fontSize=22,
-                              leading=26, textColor=colors.HexColor("#111827")))
+                              leading=26, textColor=colors.HexColor("#0000A0")))
     styles.add(ParagraphStyle(name="Section2", parent=styles["Heading2"], fontSize=13,
-                              leading=16, textColor=colors.HexColor("#1f2937"), spaceBefore=12))
+                              leading=16, textColor=colors.HexColor("#0000A0"), spaceBefore=12))
     styles.add(ParagraphStyle(name="Small2", parent=styles["BodyText"], fontSize=8, leading=10))
 
     def para(text, style="BodyText"):
@@ -626,9 +626,9 @@ def to_enterprise_pdf_report(results: dict, context: dict, narrative: dict | Non
     def simple_table(rows, widths):
         tbl = Table(rows, colWidths=widths, repeatRows=1)
         tbl.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e5e7eb")),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F0F2FF")),
             ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d1d5db")),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#D9DEF8")),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("PADDING", (0, 0), (-1, -1), 4),
         ]))

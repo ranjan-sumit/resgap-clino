@@ -5,9 +5,30 @@ Council question changed from "interpret simulation" to
 
 Council composition (NVIDIA NIM):
   Agent 1 — Dr. Statistician       → openai/gpt-oss-20b
-  Agent 2 — Dr. Epidemiologist     → meta/llama-3.2-3b-instruct
+  Agent 2 — Dr. Epidemiologist     → moonshotai/kimi-k3
   Agent 3 — Dr. Analyst/Critic     → nvidia/nemotron-3-nano-omni-30b-a3b-reasoning
-  Chair   — Consensus Synthesiser  → openai/gpt-oss-120b (master)
+  Chair   — Consensus Synthesiser  → moonshotai/kimi-k3 (master)
+
+B28/B29 fixes (2026-09-08), both found live, not assumed:
+- Chair was openai/gpt-oss-120b -- NVIDIA end-of-life since 2026-09-03
+  (live HTTP 410 Gone). Tried deepseek-ai/deepseek-v4-flash-0731 next; a
+  live test call to it timed out (see utils/azure_client.py's MASTER_MODEL
+  comment for the full story: this NVIDIA account is only entitled to a
+  small fixed model allowlist, confirmed by live-testing 8 other
+  candidates that all returned 404). Settled on moonshotai/kimi-k3 --
+  live-tested HTTP 200, fast, and this account is confirmed entitled to
+  it. Not yet independently re-verified in this Council-chair role
+  specifically (its `has_reasoning: True`/streamed reasoning_content
+  behavior here is inherited, not reconfirmed for this model) -- flagged,
+  not hidden.
+- Agent 2 was meta/llama-3.2-3b-instruct -- separately discovered dead
+  (NVIDIA end-of-life since 2026-08-26, live HTTP 410) while live-testing
+  candidates for the Chair fix above. This was broken independently of
+  anything above; not previously noticed since nothing in this session had
+  exercised the Council feature. Swapped to kimi-k3 for the same
+  confirmed-entitled reason as the Chair; kept Agent 2's original low
+  temperature (0.2) since that's a real tuned epidemiologist-role
+  parameter, not tied to model identity.
 """
 import json
 import re
@@ -22,8 +43,14 @@ COUNCIL_MODELS = {
         "extra_body": None, "has_reasoning": True,
     },
     "llama_3b": {
-        "model": "meta/llama-3.2-3b-instruct",
-        "temperature": 0.2, "top_p": 0.7, "max_tokens": 1024,
+        # B29 fix (2026-09-08): meta/llama-3.2-3b-instruct is NVIDIA
+        # end-of-life since 2026-08-26 (live HTTP 410) -- dict key kept as
+        # "llama_3b" since MODEL_SELECTION_AGENTS references it by key.
+        # top_p raised 0.7 -> 0.95 (kimi-k3 requirement, see module
+        # docstring); temperature/max_tokens/has_reasoning are the real
+        # tuned epidemiologist-role values, left unchanged.
+        "model": "moonshotai/kimi-k3",
+        "temperature": 0.2, "top_p": 0.95, "max_tokens": 1024,
         "extra_body": None, "has_reasoning": False,
     },
     "nemotron": {
@@ -36,8 +63,20 @@ COUNCIL_MODELS = {
         "has_reasoning": True,
     },
     "gpt_120b": {
-        "model": "openai/gpt-oss-120b",
-        "temperature": 1.0, "top_p": 1.0, "max_tokens": 4096,
+        # B28 fix (2026-09-08): openai/gpt-oss-120b is NVIDIA end-of-life
+        # (410 Gone since 2026-09-03).
+        # B29 fix (2026-09-08): tried deepseek-v4-flash-0731 next, but a
+        # live test call to it timed out (see utils/azure_client.py's
+        # MASTER_MODEL comment for the full account-entitlement story) --
+        # swapped to moonshotai/kimi-k3 instead, live-tested HTTP 200 and
+        # fast. kimi-k3 needs top_p=0.95, not the standard 1.0 (rejects it
+        # with a 400) -- unlike utils/azure_client.py's shared client, this
+        # file's _call_model() already reads top_p per-model from this
+        # dict, so no separate override mechanism is needed here.
+        # Dict key kept as "gpt_120b" since MODEL_SELECTION_AGENTS/the chair
+        # call site below reference it by key, not by model string.
+        "model": "moonshotai/kimi-k3",
+        "temperature": 1.0, "top_p": 0.95, "max_tokens": 4096,
         "extra_body": None, "has_reasoning": True,
     },
 }
@@ -180,15 +219,17 @@ def _call_model(api_key: str, model_key: str, system: str, user: str) -> str:
             if content:
                 parts.append(content)
     except Exception as e:
-        return f"[{cfg['model']} failed: {e}]"
+        return {"_failed": True, "error": str(e), "model": cfg["model"]}
     return "".join(parts).strip()
 
 
 def _robust_parse(raw: str, expected: type = dict):
+    # The trailing-comma repair is deliberately LAST: applied to strict JSON
+    # it can corrupt string values containing ",}" into wrong-but-parseable
+    # output, so strict loads and brace-extraction get their chance first.
     for strategy in [
         lambda s: s,
         lambda s: re.sub(r'^```(?:json)?\s*|\s*```$', '', s).strip(),
-        lambda s: re.sub(r',\s*([}\]])', r'\1', s),
     ]:
         try:
             result = json.loads(strategy(raw))
@@ -205,12 +246,19 @@ def _robust_parse(raw: str, expected: type = dict):
                     return result
             except Exception:
                 pass
+    try:
+        result = json.loads(re.sub(r',\s*([}\]])', r'\1', raw))
+        if isinstance(result, expected):
+            return result
+    except Exception:
+        pass
     return {} if expected == dict else []
 
 
 def run_council(agents: list, context: str, final_prompt: str,
                 api_key: str, master_key: str = "gpt_120b") -> dict:
     agent_responses = []
+    failures = []
     transcript_lines = []
 
     for agent in agents:
@@ -222,6 +270,24 @@ def run_council(agents: list, context: str, final_prompt: str,
         model_info = COUNCIL_MODELS[agent["model_key"]]
         response   = _call_model(api_key, agent["model_key"], system,
                                  f"Council context:\n\n{context}\n\nGive your expert assessment.")
+        if isinstance(response, dict) and response.get("_failed"):
+            # A failed call contributes no opinion: it is carried as
+            # structured failure context, never as debate text the chair
+            # could mistake for an agent's position.
+            failures.append({
+                "agent": agent["name"], "model": model_info["model"],
+                "error": response.get("error", "unknown error"),
+            })
+            agent_responses.append({
+                "agent": agent["name"], "role": agent["role"],
+                "model": model_info["model"], "response": "",
+                "failed": True, "error": response.get("error", ""),
+            })
+            transcript_lines.append(
+                f"**{agent['name']} ({agent['role']}) [{model_info['model']}]:\n"
+                f"[CALL FAILED — no opinion available]"
+            )
+            continue
         agent_responses.append({
             "agent": agent["name"], "role": agent["role"],
             "model": model_info["model"], "response": response,
@@ -231,27 +297,46 @@ def run_council(agents: list, context: str, final_prompt: str,
         )
 
     debate_text = "\n\n---\n\n".join(
-        f"{r['agent']} [{r['model']}]:\n{r['response']}" for r in agent_responses
+        f"{r['agent']} [{r['model']}]:\n"
+        + (r["response"] if r.get("response") else "[CALL FAILED — no opinion available]")
+        for r in agent_responses
     )
-    consensus_context = f"Original context:\n{context}\n\nDebate:\n{debate_text}"
+    failures_note = ""
+    if failures:
+        failures_note = (
+            "\n\nThe following council member(s) could not be reached and provided "
+            "NO opinion. Do not treat their absence as agreement or disagreement; "
+            "synthesise consensus only from the responses present:\n"
+            + "\n".join(f"- {f['agent']} [{f['model']}]: {f['error']}" for f in failures)
+        )
+    consensus_context = (
+        f"Original context:\n{context}\n\nDebate:\n{debate_text}{failures_note}"
+    )
 
     raw_consensus = _call_model(
         api_key, master_key,
         CONSENSUS_PROMPT + "\n\nReturn ONLY valid JSON.",
         consensus_context,
     )
-    consensus = _robust_parse(raw_consensus, dict)
-    if not consensus:
-        consensus = {"consensus": raw_consensus, "key_points": [], "confidence": "medium"}
+    if isinstance(raw_consensus, dict):
+        consensus = {"consensus": "", "key_points": [], "confidence": "medium",
+                     "chair_error": raw_consensus.get("error", "")}
+    else:
+        consensus = _robust_parse(raw_consensus, dict)
+        if not consensus:
+            consensus = {"consensus": raw_consensus, "key_points": [], "confidence": "medium"}
 
     raw_final = _call_model(
         api_key, master_key,
         final_prompt + "\n\nReturn ONLY valid JSON.",
         f"{consensus_context}\n\nCouncil consensus:\n{json.dumps(consensus, indent=2)}",
     )
-    final_decision = _robust_parse(raw_final, dict)
-    if not final_decision:
-        final_decision = {"decision": raw_final}
+    if isinstance(raw_final, dict):
+        final_decision = {"chair_error": raw_final.get("error", "")}
+    else:
+        final_decision = _robust_parse(raw_final, dict)
+        if not final_decision:
+            final_decision = {"decision": raw_final}
 
     return {
         "agents":          agent_responses,

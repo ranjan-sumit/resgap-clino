@@ -111,5 +111,11 @@ def extract_with_docling(pdf_path: str, filename: str) -> dict:
         "from_cache": False,
     }
 
-    save_cached_docling_extraction(cache_key, content_hash, DOCLING_STAGE_VERSION, result)
+    try:
+        save_cached_docling_extraction(cache_key, content_hash, DOCLING_STAGE_VERSION, result)
+    except Exception:
+        # A cache-write failure must not discard the ~90s conversion result
+        # that was just produced -- mirrors pipeline/reference_extractor.py's
+        # save guard: swallow, and still return the real extraction.
+        pass
     return result

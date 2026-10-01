@@ -136,6 +136,19 @@ class CorpusQualityAggregationTests(unittest.TestCase):
         self.assertEqual(funnel["duplicates_merged_in_run"], 4)
         self.assertEqual(funnel["quarantined"], 0)  # honest -- no status model yet (Epic 1.3)
 
+    def test_unresolved_comes_from_enrichment_loop_when_present(self):
+        # Diagnostics from the real enrichment loop carry a per-entry
+        # "unresolved" count. Re-deriving unresolved as structured_entries -
+        # resolved mixes units (pre-cap/pre-dedup LLM-parse count minus
+        # post-cap/post-dedup emitted count) -- the loop's own count wins.
+        diagnostics = {
+            "raw_entries": 30, "structured_entries": 0, "fallback_entries": 30,
+            "doi_entries": 0, "enriched": 10, "title_only": 17,
+            "unresolved": 3, "duplicates_skipped": 2,
+        }
+        metrics = compute_corpus_quality([{"completeness_score": 0.6}], diagnostics)
+        self.assertEqual(metrics["reference_funnel"]["unresolved"], 3)
+
     def test_doi_resolution_rate_computed_from_actual_reference_records(self):
         # Regression case: an earlier implementation divided ref_diagnostics'
         # doi_entries by structured_entries, which are NOT numerator/

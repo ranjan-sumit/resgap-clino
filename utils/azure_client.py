@@ -26,8 +26,40 @@ NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 # 120b becomes the fallback -- a genuinely higher-capacity model to fall
 # back to (rather than a smaller one), for the rare case 20b itself
 # repeatedly fails on a rate_limit/timeout.
+# B29 (2026-09-08): tried switching to smaller models per user request
+# (meta/llama-3.2-3b-instruct, ibm/granite-3.0-8b-instruct) to fix a real
+# Stage 6 timeout -- both turned out dead. Worse: NVIDIA's own /v1/models
+# catalog listed them as available and they weren't -- live-tested EIGHT
+# candidates directly against a real chat/completions call (not just the
+# catalog) and every single one this account doesn't already use returned
+# 404 "Not found for account" (an entitlement gap, the same shape as
+# RESUME.md's kimi-k2.6 finding, just wider). This account is genuinely
+# entitled to only a small allowlist: openai/gpt-oss-20b, moonshotai/kimi-k3
+# (both live-tested just now, HTTP 200, fast), deepseek-ai/deepseek-v4-
+# flash-0731 (entitled but timed out on a trivial call just now -- real,
+# current unreliability, not a permission problem), the vision model, and
+# the council's nemotron model. None of these are meaningfully smaller
+# than gpt-oss-20b, and this codebase's own prior benchmarking (B25 above)
+# already measured 20b as the fastest of the lot. Reverted to 20b as
+# master; fallback is now kimi-k3 (confirmed fast and live right now,
+# unlike deepseek). kimi-k3 needs top_p=0.95, not this client's default
+# 1.0 -- see _MODEL_TOP_P_OVERRIDES below, which the fallback retry path
+# now actually reads per-model (it didn't before this fix; that gap is why
+# deepseek was picked over kimi-k3 for B28, before this was fixed).
 MASTER_MODEL    = "openai/gpt-oss-20b"
-FALLBACK_MODEL  = "openai/gpt-oss-120b"
+FALLBACK_MODEL  = "moonshotai/kimi-k3"
+
+# Per-model top_p override -- duplicated from utils/model_providers.py's
+# identical dict (deliberately: this file must not import that one, see
+# model_providers.py's own comment on avoiding the reverse circular
+# import). Needed because self.top_p is fixed once per client instance at
+# construction (usually for whichever model app.py's sidebar selected as
+# MASTER), but the fallback retry path below can call a *different* model
+# with its own requirement -- kimi-k3 rejects the standard top_p=1 with a
+# 400 (its top_p is fixed server-side at 0.95).
+_MODEL_TOP_P_OVERRIDES = {
+    "moonshotai/kimi-k3": 0.95,
+}
 # B26 fix (2026-08-22): was "openai/gpt-oss-120b" -- live-tested with a
 # real image and it explicitly replied "I can't see an image," not a wrong
 # guess, an outright claim of receiving none. None of the gpt-oss models
@@ -246,11 +278,25 @@ class AzureOpenAIClient:
         caller shared identically) -- this is what makes AgentConfig's
         `timeout_seconds`/`max_requests` fields (pipeline/agent_config.py)
         genuinely enforceable per agent role, not just documented. Omitting
-        either keeps the exact prior defaults (120s, 2 retries), so every
-        existing caller's behavior is unchanged."""
+        either previously kept a 120s/2-retry default.
+
+        B30 fix (2026-09-08): raised the shared default to 300s/3 retries.
+        Real live evidence: 4 real pipeline runs this session against the
+        same corpus each failed on a timeout, but at a DIFFERENT stage
+        each time (Stage 6 proposal generation twice, then Stage 4 gap
+        detection) -- ruling out one slow call site, pointing instead at
+        this NVIDIA account's endpoint being broadly slow/degraded right
+        now (matches this codebase's own prior documented finding of the
+        same symptom, RESUME.md's B22 section). Callers with their own
+        AgentConfig (pipeline/agent_config.py) already pass explicit
+        values and are unaffected by this default; this raises the floor
+        for every OTHER caller (wiki_compiler.py, graph_builder.py, etc.)
+        that never explicitly opted into a longer budget, so the next
+        stage this degraded endpoint happens to hit slow isn't yet
+        another one-off patch."""
         import time
-        MAX_RETRIES = max_retries if max_retries is not None else 2
-        TIMEOUT_SECS = timeout_seconds if timeout_seconds is not None else 120   # 2 minutes max per call, unless overridden
+        MAX_RETRIES = max_retries if max_retries is not None else 3
+        TIMEOUT_SECS = timeout_seconds if timeout_seconds is not None else 300   # unless overridden -- see B30 comment above
         model = _model or self.model
 
         # Clinova Phase 4, Epic 4.3 token instrumentation (2026-08-24): only
@@ -266,7 +312,7 @@ class AzureOpenAIClient:
                 {"role": "user",   "content": user},
             ],
             temperature=temperature,
-            top_p=self.top_p,
+            top_p=_MODEL_TOP_P_OVERRIDES.get(model, self.top_p),
             max_tokens=max_tokens,
             stream=True,
             timeout=TIMEOUT_SECS,
@@ -275,11 +321,13 @@ class AzureOpenAIClient:
             create_kwargs["stream_options"] = {"include_usage": True}
 
         try:
-            stream = self.client.chat.completions.create(**create_kwargs)
             # See _collect_stream()'s docstring: the SDK's own `timeout=`
             # above does not reliably bound total streaming duration, so
             # a real wall-clock deadline is enforced across the read loop.
+            # It must start BEFORE create() returns -- create() itself can
+            # block up to TIMEOUT_SECS waiting for response headers.
             deadline = time.monotonic() + TIMEOUT_SECS
+            stream = self.client.chat.completions.create(**create_kwargs)
             usage_sink = {} if want_usage else None
             content = _collect_stream(stream, deadline=deadline, usage_sink=usage_sink)
             if want_usage:
@@ -352,8 +400,13 @@ class AzureOpenAIClient:
         import time
         MAX_RETRIES = 2
         b64 = base64.b64encode(image_bytes).decode("utf-8")
+        # Same token-instrumentation contract as chat(): usage is only
+        # requested when a caller supplied a TokenMeter, and a provider
+        # that rejects stream_options degrades to token_usage=None for
+        # that call, never a fabricated count.
+        want_usage = self.token_meter is not None and _STREAM_OPTIONS_SUPPORT.get(self._base_url, True)
         try:
-            stream = self.client.chat.completions.create(
+            create_kwargs = dict(
                 model=VISION_MODEL,
                 messages=[
                     {"role": "system", "content": system},
@@ -373,12 +426,28 @@ class AzureOpenAIClient:
                 stream=True,
                 timeout=120,
             )
+            if want_usage:
+                create_kwargs["stream_options"] = {"include_usage": True}
             # Same real-wall-clock-deadline fix as chat() -- see
-            # _collect_stream()'s docstring.
+            # _collect_stream()'s docstring. Starts before create()
+            # returns for the same reason as chat()'s deadline.
             deadline = time.monotonic() + 120
-            return Success(_collect_stream(stream, deadline=deadline))
+            stream = self.client.chat.completions.create(**create_kwargs)
+            usage_sink = {} if want_usage else None
+            content = _collect_stream(stream, deadline=deadline, usage_sink=usage_sink)
+            if want_usage:
+                _STREAM_OPTIONS_SUPPORT.setdefault(self._base_url, True)
+                if usage_sink and self.token_meter is not None:
+                    self.token_meter.record(stage=self.current_stage, model=VISION_MODEL, usage=usage_sink)
+            return Success(content)
         except Exception as e:
             err = str(e)
+            # This provider rejected stream_options -- degrade once (never
+            # counted against MAX_RETRIES) and remember for every future
+            # call to this base_url, exactly like chat().
+            if want_usage and _stream_options_error(err) and self._base_url not in _STREAM_OPTIONS_SUPPORT:
+                _STREAM_OPTIONS_SUPPORT[self._base_url] = False
+                return self.vision(system, user_text, image_bytes, max_tokens, _retry=_retry)
             kind = _classify_error(err)
             if _retry < MAX_RETRIES and kind in ("rate_limit", "timeout"):
                 time.sleep(2 ** _retry)
