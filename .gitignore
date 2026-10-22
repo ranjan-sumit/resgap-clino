@@ -25,3 +25,4 @@ data/projects/
 .env.*
 !.env.example
 scratch/
+tests/ui/_artifacts/
