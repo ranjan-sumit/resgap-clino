@@ -1,0 +1,16 @@
+[theme]
+base = "light"
+primaryColor = "#0066cc"
+backgroundColor = "#f5f9ff"
+secondaryBackgroundColor = "#edf6ff"
+textColor = "#0b1f3a"
+
+[browser]
+gatherUsageStats = false
+
+[client]
+# Hides the Deploy button and developer menu in the top bar.
+toolbarMode = "minimal"
+
+[server]
+headless = true

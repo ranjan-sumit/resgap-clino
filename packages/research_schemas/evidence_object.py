@@ -31,6 +31,9 @@ class Provenance:
     section: str | None
     text_span: tuple[int, int] | None
     extraction_version: int = EVIDENCE_OBJECT_VERSION
+    # The verbatim passage the evidence rests on, when a reader quoted one that was
+    # then found in the paper's own text. None for evidence not tied to a quote.
+    quote: str | None = None
 
 
 @dataclass(frozen=True)
