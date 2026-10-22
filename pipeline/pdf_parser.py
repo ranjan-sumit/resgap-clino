@@ -233,6 +233,34 @@ def _analyze_figures_with_vision(pdf_path: str, client, figure_pages: list, on_p
     return descriptions
 
 
+MIN_READABLE_CHARS = 200
+
+
+def check_pdf_readable(pdf_path: str) -> str | None:
+    """Returns None when the PDF has a usable text layer, otherwise a short
+    reason it cannot be analysed (so the wiki model is never given nothing)."""
+    try:
+        if FITZ_AVAILABLE:
+            doc = fitz.open(pdf_path)
+            try:
+                if doc.needs_pass or doc.is_encrypted:
+                    return "password-protected (encrypted)"
+                chars = sum(len(page.get_text().strip()) for page in doc)
+            finally:
+                doc.close()
+        else:
+            with pdfplumber.open(pdf_path) as pdf:
+                chars = sum(len((p.extract_text() or "").strip()) for p in pdf.pages)
+    except Exception as e:
+        msg = str(e).lower()
+        if "password" in msg or "encrypt" in msg:
+            return "password-protected (encrypted)"
+        return "corrupt or not a valid PDF"
+    if chars < MIN_READABLE_CHARS:
+        return "no text layer (a scanned image?) - run OCR on it first"
+    return None
+
+
 def parse_pdf(pdf_path: str, filename: str, client=None, use_vision: bool = False,
               on_progress=None) -> dict:
     """

@@ -1,4 +1,4 @@
-﻿"""Playwright harness: start the app on a throwaway DB, screenshot at 3 viewports."""
+"""Playwright harness: start the app on a throwaway DB, screenshot at 3 viewports."""
 from __future__ import annotations
 
 import os

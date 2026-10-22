@@ -1,4 +1,4 @@
-﻿import pytest
+import pytest
 
 from pipeline import run_pipeline as rp
 from pipeline import wiki_compiler as wc

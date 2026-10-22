@@ -1,4 +1,4 @@
-﻿"""Knowledge-graph display data, and the wiki cache rule that fed it."""
+"""Knowledge-graph display data, and the wiki cache rule that fed it."""
 import math
 import sys
 import unittest

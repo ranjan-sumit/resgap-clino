@@ -1,4 +1,4 @@
-﻿"""Manual smoke test against a REAL provider: one tiny call per model role.
+"""Manual smoke test against a REAL provider: one tiny call per model role.
 
 Spends a few hundred tokens. Never run in CI.
     python scripts/smoke_real_run.py

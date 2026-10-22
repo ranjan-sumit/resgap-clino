@@ -51,7 +51,7 @@ from pipeline.graph_structural_gaps import detect_graph_structural_gaps
 from pipeline.lineage import record_run_lineage
 from pipeline.page_index import build_tree, tree_to_summary
 from pipeline.paper_manager import assign_tiers, corpus_stats
-from pipeline.pdf_parser import parse_pdf
+from pipeline.pdf_parser import check_pdf_readable, parse_pdf
 from pipeline.proposal_generator import generate_proposals, review_proposals
 from pipeline.reference_extractor import (
     REFERENCE_STAGE_VERSION, extract_and_enrich_references, summarise_reference_corpus,
@@ -146,7 +146,7 @@ def _noop(*_args, **_kwargs) -> None:
 def redo_proposal_step(results: dict, context: dict, client, domain_config: dict | None = None) -> list:
     """Stage 6 (draft + review) alone, on a finished run's gaps. For a run whose proposal
     step failed: fills them in without repeating the whole analysis."""
-    client.set_stage("Stage 6 — Proposals")
+    client.set_stage("Stage 6 â€” Proposals")
     gaps = results.get("gaps", [])
     proposals = generate_proposals(gaps, results.get("wiki", {}), context, client, domain_config=domain_config)
     if proposals:
@@ -238,7 +238,7 @@ def run_full_pipeline(
 
     domain_cfg = options.domain_config
     run_start = time.time()
-    name = (name or "").strip() or f"{context.get('domain', 'Run')[:20]} — {datetime.now().strftime('%H:%M')}"
+    name = (name or "").strip() or f"{context.get('domain', 'Run')[:20]} â€” {datetime.now().strftime('%H:%M')}"
 
     # The pipeline owns its own trace rows rather than relying on the
     # caller's callback to retain them: results["pipeline_trace"] is what
@@ -247,38 +247,74 @@ def run_full_pipeline(
     # stage timeline. The callback is additionally invoked for live display.
     trace_rows: list[dict] = []
 
-    def _trace(stage: str, inputs: str, outputs: str, status: str = "✅") -> None:
+    def _trace(stage: str, inputs: str, outputs: str, status: str = "âœ…") -> None:
         trace_rows.append({"stage": stage, "inputs": inputs, "outputs": outputs, "status": status})
         trace(stage, inputs, outputs)
 
     all_papers, all_trees = [], []
 
-    # ── Stage 1+2: Parse + PageIndex ──────────────────────────────────────
-    progress("Stage 1 — Parsing PDFs & building PageIndex trees…", 5)
+    # â”€â”€ Stage 1+2: Parse + PageIndex â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    progress("Stage 1 â€” Parsing PDFs & building PageIndex treesâ€¦", 5)
     # When the Corpus Quality Engine is enabled, Stage 2B needs each paper's
     # original PDF file (Docling operates on the file, not extracted text) --
     # keep the temp files alive until then instead of deleting here.
     paper_tmp_paths = []
-    for filename, content in papers:
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-            tmp.write(content)
-            tmp_path = tmp.name
-        if options.use_vision:
-            client.set_stage("Stage 1 — Figure analysis")
-        paper = parse_pdf(tmp_path, filename,
-                          client=client if options.use_vision else None,
-                          use_vision=options.use_vision,
-                          on_progress=lambda msg, _f=filename: progress(
-                              f"Stage 1 — Analysing figures in {_f} ({msg})…", 8))
-        paper["tier"] = 1
-        all_papers.append(paper)
-        all_trees.append(build_tree(paper))
-        if options.enable_quality_engine:
-            paper_tmp_paths.append(tmp_path)
-        else:
-            os.unlink(tmp_path)
+    unreadable: list[tuple[str, str]] = []
+    readable_papers: list[tuple[str, bytes]] = []
+    try:
+        for filename, content in papers:
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+            keep = False
+            try:
+                problem = check_pdf_readable(tmp_path)
+                if problem:
+                    unreadable.append((filename, problem))
+                    warn(f"'{filename}' was skipped: {problem}.")
+                    continue
+                if options.use_vision:
+                    client.set_stage("Stage 1 â€” Figure analysis")
+                paper = parse_pdf(tmp_path, filename,
+                                  client=client if options.use_vision else None,
+                                  use_vision=options.use_vision,
+                                  on_progress=lambda msg, _f=filename: progress(
+                                      f"Stage 1 â€” Analysing figures in {_f} ({msg})â€¦", 8))
+                paper["tier"] = 1
+                all_papers.append(paper)
+                all_trees.append(build_tree(paper))
+                readable_papers.append((filename, content))
+                if options.enable_quality_engine:
+                    paper_tmp_paths.append(tmp_path)
+                    keep = True
+            finally:
+                if not keep:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+    except BaseException:
+        for _p in paper_tmp_paths:       # a crash must not leave uploaded papers in the temp folder
+            try:
+                os.unlink(_p)
+            except OSError:
+                pass
+        raise
 
-    _trace("Stage 1 — PDF Parse",
+    for _fn, _why in unreadable:
+        _trace(f"  Skipped {_fn}", "PDF check", _why, "âŒ")
+    if len(readable_papers) < MIN_PAPERS:
+        for _p in paper_tmp_paths:
+            try:
+                os.unlink(_p)
+            except OSError:
+                pass
+        raise PipelineInputError(
+            f"Only {len(readable_papers)} of {len(papers)} papers could be read. "
+            + " ".join(f"{fn}: {why}." for fn, why in unreadable))
+    papers = readable_papers      # later stages index papers[i] alongside all_papers[i]
+
+    _trace("Stage 1 â€” PDF Parse",
           f"{len(papers)} PDFs",
           f"{sum(p.get('char_count', 0) for p in all_papers):,} chars extracted")
     for p in all_papers:
@@ -289,19 +325,19 @@ def run_full_pipeline(
         _trace(f"  Parsed {p.get('filename', '?')}",
                f"{p.get('char_count', 0):,} chars",
                f"{len(secs)} sections, {len(p.get('tables', []))} tables{fig_note}",
-               "✅" if len(secs) >= 2 and not bad else "⚠️")
+               "âœ…" if len(secs) >= 2 and not bad else "âš ï¸")
     progress("Stage 1 complete", 12)
 
-    # ── Stage 1B/1C: References ───────────────────────────────────────────
+    # â”€â”€ Stage 1B/1C: References â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     ref_papers: list = []
     ref_diagnostics: dict = {}
     ref_resolution_diagnostics = None
     if options.extract_refs:
-        progress("Stage 1B — Extracting & enriching references (50+ paper corpus)…", 14)
-        client.set_stage("Stage 1B — Reference Extraction")
+        progress("Stage 1B â€” Extracting & enriching references (50+ paper corpus)â€¦", 14)
+        client.set_stage("Stage 1B â€” Reference Extraction")
 
         def ref_upd(_current, _total, msg):
-            progress(f"Stage 1B — {msg}", 14)
+            progress(f"Stage 1B â€” {msg}", 14)
 
         ref_papers, ref_diagnostics = extract_and_enrich_references(
             all_papers, client,
@@ -310,7 +346,7 @@ def run_full_pipeline(
             return_diagnostics=True,
         )
         summary = summarise_reference_corpus(ref_papers)
-        _trace("Stage 1B — Reference Extraction",
+        _trace("Stage 1B â€” Reference Extraction",
               f"{len(papers)} PDFs scanned",
               f"{summary['total']} refs from {ref_diagnostics.get('raw_entries', 0)} raw entries: "
               f"{summary['tier2_abstract']} with abstract, {summary['tier3_title']} title-only")
@@ -319,10 +355,10 @@ def run_full_pipeline(
         # QUARANTINED/UNRESOLVED are dropped from what downstream stages see
         # but counted in diagnostics -- never silently discarded.
         if options.enable_quality_engine and ref_papers:
-            progress("Stage 1C — Canonical reference resolution…", 21)
+            progress("Stage 1C â€” Canonical reference resolutionâ€¦", 21)
             ref_papers, ref_resolution_diagnostics = filter_and_dedupe_references(ref_papers)
             sc = ref_resolution_diagnostics["status_counts"]
-            _trace("Stage 1C — Reference Resolution",
+            _trace("Stage 1C â€” Reference Resolution",
                   f"{ref_resolution_diagnostics['input_count']} enriched refs",
                   f"{ref_resolution_diagnostics['trusted_count']} trusted "
                   f"(VERIFIED {sc['VERIFIED']}, ACCEPTED {sc['ACCEPTED']}), "
@@ -330,24 +366,24 @@ def run_full_pipeline(
                   f"{ref_resolution_diagnostics['duplicates_removed']} duplicates merged")
     progress("References complete", 20)
 
-    # ── Stage 2: Wiki ─────────────────────────────────────────────────────
-    progress("Stage 2 — Compiling LLM Wiki pages…", 22)
-    client.set_stage("Stage 2 — LLM Wiki")
+    # â”€â”€ Stage 2: Wiki â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    progress("Stage 2 â€” Compiling LLM Wiki pagesâ€¦", 22)
+    client.set_stage("Stage 2 â€” LLM Wiki")
     wiki = build_wiki(all_papers, all_trees, client, domain_config=domain_cfg)
-    _trace("Stage 2 — LLM Wiki",
+    _trace("Stage 2 â€” LLM Wiki",
           f"{len(all_papers)} papers",
           f"{len(wiki.get('pages', []))} pages, "
           f"{len(wiki.get('cross_links', {}).get('shared_concepts', []))} links")
     for _w in wiki.get("warnings", []):
-        _trace("  Wiki cross-links", "all pages", _w, "⚠️")
+        _trace("  Wiki cross-links", "all pages", _w, "âš ï¸")
         warn(_w)
     for pg in wiki.get("pages", []):
         if not (pg.get("key_findings") or pg.get("contributions") or pg.get("methods")):
             _trace(f"  Wiki page for {pg.get('source_file', '?')}", "paper text",
-                   "empty — the model returned no findings, contributions or methods", "⚠️")
+                   "empty â€” the model returned no findings, contributions or methods", "âš ï¸")
     progress("Wiki complete", 34)
 
-    # ── Stage 2B: Corpus Quality Engine (opt-in) ──────────────────────────
+    # â”€â”€ Stage 2B: Corpus Quality Engine (opt-in) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     corpus_quality_metrics = None
     # Per-paper field-level completeness. Kept at function scope (not inside
     # the Quality Engine branch) so it can be persisted below: app.py only
@@ -365,11 +401,11 @@ def run_full_pipeline(
     docling_results = [None] * len(all_papers)
 
     if options.enable_quality_engine:
-        progress("Stage 2B — Corpus Quality Engine (multi-parser cross-check)…", 35)
+        progress("Stage 2B â€” Corpus Quality Engine (multi-parser cross-check)â€¦", 35)
         paper_scores = []
         docling_results = []
         for i, (paper, tmp_path) in enumerate(zip(all_papers, paper_tmp_paths)):
-            progress(f"Stage 2B — Cross-checking paper {i+1}/{len(all_papers)} with the structural parser…", 35)
+            progress(f"Stage 2B â€” Cross-checking paper {i+1}/{len(all_papers)} with the structural parserâ€¦", 35)
             wiki_page = wiki_pages[i] if i < len(wiki_pages) else {}
             docling_result = None
             try:
@@ -412,7 +448,7 @@ def run_full_pipeline(
             gate_blocked = True
             gate_block_reasons = e.reasons
 
-        _trace("Stage 2B — Corpus Quality Engine",
+        _trace("Stage 2B â€” Corpus Quality Engine",
               f"{len(all_papers)} papers, {len(ref_papers)} refs",
               f"{corpus_quality_metrics['extraction_completeness']:.0%} extraction completeness, "
               f"{corpus_quality_metrics['doi_resolution_rate']:.0%} DOI resolution, "
@@ -424,9 +460,9 @@ def run_full_pipeline(
         except OSError:
             pass
 
-    # ── Stage 2C: Evidence Extraction (always runs) ───────────────────────
-    progress("Stage 2C — Extracting evidence objects…", 35)
-    client.set_stage("Stage 2C — Evidence Extraction")
+    # â”€â”€ Stage 2C: Evidence Extraction (always runs) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    progress("Stage 2C â€” Extracting evidence objectsâ€¦", 35)
+    client.set_stage("Stage 2C â€” Evidence Extraction")
     evidence_objects: dict = {}
     paper_profiles: dict = {}
     total_evidence = 0
@@ -460,49 +496,49 @@ def run_full_pipeline(
                                     "quoted_items": sum(1 for e in evidence_dicts if (e.get("provenance") or {}).get("quote"))}
         if reader and not reader.get("usable"):
             _trace(f"  Evidence for {filename}", "paper text",
-                   f"reader could not run ({reader.get('error')}); used the wiki summary instead", "⚠️")
+                   f"reader could not run ({reader.get('error')}); used the wiki summary instead", "âš ï¸")
 
     n_quoted = sum(p["quoted_items"] for p in paper_profiles.values())
-    _trace("Stage 2C — Evidence Extraction",
+    _trace("Stage 2C â€” Evidence Extraction",
           f"{len(all_papers)} papers",
           f"{total_evidence} evidence objects, {n_quoted} with a verified quote and page "
           f"(study types: " + ", ".join(f"{p['study_type'] or '?'}" for p in paper_profiles.values()) + ")")
 
-    # ── Stages 3-6 (skipped entirely on a FAIL gate) ──────────────────────
+    # â”€â”€ Stages 3-6 (skipped entirely on a FAIL gate) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if not gate_blocked:
-        progress("Stage 3 — Building knowledge graph (LazyGraphRAG)…", 36)
-        client.set_stage("Stage 3 — Knowledge Graph")
+        progress("Stage 3 â€” Building knowledge graph (LazyGraphRAG)â€¦", 36)
+        client.set_stage("Stage 3 â€” Knowledge Graph")
         graph = build_knowledge_graph(wiki, client, domain_config=domain_cfg,
                                       evidence_objects=evidence_objects)
         graph_quality = score_graph_quality(graph, wiki)
-        _trace("Stage 3 — Knowledge Graph",
+        _trace("Stage 3 â€” Knowledge Graph",
               "Wiki pages + cross-links",
               f"{graph['stats']['entity_count']} entities, "
               f"{graph['stats']['relationship_count']} relationships "
-              f"— {graph_quality['build_status']} (quality={graph_quality['quality_score']})")
+              f"â€” {graph_quality['build_status']} (quality={graph_quality['quality_score']})")
         progress("Graph complete", 48)
 
-        progress("Stage 4 — Finding research gaps (finder agents + critic)…", 50)
-        client.set_stage("Stage 4 — Gap Detection")
+        progress("Stage 4 â€” Finding research gaps (finder agents + critic)â€¦", 50)
+        client.set_stage("Stage 4 â€” Gap Detection")
         gap_detection_error = None
         agent_out = find_gaps(wiki, graph, context, client, evidence_objects, paper_profiles)
         gaps = agent_out["gaps"]
         rejected_gaps = agent_out["rejected"]
         agent_diag = agent_out["diagnostics"]
-        _trace("Stage 4 — Gap agents",
+        _trace("Stage 4 â€” Gap agents",
                f"{len(evidence_objects)} papers' quoted evidence, 3 finder lenses",
                f"{agent_diag.get('candidates', 0)} grounded candidates -> {len(agent_out['gaps'])} kept by the critic, "
                f"{len(rejected_gaps)} merged/dropped"
                + (f"; critic: {agent_diag['critic_error']}" if agent_diag.get("critic_error") else ""),
-               "⚠️" if agent_diag.get("critic_error") else "✅")
+               "âš ï¸" if agent_diag.get("critic_error") else "âœ…")
         for fd in agent_diag.get("finders", []):
             if fd.get("error"):
                 _trace(f"  Gap finder: {fd['lens']}" + (f" ({fd['paper']})" if fd.get("paper") else ""),
-                       "evidence brief", fd["error"], "⚠️")
+                       "evidence brief", fd["error"], "âš ï¸")
         if not gaps:
             # Agents produced nothing usable (all calls failed or nothing grounded): fall back to
             # the single-call detector so a run is not left without gaps by one bad round of calls.
-            client.set_stage("Stage 4 — Gap Detection")
+            client.set_stage("Stage 4 â€” Gap Detection")
             try:
                 gaps = detect_gaps(wiki, graph, context, client, domain_config=domain_cfg,
                                    evidence_objects=evidence_objects)
@@ -533,35 +569,35 @@ def run_full_pipeline(
             gaps, supplementary_gaps = lead_gaps, []
             warn("No gaps came from the model-based detectors; showing rule-based and graph-structure leads instead.")
         if gap_detection_error:
-            _trace("Stage 4 — Gap Detection (fallback)", "gap agents", gap_detection_error, status="⚠️")
+            _trace("Stage 4 â€” Gap Detection (fallback)", "gap agents", gap_detection_error, status="âš ï¸")
         # FR-7: a DEGRADED/FALLBACK graph downgrades confidence for gaps
         # whose entire evidentiary basis is that graph.
         gaps = apply_graph_quality_to_gaps(gaps, graph_quality)
 
-        progress("Stage 5 — Checking gaps against the literature (Semantic Scholar + Europe PMC)…", 58)
-        client.set_stage("Stage 5 — Gap Validation")
+        progress("Stage 5 â€” Checking gaps against the literature (Semantic Scholar + Europe PMC)â€¦", 58)
+        client.set_stage("Stage 5 â€” Gap Validation")
         _study_types = {(p or {}).get("study_type") for p in paper_profiles.values()}
         scout_out = scout_gaps(
             gaps, client, domain_config=domain_cfg,
             ss_api_key=(options.ss_api_key or "").strip(),
             use_arxiv=bool(_study_types & set(_ARXIV_STUDY_TYPES)),
             progress_callback=lambda done, total: progress(
-                f"Stage 5 — Checking gaps against the literature: {done + 1} of {total}…",
+                f"Stage 5 â€” Checking gaps against the literature: {done + 1} of {total}â€¦",
                 58 + int(8 * done / max(total, 1))))
         validated_gaps = scout_out["gaps"]
         scout_diag = scout_out["diagnostics"]
         _by_status = {}
         for g in validated_gaps:
             _by_status[g.get("validation_status")] = _by_status.get(g.get("validation_status"), 0) + 1
-        _trace("Stage 5 — Literature check",
+        _trace("Stage 5 â€” Literature check",
                f"{len(validated_gaps)} gaps, queries written by a planner agent",
                ", ".join(f"{n} {s}" for s, n in sorted(_by_status.items(), key=lambda kv: str(kv[0])))
                + (f"; {scout_diag['cache_hits']} from cache" if scout_diag.get("cache_hits") else "")
                + (f"; WARNING: {scout_diag['unverified']} could not be checked (search unavailable)"
                   if scout_diag.get("unverified") else "")
                + (f"; {scout_diag['planner_error']}" if scout_diag.get("planner_error") else ""),
-               "⚠️" if scout_diag.get("unverified") or scout_diag.get("planner_error") else "✅")
-        _trace("Stage 4-5 — Gaps",
+               "âš ï¸" if scout_diag.get("unverified") or scout_diag.get("planner_error") else "âœ…")
+        _trace("Stage 4-5 â€” Gaps",
               "Top-ranked agent gaps"
               + (f" (+{len(supplementary_gaps)} supplementary, not validated)" if supplementary_gaps else ""),
               f"{len(validated_gaps)} gaps: "
@@ -569,10 +605,10 @@ def run_full_pipeline(
         progress("Gaps complete", 66)
 
         if options.enable_gap_challenger:
-            progress("Stage 5b — Gap Challenger (search coverage + terminal status)…", 62)
-            client.set_stage("Stage 5b — Gap Challenger")
+            progress("Stage 5b â€” Gap Challenger (search coverage + terminal status)â€¦", 62)
+            client.set_stage("Stage 5b â€” Gap Challenger")
             for i, gap in enumerate(validated_gaps):
-                progress(f"Stage 5b — Challenging gap {i+1}/{len(validated_gaps)}…", 62)
+                progress(f"Stage 5b â€” Challenging gap {i+1}/{len(validated_gaps)}â€¦", 62)
                 try:
                     gap.update(run_challenge(
                         gap, client, ss_api_key=(options.ss_api_key or "").strip(),
@@ -586,47 +622,47 @@ def run_full_pipeline(
                     gap["challenger_error"] = str(e)
             statuses = [g.get("challenger_status") for g in validated_gaps if g.get("challenger_status")]
             status_counts = {s: statuses.count(s) for s in sorted(set(statuses))}
-            _trace("Stage 5b — Gap Challenger",
+            _trace("Stage 5b â€” Gap Challenger",
                   f"{len(validated_gaps)} gaps",
                   ", ".join(f"{v} {k}" for k, v in status_counts.items())
                   or "no gaps reached a terminal status")
 
-        progress("Stage 6 — Generating proposals…", 68)
-        client.set_stage("Stage 6 — Proposals")
+        progress("Stage 6 â€” Generating proposalsâ€¦", 68)
+        client.set_stage("Stage 6 â€” Proposals")
         proposals = generate_proposals(validated_gaps, wiki, context, client,
                                        domain_config=domain_cfg)
         _had_actionable = any(g.get("validation_status") in ("open", "partial", "unverified") for g in validated_gaps)
         if proposals:
-            _trace("Stage 6 — Proposals", f"{len(validated_gaps)} gaps", f"{len(proposals)} drafted")
-            progress("Stage 6b — Reviewing proposals…", 72)
+            _trace("Stage 6 â€” Proposals", f"{len(validated_gaps)} gaps", f"{len(proposals)} drafted")
+            progress("Stage 6b â€” Reviewing proposalsâ€¦", 72)
             drafted = len(proposals)
             reviewed, review_diag = review_proposals(proposals, validated_gaps, client, domain_config=domain_cfg)
             if reviewed:
                 proposals = reviewed
             else:
                 review_diag["error"] = (review_diag.get("error") or "") + " every proposal was rejected: kept the originals"
-            _trace("Stage 6b — Proposal Review", f"{drafted} drafted proposals",
+            _trace("Stage 6b â€” Proposal Review", f"{drafted} drafted proposals",
                    f"{len(proposals)} kept: {review_diag['accepted']} accepted, {review_diag['revised']} revised, "
                    f"{len(review_diag['rejected'])} rejected"
                    + (f" ({'; '.join(r['title'] + ': ' + r['reason'] for r in review_diag['rejected'][:3])})"
                       if review_diag["rejected"] else "")
                    + (f"; {review_diag['error']}" if review_diag.get("error") else ""),
-                   "⚠️" if review_diag.get("error") else "✅")
+                   "âš ï¸" if review_diag.get("error") else "âœ…")
         elif not _had_actionable:
-            _trace("Stage 6 — Proposals", f"{len(validated_gaps)} gaps", "0 proposals (no open or partial gaps)")
+            _trace("Stage 6 â€” Proposals", f"{len(validated_gaps)} gaps", "0 proposals (no open or partial gaps)")
         else:
-            _trace("Stage 6 — Proposals", f"{len(validated_gaps)} gaps",
+            _trace("Stage 6 â€” Proposals", f"{len(validated_gaps)} gaps",
                    "0 proposals even though open gaps exist: the model's reply could not be read. "
-                   "Run again, or pick a different Analysis model.", "⚠️")
+                   "Run again, or pick a different Analysis model.", "âš ï¸")
         progress("Proposals complete", 75)
     else:
-        progress("Quality gate FAILED — skipping gap analysis, saving fetched data…", 68)
+        progress("Quality gate FAILED â€” skipping gap analysis, saving fetched dataâ€¦", 68)
         graph = {"stats": {"entity_count": 0, "relationship_count": 0}, "communities": []}
         graph_quality = None
         validated_gaps = []
         supplementary_gaps, rejected_gaps, agent_diag = [], [], {}
         proposals = []
-        _trace("Stage 3-6 — Skipped (quality gate FAIL)",
+        _trace("Stage 3-6 â€” Skipped (quality gate FAIL)",
               f"{len(all_papers)} papers, {len(ref_papers)} refs",
               "; ".join(gate_block_reasons) or "corpus below quality threshold")
         progress("Saving fetched data", 75)
@@ -697,7 +733,7 @@ def run_full_pipeline(
                 gsummary = save_graph_snapshot(saved_id, name, graph, quality=graph_quality)
                 _trace("Graph Persistence (SQLite)",
                       f"{gsummary['entity_count']} entities, {gsummary['relationship_count']} relationships",
-                      f"Saved under run_id={saved_id[:8]}…")
+                      f"Saved under run_id={saved_id[:8]}â€¦")
             except Exception as e:
                 warn(f"Graph persistence failed (run itself completed normally): {e}")
         else:
@@ -789,3 +825,4 @@ def run_full_pipeline(
         n_gaps=len(validated_gaps), n_proposals=len(proposals),
         duration_seconds=round(time.time() - run_start, 1),
     )
+

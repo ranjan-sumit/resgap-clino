@@ -1,4 +1,4 @@
-﻿"""
+"""
 Regression guard for pipeline/run_pipeline.py: a GapDetectionError out of
 Stage 4's detect_gaps() must not kill the run before save_run -- the run
 degrades to the deterministic + graph-structural gap sources only, records
@@ -24,6 +24,13 @@ _PAPERS = [("paper_1.pdf", b"%PDF-1.4 fake"), ("paper_2.pdf", b"%PDF-1.4 fake tw
 
 
 class GapDetectionFailureTests(unittest.TestCase):
+    def setUp(self):
+        # The fixtures use fake PDF bytes, so the readability check is stubbed.
+        # (Started here: a with-statement may nest at most 20 blocks.)
+        _p = patch("pipeline.run_pipeline.check_pdf_readable", return_value=None)
+        _p.start()
+        self.addCleanup(_p.stop)
+
     def _run(self, warnings):
         options = RunOptions(provider_key="nvidia", model="test-model")
         with \
