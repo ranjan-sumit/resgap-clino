@@ -35,18 +35,15 @@ def test_a_running_job_shows_the_checklist_after_a_refresh(app_test, isolated_en
     assert "Summarise each paper" in text and "Read the papers" in text
 
 
-def test_run_button_is_held_while_a_job_runs(app_test, isolated_env, monkeypatch):
+def test_run_is_held_while_a_job_runs(app_test, isolated_env, monkeypatch):
+    from tests.ui_helpers import store_papers, wizard_to_review
     monkeypatch.setenv("GEMINI_API_KEY", "k" * 30)
-    for i in range(2):
-        project_store.save_papers(PID, [(f"p{i}.pdf", _text_pdf(f"x{i}"))])
+    ids = store_papers(2)
     job_id = _running_job()
     run_jobs._THREADS[job_id] = SimpleNamespace(is_alive=lambda: True)
-    at = app_test(timeout=90)
-    for c in at.checkbox:
-        if c.label.startswith("p"):
-            c.check()
-    at.run()
-    assert _run_button(at).disabled
+    at = wizard_to_review(app_test(timeout=90), ids=ids)
+    assert at.button(key="wiz_run").disabled
+    assert "already running" in _texts(at)
 
 
 def test_orphaned_job_from_a_previous_process_is_reported_failed(app_test, isolated_env):
@@ -69,8 +66,8 @@ def test_a_finished_job_shows_its_summary_and_can_be_dismissed(app_test, isolate
 
 def test_clicking_run_starts_a_background_job_and_shows_its_checklist(app_test, isolated_env, monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "k" * 30)
-    papers = [(f"p{i}.pdf", _text_pdf(f"x{i}")) for i in range(2)]
-    project_store.save_papers(PID, papers)
+    from tests.ui_helpers import store_papers, wizard_to_review
+    ids = store_papers(2)
     release, seen = __import__("threading").Event(), {}
 
     def slow_runner(**kw):
@@ -82,12 +79,8 @@ def test_clicking_run_starts_a_background_job_and_shows_its_checklist(app_test, 
 
     real = run_jobs.start_job
     monkeypatch.setattr(run_jobs, "start_job", lambda **kw: real(**kw, runner=slow_runner))
-    at = app_test(timeout=90)
-    for c in at.checkbox:
-        if c.label.startswith("p"):
-            c.check()
-    at.run()
-    _run_button(at).click().run()
+    at = wizard_to_review(app_test(timeout=90), ids=ids)
+    at.button(key="wiz_run").click().run()
     try:
         jobs = run_jobs.list_jobs(project_id=PID)
         assert len(jobs) == 1 and jobs[0]["name"] == ""
@@ -100,7 +93,8 @@ def test_clicking_run_starts_a_background_job_and_shows_its_checklist(app_test, 
             time.sleep(0.05)
 
 
-def test_background_setting_is_on_by_default_and_can_be_turned_off(app_test, isolated_env):
-    at = app_test(timeout=90)
-    box = next(c for c in at.checkbox if c.label.startswith("Keep running in the background"))
-    assert box.value is True
+def test_background_setting_is_on_by_default_in_the_review_step(app_test, isolated_env, monkeypatch):
+    from tests.ui_helpers import store_papers, wizard_to_review
+    monkeypatch.setenv("GEMINI_API_KEY", "k" * 30)
+    at = wizard_to_review(app_test(timeout=90), ids=store_papers(2))
+    assert at.checkbox(key="wiz_bg").value is True

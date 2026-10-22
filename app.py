@@ -189,7 +189,7 @@ from ui.viewmodels import (keys_line, off_note, overview, run_header, saved_trac
 from ui.compat import plotly_full_width, table_full_width
 import hashlib
 from utils.run_storage import to_local_display
-from utils.database import with_sections
+from utils.database import with_sections, cache_stats as db_cache_stats, clear_cache as db_clear_cache, _db_path as db_path_for_display
 from utils.cost_guard import DEFAULT_CAP_TOKENS, describe_estimate, estimate_cost, estimate_run
 
 
@@ -507,166 +507,72 @@ def _render_model_picker() -> list:
     return issues
 
 
-# ── Sidebar ────────────────────────────────────────────────────────────────────
+# ── Settings state, resolved on every run (the widgets are on the Settings page) ──────────────
+from ui.settings_state import (DEFAULT_OPTIONS, hide_paths, model_issues as _model_issues_for,
+                               new_settings, resolve_keys, source_label)
+
+if "_settings" not in st.session_state:
+    st.session_state["_settings"] = new_settings()
+_S = st.session_state["_settings"]
+_resolved = resolve_keys(_S, PROVIDER_REGISTRY, CUSTOM_PROVIDER)
+_keys = _resolved["keys"]
+_available = _resolved["available"]
+_custom_base = _resolved["custom_base"]
+ss_api_key = _resolved["ss_key"]
+api_key = _keys["nvidia"]          # also used for relevance ranking in Deep gap validation
+st.session_state["_available_providers"] = _available
+st.session_state["_custom_base_url"] = _custom_base
+if "model_config" not in st.session_state:
+    st.session_state["model_config"] = load_config(_available)
+st.session_state.setdefault("view", "main")   # main | new_analysis | settings | new_project
+
+
+def _go(view: str) -> None:
+    st.session_state["view"] = view
+
+
+def _model_issues() -> list:
+    return _model_issues_for(st.session_state["model_config"], _available, MAIN_ROLES, ROLE_LABELS, _provider_name)
+
+
+# ── Sidebar: where am I, and the four things to do ─────────────────────────────────────────
 with st.sidebar:
     st.markdown(f'<div class="sb-brand">{html.escape(_BRANDING["product_name"])}</div>', unsafe_allow_html=True)
 
-    # ── Project: every analysis, its papers and files, and feedback belong to one ──
-    st.markdown("##### Project")
     _projects = list_projects()
     _project_ids = [p["id"] for p in _projects]
     _project_by_id = {p["id"]: p for p in _projects}
-    if "_pending_project" in st.session_state:   # set by the New project dialog; the picker
-        st.session_state["project_select"] = st.session_state.pop("_pending_project")   # can't be set after it exists
+    if "_pending_project" in st.session_state:   # set by New project; the picker can't be set after it exists
+        st.session_state["project_select"] = st.session_state.pop("_pending_project")
     if st.session_state.get("project_select") not in _project_ids:
         st.session_state["project_select"] = DEFAULT_PROJECT_ID
     st.session_state.current_project_id = st.session_state["project_select"]
     st.selectbox(
         "Project", _project_ids, key="project_select", on_change=_on_project_change,
-        format_func=lambda pid: f"{_project_by_id[pid]['name']} ({_project_by_id[pid]['run_count']})",
+        format_func=lambda pid: f"{_project_by_id[pid]['name']} ({_project_by_id[pid]['run_count']} runs)",
         label_visibility="collapsed")
-    if st.button("New project", key="new_project_btn"):
-        _new_project_dialog()
-
-    # Containers fix the on-screen ORDER (setup first, model last) while the
-    # code below fills the model one first: the analysis options depend on the
-    # selected provider (e.g. whether it supports image input).
-    setup_c = st.container()
-    options_c = st.container()
-    model_c = st.container()
-
-    # ── API keys & endpoints (set once; WHICH model does what is chosen next to Run) ──
-    with model_c:
-        with st.expander("API keys & endpoints"):
-            st.caption("Keys stay in this session and are never written to disk. "
-                       "Leave a field blank to use the environment variable named in its help.")
-            _typed_keys = {}
-            for _pk, _pcfg in PROVIDER_REGISTRY.items():
-                _typed_keys[_pk] = st.text_input(
-                    f"{_pcfg.label.split(' (')[0]} API key", type="password", placeholder="Paste key",
-                    key=f"key_{_pk}", help=f"Leave blank to use {_pcfg.api_key_env}.")
-            st.markdown("**Custom endpoint** — any OpenAI-compatible API")
-            _typed_custom_base = st.text_input(
-                "Base URL", key="custom_base_url", placeholder="https://api.example.com/v1",
-                value=os.environ.get("CUSTOM_LLM_BASE_URL", ""),
-                help="Anything that speaks the OpenAI chat format. Choose \"Custom endpoint\" as a provider below.")
-            _typed_custom_key = st.text_input(
-                "Custom endpoint API key", type="password", placeholder="Paste key", key="key_custom",
-                help="Leave blank to use CUSTOM_LLM_API_KEY.")
-            ss_api_key = st.text_input(
-                "Semantic Scholar API key (optional)", type="password", placeholder="Paste key",
-                help="Leave blank to use SEMANTIC_SCHOLAR_API_KEY from the environment; with neither, the free, "
-                     "rate-limited tier is used. Get a key at semanticscholar.org/product/api.")
-            # Like every other key, the environment is a valid source (it was ignored here, so
-            # runs used the slow free tier even with a key in .env).
-            ss_api_key = (ss_api_key or "").strip() or os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "").strip()
-            if ss_api_key:
-                st.caption("Semantic Scholar key in use.")
-
-        # An env var is a valid source for every key, so a deployed app can ship its
-        # keys as secrets while users may still paste their own.
-        _keys = {pk: (_typed_keys[pk] or os.environ.get(pcfg.api_key_env, "")).strip()
-                 for pk, pcfg in PROVIDER_REGISTRY.items()}
-        _custom_base = (_typed_custom_base or "").strip()
-        _keys[CUSTOM_PROVIDER] = (_typed_custom_key or os.environ.get("CUSTOM_LLM_API_KEY", "")).strip()
-        _available = {pk for pk in PROVIDER_REGISTRY if _keys[pk]}
-        if _keys[CUSTOM_PROVIDER] and _custom_base:
-            _available.add(CUSTOM_PROVIDER)
-        st.session_state["_available_providers"] = _available
-        st.session_state["_custom_base_url"] = _custom_base
-        api_key = _keys["nvidia"]          # also used for relevance ranking in Deep gap validation
-        if "model_config" not in st.session_state:
-            st.session_state["model_config"] = load_config(_available)
-        _found = [_provider_name(p) for p in (*PROVIDER_REGISTRY, CUSTOM_PROVIDER) if p in _available]
-        st.caption(keys_line(_found, bool(ss_api_key)))
-
-    # ── Research setup (used on every run -> always visible) ─────────────────
-    with setup_c:
-        st.markdown("##### Research setup")
-        _domain_choices = dict(get_ui_domain_choices())          # label -> domain key
-        _domain_label = st.selectbox("Domain", list(_domain_choices), index=0)
-        selected_domain = _domain_choices[_domain_label]
-        domain_cfg   = get_domain_config(selected_domain)
-        st.caption(domain_cfg["description"])
-        interest = st.text_area("Research interest",
-                                 placeholder=f"e.g., {domain_cfg.get('gap_examples','')[:80]}...",
-                                 height=80)
-        gap_type = st.selectbox("Gap type", ["Any", "Methodology", "Application", "Dataset",
-                                             "Evaluation", "Theory", "Benchmark"])
-
-    # ── Analysis options ──────────────────────────────────────────────────────
-    with options_c:
-        st.markdown("##### Analysis")
-        extract_refs = st.checkbox(
-            "Include cited references", value=False,
-            help="Looks up each paper's cited references on Semantic Scholar to widen the corpus. "
-                 "Slow: about 3-5 seconds per reference (more when Semantic Scholar throttles), "
-                 "so 50 references per paper adds roughly 5-10 minutes per paper. "
-                 "An optional Semantic Scholar API key (Model & API keys) speeds this up.")
-        ref_limit = st.selectbox(
-            "References per paper", ["25", "50", "100", "All"], index=1,
-            disabled=not extract_refs,
-            help="Higher limits take longer but improve reference coverage.")
-
-        with st.expander("Advanced options"):
-            enable_quality_engine = st.checkbox(
-                "Quality check", value=False,
-                help="Cross-checks each paper with a second parser and resolves cited references "
-                     "before gap analysis. The run is blocked if extraction quality is too low. "
-                     "Adds a few seconds per new paper (cached afterwards).")
-            override_quality_gate = False
-            if enable_quality_engine:
-                override_quality_gate = st.checkbox(
-                    "Continue even if the quality check fails", value=False,
-                    help="A failed check blocks the run by default. Tick this to proceed anyway; "
-                         "the quality warning is still recorded in the results.")
-
-            enable_gap_challenger = st.checkbox(
-                "Deep gap validation", value=False,
-                help="Adds an extra literature search and a six-level status "
-                     "(open, partially open, contested, likely closed, closed, insufficient evidence) "
-                     "for each gap, based on how thoroughly the literature was searched. "
-                     "Slower: roughly 30 seconds per gap.")
-            if enable_gap_challenger and not api_key:
-                st.caption("No NVIDIA key found: candidate papers will not be relevance-ranked.")
-
-            _mc = st.session_state["model_config"]
-            if any(can_read_images(s) for s in (_mc.spec_for(ROLE_EXTRACTION), _mc.spec_for(ROLE_ANALYSIS), _mc.fallback) if s):
-                use_vision = st.checkbox(
-                    "Analyze figures and tables", value=False,
-                    help="Sends up to 5 figure-heavy pages per paper to a vision model. "
-                         "Slower and uses more tokens.")
-            else:
-                use_vision = False
-                st.caption("Figure analysis needs a model that can read images (for example Gemini or NVIDIA "
-                           "as extraction, analysis or fallback model).")
+    st.button("New project", key="new_project_btn", on_click=_go, args=("new_project",))
+    st.button("New analysis", key="new_analysis_btn", type="primary", on_click=_go, args=("new_analysis",),
+              width="stretch")
+    st.button("Settings", key="settings_btn", on_click=_go, args=("settings",))
 
     st.markdown("---")
-
-    # ── Recent runs (this project) ─────────────────────────────────────────────
     st.markdown("##### Recent runs")
     runs = list_runs(limit=5, project_id=st.session_state.current_project_id)
     if not runs:
         st.caption("No saved runs in this project yet.")
-    else:
-        for run in runs:
-            ts_short = _local_time(run["created_at"])
-            on_screen = "● " if run["id"] == st.session_state.current_run_id else ""
-            if st.button(
-                f"{on_screen}{run['name'][:30]}",
-                key=f"load_{run['id']}",
-                help=f"{ts_short} · {run['domain']} · {run['n_papers']} papers · {run['n_gaps']} gaps",
-            ):
-                if _load_run_into_session(run["id"], run["name"]):
-                    st.rerun()
-
-            st.markdown(
-                f'<div style="font-size:0.72rem;color:#55708f;'
-                f'margin-top:-0.5rem;margin-bottom:0.4rem;padding-left:0.2rem;">'
-                f'{ts_short} · {run["n_papers"]} papers · {run["n_gaps"]} gaps'
-                f'{" · Lab ✓" if run["has_comp"] else ""}</div>',
-                unsafe_allow_html=True,
-            )
+    for run in runs:
+        ts_short = _local_time(run["created_at"])
+        on_screen = "● " if run["id"] == st.session_state.current_run_id else ""
+        if st.button(f"{on_screen}{run['name'][:30]}", key=f"load_{run['id']}",
+                     help=f"{ts_short} · {run['domain']} · {run['n_papers']} papers · {run['n_gaps']} gaps"):
+            if _load_run_into_session(run["id"], run["name"]):
+                st.session_state["view"] = "main"
+                st.rerun()
+        chips = f'{ts_short} · {run["n_papers"]} papers · {run["n_gaps"]} gaps' + (" · Lab ✓" if run["has_comp"] else "")
+        st.markdown(f'<div style="font-size:0.72rem;color:#55708f;margin-top:-0.5rem;margin-bottom:0.4rem;'
+                    f'padding-left:0.2rem;">{chips}</div>', unsafe_allow_html=True)
+    if runs:
         st.caption("All runs, comparison, files and feedback: Project view.")
 
 # ── Main header (hero) ────────────────────────────────────────────────────────
@@ -786,7 +692,7 @@ _flow_html = "".join(
     f'<div class="flow-step"><div class="flow-dot">{i}</div><div class="flow-label">{s}</div></div>'
     for i, s in enumerate(_hero_steps, 1))
 # The hero is for first-time visitors: once the project has a run, results come first.
-_show_hero = not (st.session_state.results or list_runs(limit=1, project_id=st.session_state.current_project_id))
+_show_hero = st.session_state["view"] == "main" and not (st.session_state.results or list_runs(limit=1, project_id=st.session_state.current_project_id))
 if _show_hero:
     st.markdown(
         '<div class="hero">'
@@ -1033,7 +939,8 @@ def _render_project_view(project: dict, runs: list[dict]) -> None:
     st.markdown(f"### {html.escape(project['name'])}")
     if project.get("description"):
         st.caption(project["description"])
-    st.caption(f"Folder: `{project_store.project_path(pid)}`")
+    if not hide_paths():                      # a server's folder names mean nothing on a hosted deployment
+        st.caption(f"Folder: `{project_store.project_path(pid)}`")
 
     # ── Runs ─────────────────────────────────────────────────────────────────
     st.markdown("#### Runs")
@@ -1194,6 +1101,277 @@ def _gap_feedback(gap: dict, idx: int, run_id: str, project_id: str, existing: d
                        existing=fb, question="Was this gap useful?")
 
 
+# ── Pages: Settings, New project, New analysis (a four-step form) ──────────────────────────────
+_ANY = "Any"
+_GAP_TYPES = [_ANY, "Methodology", "Application", "Dataset", "Evaluation", "Theory", "Benchmark"]
+
+
+def _option_widgets(store: dict, prefix: str) -> None:
+    """The per-run options. Settings edits the defaults; the New analysis form edits this run's copy."""
+    store["extract_refs"] = st.checkbox(
+        "Include cited references", value=store["extract_refs"], key=f"{prefix}_refs",
+        help="Looks up each paper's cited references to widen the corpus. Slow: about 3-5 seconds per reference "
+             "(more when Semantic Scholar throttles), so 50 references per paper adds roughly 5-10 minutes per "
+             "paper. A Semantic Scholar API key (Settings) speeds this up.")
+    _limits = ["25", "50", "100", "All"]
+    store["ref_limit"] = st.selectbox(
+        "References per paper", _limits, index=_limits.index(store["ref_limit"]), key=f"{prefix}_reflimit",
+        disabled=not store["extract_refs"], help="Higher limits take longer but improve reference coverage.")
+    store["enable_quality_engine"] = st.checkbox(
+        "Quality check", value=store["enable_quality_engine"], key=f"{prefix}_quality",
+        help="Cross-checks each paper with a second parser and resolves cited references before gap analysis. "
+             "The run is blocked if extraction quality is too low.")
+    if store["enable_quality_engine"]:
+        store["override_quality_gate"] = st.checkbox(
+            "Continue even if the quality check fails", value=store["override_quality_gate"],
+            key=f"{prefix}_override",
+            help="A failed check blocks the run by default. Tick this to proceed anyway; the warning is still recorded.")
+    else:
+        store["override_quality_gate"] = False
+    store["enable_gap_challenger"] = st.checkbox(
+        "Deep gap validation", value=store["enable_gap_challenger"], key=f"{prefix}_challenger",
+        help="Adds an extra literature search and a six-level status for each gap. Slower: roughly 30 seconds per gap.")
+    _mc = st.session_state["model_config"]
+    if any(can_read_images(s) for s in (_mc.spec_for(ROLE_EXTRACTION), _mc.spec_for(ROLE_ANALYSIS), _mc.fallback) if s):
+        store["use_vision"] = st.checkbox(
+            "Analyze figures and tables", value=store["use_vision"], key=f"{prefix}_vision",
+            help="Sends up to 5 figure-heavy pages per paper to a vision model. Slower and uses more tokens.")
+    else:
+        store["use_vision"] = False
+        st.caption("Figure analysis needs a model that can read images (for example Gemini or NVIDIA).")
+
+
+def _fmt_bytes(n: int) -> str:
+    return f"{n / 1_048_576:.1f} MB" if n >= 1_048_576 else f"{max(n, 0) // 1024} KB"
+
+
+def _render_settings() -> None:
+    st.button("← Back", key="settings_back", on_click=_go, args=("main",))
+    st.markdown("## Settings")
+    t_keys, t_models, t_defaults, t_cache = st.tabs(["API keys", "Models", "Analysis defaults", "Saved results"])
+
+    with t_keys:
+        st.caption("Keys stay in this browser session's memory and are never written to disk. A key set in the "
+                   "environment (.env, or the hosting platform's secrets) is used when the field is empty.")
+        for _pk, _pcfg in PROVIDER_REGISTRY.items():
+            _S["typed_keys"][_pk] = st.text_input(
+                f"{_pcfg.label.split(' (')[0]} API key", type="password", placeholder="Paste key",
+                value=_S["typed_keys"].get(_pk, ""), key=f"key_{_pk}", help=f"Leave blank to use {_pcfg.api_key_env}.")
+        st.markdown("**Custom endpoint** — any OpenAI-compatible API")
+        _S["custom_base"] = st.text_input(
+            "Base URL", value=_S["custom_base"] or os.environ.get("CUSTOM_LLM_BASE_URL", ""),
+            key="custom_base_url", placeholder="https://api.example.com/v1")
+        _S["custom_key"] = st.text_input("Custom endpoint API key", type="password", placeholder="Paste key",
+                                         value=_S["custom_key"], key="key_custom",
+                                         help="Leave blank to use CUSTOM_LLM_API_KEY.")
+        _S["ss_key"] = st.text_input(
+            "Semantic Scholar API key (optional)", type="password", placeholder="Paste key",
+            value=_S["ss_key"], key="key_semantic_scholar",
+            help="Leave blank to use SEMANTIC_SCHOLAR_API_KEY. Without a key the free, rate-limited tier is used.")
+        _now = resolve_keys(_S, PROVIDER_REGISTRY, CUSTOM_PROVIDER)
+        st.session_state["_available_providers"] = _now["available"]     # what was just typed counts at once
+        st.markdown("**Status**")
+        for _pk in (*PROVIDER_REGISTRY, CUSTOM_PROVIDER):
+            st.caption(f"{_provider_name(_pk)}: {source_label(_now['sources'][_pk])}")
+        st.caption(f"Semantic Scholar: {source_label(_now['ss_source'])}")
+
+    with t_models:
+        _render_model_picker()
+
+    with t_defaults:
+        st.caption("These are the starting values for every new analysis; you can change them per run.")
+        _option_widgets(_S, "set")
+
+    with t_cache:
+        st.caption("Results of expensive steps are saved and reused when the same paper, model and settings come "
+                   "back. Clear one to make the next run recompute it.")
+        for _row in db_cache_stats():
+            c1, c2, c3 = st.columns([3, 2, 1], vertical_alignment="center")
+            c1.markdown(f"**{_row['label']}**")
+            c2.caption(f"{_row['rows']} saved · {_fmt_bytes(_row['bytes'])}")
+            if c3.button("Clear", key=f"clear_{_row['table']}", disabled=_row["rows"] == 0):
+                _n = db_clear_cache(_row["table"])
+                st.toast(f"Cleared {_n} saved result(s) for {_row['label']}.")
+                st.rerun()
+        if not hide_paths():
+            st.caption(f"Database: {db_path_for_display()}")
+
+
+def _render_new_project() -> None:
+    st.button("← Back", key="newproject_back", on_click=_go, args=("main",))
+    st.markdown("## New project")
+    st.caption("A project groups the papers you upload, every analysis of them, and your feedback.")
+    _name = st.text_input("Project name", key="np_name", placeholder="e.g., Cystic fibrosis review")
+    _desc = st.text_area("Description (optional)", key="np_desc", height=70, placeholder="What this project is about")
+    _choices = dict(get_ui_domain_choices())
+    _label = st.selectbox("Domain", list(_choices), key="np_domain")
+    st.caption(get_domain_config(_choices[_label])["description"])
+    _interest = st.text_area("Research interest (optional)", key="np_interest", height=70,
+                             placeholder="e.g., Which outcomes are missing for patients under 12?")
+    _files = st.file_uploader("Papers (optional, PDF)", type=["pdf"], accept_multiple_files=True, key="np_files")
+    _rec = st.checkbox("Use recommended models", value=True, key="np_rec",
+                       help="Picks the model for each job from the API keys you have.")
+    c1, c2 = st.columns([1, 5])
+    if c1.button("Create project", type="primary", key="np_create"):
+        try:
+            _project = project_store.create_project(_name, _desc, _choices[_label], _interest)
+        except ValueError as e:
+            st.error(str(e))
+            return
+        _ids = []
+        if _files:
+            _ids = project_store.save_papers(_project["id"], [(f.name, f.getvalue()) for f in _files])
+        if _rec and _available:
+            _apply_preset("recommended")
+        _clear_results()
+        st.session_state.current_project_id = _project["id"]
+        st.session_state["_pending_project"] = _project["id"]
+        st.session_state["_wiz"] = _new_wizard(_project, stored_ids=_ids)
+        st.session_state["view"] = "new_analysis"             # straight on to the first analysis
+        for _k in ("np_name", "np_desc", "np_interest", "np_files"):
+            st.session_state.pop(_k, None)
+        st.rerun()
+    c2.button("Cancel", key="np_cancel", on_click=_go, args=("main",))
+
+
+def _new_wizard(project: dict, stored_ids=()) -> dict:
+    _choices = dict(get_ui_domain_choices())
+    _label = next((lbl for lbl, key in _choices.items() if key == project.get("domain")), next(iter(_choices)))
+    return {"step": 1, "project_id": project["id"], "uploads": [], "stored_ids": list(stored_ids), "up_n": 0,
+            "domain_label": _label, "interest": project.get("interest") or "", "gap_type": _ANY,
+            "opts": {k: _S[k] for k in DEFAULT_OPTIONS}, "run_name": "", "bg": True, "cap": DEFAULT_CAP_TOKENS}
+
+
+def _wiz_cancel() -> None:
+    st.session_state.pop("_wiz", None)
+    st.session_state["view"] = "main"
+
+
+def _wiz_step(n: int) -> None:
+    st.session_state["_wiz"]["step"] = n
+
+
+def _wiz_clear_uploads() -> None:
+    w = st.session_state["_wiz"]
+    w["uploads"], w["up_n"] = [], w["up_n"] + 1
+
+
+_WIZ_STEPS = ["Papers", "Research setup", "Options", "Review and run"]
+
+
+def _render_new_analysis() -> None:
+    _proj = get_project(st.session_state.current_project_id) or get_project(DEFAULT_PROJECT_ID)
+    w = st.session_state.get("_wiz")
+    if not w or w["project_id"] != _proj["id"]:
+        w = st.session_state["_wiz"] = _new_wizard(_proj)
+    step = w["step"]
+    st.markdown(f"## New analysis · {html.escape(_proj['name'])}")
+    st.markdown(" → ".join(f"**{i}. {s}**" if i == step else f"{i}. {s}" for i, s in enumerate(_WIZ_STEPS, 1)))
+
+    stored_all = project_store.list_papers(_proj["id"])
+
+    def _selection():
+        """(papers, notices): uploads plus the ticked stored papers, same file counted once."""
+        try:
+            stored_bytes = project_store.read_papers(
+                _proj["id"], [p["id"] for p in stored_all if p["id"] in w["stored_ids"]])
+        except (OSError, ValueError):
+            stored_bytes = []
+        return project_store.combine_papers(w["uploads"], stored_bytes)
+
+    papers, notices = _selection()
+    papers_ok = 2 <= len(papers) <= 5
+
+    if step == 1:
+        st.caption("Add 2–5 PDFs (up to 200 MB each). Gap detection compares papers against each other.")
+        up = st.file_uploader("Research papers (PDF)", type=["pdf"], accept_multiple_files=True,
+                              key=f"wiz_up_{w['up_n']}", label_visibility="collapsed")
+        known = {hashlib.sha256(d).hexdigest() for _, d in w["uploads"]}
+        for f in up or []:
+            data = f.getvalue()
+            if hashlib.sha256(data).hexdigest() not in known:
+                w["uploads"].append((f.name, data))
+                known.add(hashlib.sha256(data).hexdigest())
+        papers, notices = _selection()
+        papers_ok = 2 <= len(papers) <= 5
+        if w["uploads"]:
+            st.caption("Added: " + ", ".join(n for n, _ in w["uploads"]))
+            st.button("Remove uploaded files", key="wiz_clear", on_click=_wiz_clear_uploads)
+        if stored_all:
+            st.markdown("**Or use papers already in this project**")
+            picked = []
+            for p in stored_all:
+                if st.checkbox(f"{p['filename']} · {p['kb']} KB", value=p["id"] in w["stored_ids"],
+                               key=f"wiz_use_{_proj['id']}_{p['id']}"):
+                    picked.append(p["id"])
+            w["stored_ids"] = picked
+        papers, notices = _selection()          # the ticks above changed the selection
+        papers_ok = 2 <= len(papers) <= 5
+        for n in notices:
+            st.warning(n)
+        st.caption(f"{len(papers)} paper(s) selected." + ("" if papers_ok else " Choose between 2 and 5."))
+
+    elif step == 2:
+        _choices = dict(get_ui_domain_choices())
+        w["domain_label"] = st.selectbox("Domain", list(_choices), index=list(_choices).index(w["domain_label"]),
+                                         key="wiz_domain")
+        st.caption(get_domain_config(_choices[w["domain_label"]])["description"])
+        w["interest"] = st.text_area("Research interest", value=w["interest"], key="wiz_interest", height=90,
+                                     placeholder="e.g., Which outcomes are missing for patients under 12?")
+        w["gap_type"] = st.selectbox("Gap type", _GAP_TYPES, index=_GAP_TYPES.index(w["gap_type"]), key="wiz_gaptype")
+
+    elif step == 3:
+        st.caption("Starting from your Settings defaults; changes here apply to this run only.")
+        _option_widgets(w["opts"], "wiz")
+        w["cap"] = int(st.number_input(
+            "Stop the run if it uses more than (tokens)", min_value=50_000, max_value=50_000_000, value=w["cap"],
+            step=100_000, key="wiz_cap",
+            help="A safety limit on the estimated tokens one run may use. The run stops between stages."))
+
+    else:
+        _issues = _model_issues()
+        st.markdown(f"**Papers ({len(papers)}):** " + ", ".join(html.escape(n) for n, _ in papers))
+        st.markdown(f"**Domain:** {html.escape(w['domain_label'])} · **Gap type:** {w['gap_type']}")
+        st.markdown(f"**Research interest:** {html.escape(w['interest']) or '—'}")
+        _cfg = st.session_state["model_config"]
+        st.caption("Models: " + " · ".join(f"{ROLE_LABELS[r]}: {_cfg.spec_for(r).model}" for r in MAIN_ROLES))
+        st.button("Change models or keys", key="wiz_to_settings", on_click=_go, args=("settings",))
+        for msg in _issues:
+            st.error(msg)
+        if papers:
+            _est = estimate_run([_pdf_text_chars(hashlib.sha256(d).hexdigest(), d) for _, d in papers],
+                                extract_refs=w["opts"]["extract_refs"], gap_challenger=w["opts"]["enable_gap_challenger"])
+            _ms = _cfg.spec_for(ROLE_ANALYSIS)
+            st.caption(describe_estimate(_est, w["cap"], estimate_cost(_est["tokens"], _ms.provider, _ms.model)))
+        w["run_name"] = st.text_input("Run name (optional)", value=w["run_name"], key="wiz_runname",
+                                      placeholder="e.g., Diabetes AI review")
+        w["bg"] = st.checkbox("Keep running in the background (safe to refresh the page)", value=w["bg"],
+                              key="wiz_bg")
+        _busy = bool(run_jobs.list_jobs(project_id=_proj["id"], active_only=True, limit=1))
+        if _busy:
+            st.info("An analysis is already running in this project. Wait for it to finish.")
+
+    # navigation
+    cb, cn, cc = st.columns([1, 1, 4])
+    if step > 1:
+        cb.button("Back", key="wiz_back", on_click=_wiz_step, args=(step - 1,))
+    if step < 4:
+        cn.button("Next", key="wiz_next", type="primary", on_click=_wiz_step, args=(step + 1,),
+                  disabled=(step == 1 and not papers_ok))
+    else:
+        if cn.button("Run analysis", key="wiz_run", type="primary",
+                     disabled=bool(_model_issues()) or not papers_ok or _busy):
+            _choices = dict(get_ui_domain_choices())
+            st.session_state["_run_request"] = {
+                "papers": papers, "run_name": w["run_name"], "domain": _choices[w["domain_label"]],
+                "interest": w["interest"], "gap_type": w["gap_type"], "opts": dict(w["opts"]),
+                "cap": w["cap"], "bg": w["bg"]}
+            st.session_state.pop("_wiz", None)
+            st.session_state["view"] = "main"
+            st.rerun()
+    cc.button("Cancel", key="wiz_cancel", on_click=_wiz_cancel)
+
+
 # ── Project strip and view switch ────────────────────────────────────────────
 _cur_project = get_project(st.session_state.current_project_id) or get_project(DEFAULT_PROJECT_ID)
 _cur_project_stats = _project_by_id.get(_cur_project["id"], {})
@@ -1207,6 +1385,19 @@ st.markdown(
     f'<span style="font-size:0.82rem;color:#55708f;">{len(_proj_runs)} run(s) · '
     f'{_cur_project_stats.get("paper_count", 0)} paper(s) saved</span>'
     '</div>', unsafe_allow_html=True)
+
+# ── Which page ─────────────────────────────────────────────────────────────────────────────────
+_page = st.session_state["view"]
+if _page == "settings":
+    _render_settings()
+    st.stop()
+if _page == "new_project":
+    _render_new_project()
+    st.stop()
+if _page == "new_analysis":
+    _render_new_analysis()
+    st.stop()
+
 st.session_state.setdefault("main_view", "Analysis")
 if "_pending_view" in st.session_state:   # set by "Open in Analysis view"; the control can't be set after it exists
     st.session_state["main_view"] = st.session_state.pop("_pending_view")
@@ -1319,98 +1510,35 @@ if _job and not _job["dismissed"]:
     else:
         _finished_job_note(_job)
 
-# With a run on screen the form folds away so the results are the first thing seen.
-_has_run_on_screen = bool(st.session_state.results)
-with st.expander("New analysis", expanded=not _has_run_on_screen):
-    st.markdown('<div class="section-label">New analysis</div>'
-                '<div class="section-hint">Add 2&ndash;5 PDFs (up to 200 MB each). '
-                'Gap detection compares papers against each other, so at least two are needed.</div>',
-                unsafe_allow_html=True)
-    uploaded_files = st.file_uploader(
-        "Research papers (PDF)", type=["pdf"], accept_multiple_files=True,
-        label_visibility="collapsed",
-    )
+# ── Empty state: three guided steps ─────────────────────────────────────────────────────────────
+if not st.session_state.results and not (_job and not _job["dismissed"]) and not st.session_state.get("_run_request"):
+    _has_key = bool(_available)
+    st.markdown(
+        '<div class="stage-card"><div class="stage-title">Start here</div><div class="stage-body">'
+        f'<b>1. Add your keys.</b> {"✓ A key is set." if _has_key else "Open Settings and paste an API key."}<br>'
+        f'<b>2. Choose 2–5 papers.</b> Upload PDFs{" or use the papers already in this project" if _cur_project_stats.get("paper_count") else ""}.<br>'
+        '<b>3. Run.</b> Gaps with quoted evidence and proposals appear here, usually in 5–10 minutes.'
+        '</div></div>', unsafe_allow_html=True)
+    st.button("Start a new analysis", key="empty_new_analysis", type="primary", on_click=_go, args=("new_analysis",))
 
-    # Papers this project already holds can be analysed again (new model, new question)
-    # without uploading them a second time.
-    _stored = project_store.list_papers(_cur_project["id"])
-    _chosen_ids = []
-    if _stored:
-        st.markdown('<div class="section-hint" style="margin-top:0.6rem;">Or use papers already in this project:</div>',
-                    unsafe_allow_html=True)
-        for _p in _stored:
-            if st.checkbox(f"{_p['filename']} · {_p['kb']} KB", key=f"use_paper_{_cur_project['id']}_{_p['id']}"):
-                _chosen_ids.append(_p["id"])
-    try:
-        _stored_papers = project_store.read_papers(_cur_project["id"], _chosen_ids)
-    except (OSError, ValueError) as e:
-        st.warning(f"A stored paper could not be read: {e}")
-        _stored_papers = []
-    _papers, _paper_notices = project_store.combine_papers(
-        [(f.name, f.getvalue()) for f in (uploaded_files or [])], _stored_papers)
-    for _n in _paper_notices:
-        st.warning(_n)
-
-    if _papers:
-        cols = st.columns(min(len(_papers), 5))
-        for i, (col, (_pname, _pdata)) in enumerate(zip(cols, _papers)):
-            with col:
-                st.markdown(
-                    f'<div class="stage-card" style="text-align:center;padding:0.8rem;">'
-                    f'<div class="stage-title">{_tier_badge(1)} Paper {i+1}</div>'
-                    f'<div class="stage-body" style="font-size:0.78rem;word-break:break-word;">{html.escape(_pname)}</div>'
-                    f'<div style="font-size:0.7rem;color:#55708f;">'
-                    f'{len(_pdata)//1024} KB</div></div>',
-                    unsafe_allow_html=True)
-
-    run_name = st.text_input(
-        "Run name (optional)", value="", placeholder="e.g., Diabetes AI review",
-        help="Used to find this analysis later in Run History. Leave blank to name it automatically.")
-
-    st.markdown("---")
-    _model_issues = _render_model_picker()      # which model does which job, and a test, in the same step as Run
-
-    _n_files = len(_papers)
-    # Rough cost before the run, and a cap that stops it cleanly (utils/cost_guard.py).
-    _token_cap = int(st.number_input(
-        "Stop the run if it uses more than (tokens)", min_value=50_000, max_value=50_000_000,
-        value=DEFAULT_CAP_TOKENS, step=100_000, key="token_cap",
-        help="A safety limit on the estimated tokens one run may use. The run stops between stages "
-             "(results so far are kept in the call log) instead of spending more."))
-    if _papers:
-        _est = estimate_run([_pdf_text_chars(hashlib.sha256(d).hexdigest(), d) for _, d in _papers],
-                            extract_refs=extract_refs, gap_challenger=enable_gap_challenger)
-        _ms = st.session_state["model_config"].spec_for(ROLE_ANALYSIS)
-        st.caption(describe_estimate(_est, _token_cap, estimate_cost(_est["tokens"], _ms.provider, _ms.model)))
-    _job_active = bool(run_jobs.list_jobs(project_id=_cur_project["id"], active_only=True, limit=1))
-    st.session_state.setdefault("bg_runs", True)
-    st.checkbox("Keep running in the background (safe to refresh the page)", key="bg_runs",
-                help="The analysis runs on the server and its progress is saved, so a refreshed or closed tab "
-                     "does not lose it. Turn off to run inside this page instead.")
-    run_col, status_col = st.columns([1, 5], vertical_alignment="center")
-    with run_col:
-        run_btn = st.button("Run analysis", type="primary",
-                            disabled=st.session_state.running or _job_active or _n_files < 2 or bool(_model_issues))
-    with status_col:
-        if st.session_state.running or _job_active:
-            _status, _cls = "Analysis in progress…", ""
-        elif _model_issues:
-            _status, _cls = html.escape(_model_issues[0]), ""
-        elif _n_files >= 2:
-            _status, _cls = (f"✓ {_n_files} papers ready · saved to project "
-                             f"“{html.escape(_cur_project['name'])}” · a run usually takes 5–10 minutes"), " ready"
-        elif _n_files == 1:
-            _status, _cls = "Add at least one more paper to begin.", ""
-        else:
-            _status, _cls = "Add 2–5 PDFs, or tick papers already in the project, to begin.", ""
-        st.markdown(f'<div class="run-status{_cls}">{_status}</div>', unsafe_allow_html=True)
+# ── A run requested from the New analysis form ──────────────────────────────────────────────────
+_req = st.session_state.pop("_run_request", None)
+run_btn = _req is not None
+if _req:
+    _papers, run_name = _req["papers"], _req["run_name"]
+    selected_domain, interest, gap_type = _req["domain"], _req["interest"], _req["gap_type"]
+    domain_cfg = get_domain_config(selected_domain)
+    _o = _req["opts"]
+    extract_refs, ref_limit = _o["extract_refs"], _o["ref_limit"]
+    enable_quality_engine, override_quality_gate = _o["enable_quality_engine"], _o["override_quality_gate"]
+    enable_gap_challenger, use_vision = _o["enable_gap_challenger"], _o["use_vision"]
+    _token_cap, _run_in_background = _req["cap"], _req["bg"]
+    _model_issues_now = _model_issues()
 
 # ── Main Pipeline ─────────────────────────────────────────────────────────────
 if run_btn and _papers:
-    # The Run button is already held when a needed key is missing; this is the
-    # same check again for any path that reaches here anyway.
-    if _model_issues:
-        st.error(" ".join(_model_issues))
+    if _model_issues_now:
+        st.error(" ".join(_model_issues_now))
         st.stop()
     if len(_papers) < 2:
         st.warning("Choose at least 2 papers.")
@@ -1452,7 +1580,7 @@ if run_btn and _papers:
     )
 
     # In the background the run survives a refresh of this page; progress is polled from the database.
-    if st.session_state.get("bg_runs", True):
+    if _run_in_background:
         st.session_state.running = False
         st.session_state["active_job_id"] = start_job(
             papers=_papers, context=context, client=client, options=_run_options,

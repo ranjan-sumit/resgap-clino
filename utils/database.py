@@ -976,19 +976,63 @@ def get_run_manifest(run_id: str) -> dict | None:
 FEEDBACK_TARGETS = ("gap", "proposal", "run")
 
 
-def insert_project(project_id: str, name: str, description: str, folder: str) -> dict:
+def insert_project(project_id: str, name: str, description: str, folder: str,
+                   domain: str = "", interest: str = "") -> dict:
     """Records a project row. The folder itself is created by project_store."""
     init_db()
     conn = _get_conn()
     try:
         conn.execute(
-            "INSERT INTO projects (id, name, description, folder) VALUES (?,?,?,?)",
-            (project_id, name.strip(), (description or "").strip(), folder),
+            "INSERT INTO projects (id, name, description, folder, domain, interest) VALUES (?,?,?,?,?,?)",
+            (project_id, name.strip(), (description or "").strip(), folder, domain or "", (interest or "").strip()),
         )
         conn.commit()
     finally:
         conn.close()
     return get_project(project_id)
+
+
+# ── Cached stage results: what is stored, and clearing it ────────────────────
+# One table per cached stage (keyed by content + model + stage version). Clearing a stage
+# makes the next run recompute it.
+CACHE_STAGES = {
+    "wiki_pages": "Paper summaries (wiki)",
+    "evidence_objects": "Evidence extraction",
+    "parameters": "Lab parameters",
+    "docling_extractions": "Second-parser check",
+    "gap_validations": "Gap literature checks",
+}
+
+
+def cache_stats() -> list[dict]:
+    """[{table, label, rows, bytes}] for each cached stage."""
+    init_db()
+    conn = _get_conn()
+    out = []
+    try:
+        for table, label in CACHE_STAGES.items():
+            cols = [r["name"] for r in conn.execute(f"PRAGMA table_info({table})")]
+            payload = [c for c in cols if c.endswith("_json")]
+            size = " + ".join(f"COALESCE(length({c}), 0)" for c in payload) or "0"
+            row = conn.execute(f"SELECT COUNT(*) AS n, COALESCE(SUM({size}), 0) AS b FROM {table}").fetchone()
+            out.append({"table": table, "label": label, "rows": row["n"], "bytes": row["b"]})
+    finally:
+        conn.close()
+    return out
+
+
+def clear_cache(table: str) -> int:
+    """Deletes every cached result of one stage; returns how many rows went."""
+    if table not in CACHE_STAGES:
+        raise ValueError(f"Unknown cache: {table}")
+    init_db()
+    conn = _get_conn()
+    try:
+        n = conn.execute(f"DELETE FROM {table}").rowcount
+        conn.commit()
+        return n
+    finally:
+        conn.close()
 
 
 def get_project(project_id: str) -> dict | None:

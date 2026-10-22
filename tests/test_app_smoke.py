@@ -49,9 +49,12 @@ class AppSmokeTests(unittest.TestCase):
         self.assertEqual(len(picker.options), 1)
         self.assertIn("Default project", picker.options[0])
         self.assertIn("New project", [b.label for b in at.sidebar.button])
-        run_btn = next(b for b in at.button if b.label == "Run analysis")
-        self.assertTrue(run_btn.disabled)          # no papers yet
         self.assertEqual(len(at.tabs), 0)          # no results on screen
+        # the sidebar is slim: the project picker plus New project, New analysis and Settings
+        self.assertEqual({b.label for b in at.sidebar.button}, {"New project", "New analysis", "Settings"})
+        self.assertLessEqual(len(at.sidebar.button) + len(at.sidebar.selectbox) + len(at.sidebar.checkbox)
+                             + len(at.sidebar.text_input) + len(at.sidebar.text_area), 4)
+        self.assertIn("Start here", " ".join(m.value for m in at.markdown))   # the empty-state guide
 
     def test_newly_created_projects_appear_in_the_picker(self):
         project_store.create_project("Alpha review")
@@ -87,7 +90,9 @@ class ModelPickerUiTests(unittest.TestCase):
                     "RESGAP_PROJECTS_DIR": str(Path(self.tmp) / "projects")})
         self.patcher = patch.dict(os.environ, env)
         self.patcher.start()
-        return AppTest.from_file(APP, default_timeout=120).run()
+        at = AppTest.from_file(APP, default_timeout=120).run()
+        at.button(key="settings_btn").click().run()            # the models live on the Settings page
+        return at
 
     def tearDown(self):
         self.patcher.stop()
@@ -115,15 +120,21 @@ class ModelPickerUiTests(unittest.TestCase):
         self.assertEqual(m["council_chair"], ("gemini", "gemini-3.6-flash"))   # few calls, so the stronger model
         self.assertEqual(m["fallback"][0], "gemini")                       # a different model, same provider
         self.assertNotEqual(m["fallback"], m["analysis"])
-        self.assertFalse(any("add a" in x.value.lower() and "key" in x.value.lower()
-                             for x in at.markdown if "run-status" in x.value))
+        self.assertEqual(self._issues(at), [])
+
+    def _issues(self, at):
+        """The problems the review step would show: go there with two stored papers."""
+        from tests.ui_helpers import store_papers, wizard_to_review
+        ids = store_papers(2)
+        at.button(key="settings_back").click().run()
+        wizard_to_review(at, ids=ids)
+        return [e.value for e in at.error]
 
     def test_without_any_key_run_is_held_with_a_clear_message(self):
         at = self._env()
-        status = " ".join(x.value for x in at.markdown if "run-status" in x.value)
-        self.assertIn("add a", status.lower())
-        self.assertIn("key", status.lower())
-        self.assertTrue(next(b for b in at.button if b.label == "Run analysis").disabled)
+        issues = self._issues(at)
+        self.assertTrue(issues and all("key" in i.lower() for i in issues))
+        self.assertTrue(at.button(key="wiz_run").disabled)
 
     def test_fastest_preset_puts_the_fast_model_on_every_job(self):
         at = self._env(GEMINI_API_KEY="fake", NVIDIA_API_KEY="fake")
@@ -145,10 +156,10 @@ class ModelPickerUiTests(unittest.TestCase):
     def test_a_role_on_a_provider_without_a_key_blocks_run_and_names_it(self):
         at = self._env(GEMINI_API_KEY="fake")
         at.selectbox(key="mp_analysis").select("nvidia").run()
-        status = " ".join(x.value for x in at.markdown if "run-status" in x.value)
-        self.assertIn("Analysis", status)
-        self.assertIn("NVIDIA", status)
-        self.assertTrue(next(b for b in at.button if b.label == "Run analysis").disabled)
+        issues = " ".join(self._issues(at))
+        self.assertIn("Analysis", issues)
+        self.assertIn("NVIDIA", issues)
+        self.assertTrue(at.button(key="wiz_run").disabled)
 
     def test_choosing_no_fallback_is_allowed(self):
         at = self._env(GEMINI_API_KEY="fake")

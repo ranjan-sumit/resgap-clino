@@ -54,27 +54,34 @@ def test_combine_caps_at_five_and_names_the_rest():
     assert len(out) == 5 and any("u2.pdf" in n for n in notes)
 
 
-def _run_button(at):
-    return next(b for b in at.button if b.label == "Run analysis")
+from tests.ui_helpers import next_step, open_wizard, tick_stored_papers, wizard_to_review
 
 
-def test_run_button_follows_the_number_of_ticked_papers(app_test, isolated_env, monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "k" * 30)
+def test_next_follows_the_number_of_ticked_papers(app_test, isolated_env):
     _, ids = _store(isolated_env)
-    at = app_test(timeout=90)
+    at = open_wizard(app_test(timeout=90))
     boxes = [c for c in at.checkbox if c.label.startswith("p")]
-    assert len(boxes) == 3 and _run_button(at).disabled
-    boxes[0].check().run()
-    at2 = at
-    assert _run_button(at2).disabled                      # one paper is not enough
-    [c for c in at2.checkbox if c.label.startswith("p1")][0].check().run()
-    assert not _run_button(at2).disabled
+    assert len(boxes) == 3 and at.button(key="wiz_next").disabled
+    tick_stored_papers(at, PID, ids[:1])
+    assert at.button(key="wiz_next").disabled                 # one paper is not enough
+    tick_stored_papers(at, PID, ids[1:2])
+    assert not at.button(key="wiz_next").disabled
+    tick_stored_papers(at, PID, ids[2:])
+    assert not at.button(key="wiz_next").disabled             # three is fine
+
+
+def test_the_same_papers_cannot_be_ticked_past_the_limit_of_five(app_test, isolated_env):
+    from tests.ui_helpers import store_papers
+    ids = store_papers(6)
+    at = open_wizard(app_test(timeout=90))
+    tick_stored_papers(at, PID, ids)
+    assert "At most 5 papers" in " ".join(w.value for w in at.warning)
 
 
 def test_clicking_run_sends_the_stored_papers_to_the_pipeline(app_test, isolated_env, monkeypatch):
     from pipeline import run_pipeline as rp
     monkeypatch.setenv("GEMINI_API_KEY", "k" * 30)
-    papers, _ = _store(isolated_env)
+    papers, ids = _store(isolated_env)
     seen = {}
 
     def fake_run(papers, **kw):
@@ -83,14 +90,13 @@ def test_clicking_run_sends_the_stored_papers_to_the_pipeline(app_test, isolated
     monkeypatch.setattr(rp, "run_full_pipeline", fake_run)
 
     at = app_test(timeout=90)
-    for c in at.checkbox:
-        if c.label.startswith(("p0", "p2")):
-            c.check()
+    wizard_to_review(at, ids=[ids[0], ids[2]])
+    at.checkbox(key="wiz_bg").uncheck()                       # run in the page so the fake pipeline is called here
     at.run()
-    _run_button(at).click().run()
+    at.button(key="wiz_run").click().run()
     assert seen["papers"] == [papers[0], papers[2]]
 
 
 def test_no_checklist_when_the_project_has_no_papers(app_test, isolated_env):
-    at = app_test(timeout=90)
+    at = open_wizard(app_test(timeout=90))
     assert not [c for c in at.checkbox if "KB" in c.label]

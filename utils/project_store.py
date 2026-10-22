@@ -80,7 +80,7 @@ def project_dir(project_id: str) -> Path:
     return folder
 
 
-def create_project(name: str, description: str = "") -> dict:
+def create_project(name: str, description: str = "", domain: str = "", interest: str = "") -> dict:
     """Creates the project's folder and database row; returns the project row
     plus its absolute `path`."""
     name = (name or "").strip()
@@ -91,9 +91,10 @@ def create_project(name: str, description: str = "") -> dict:
     folder = _inside(projects_root(), projects_root() / folder_name)
     _make_subdirs(folder)
     try:
-        project = db.insert_project(project_id, name, description, folder_name)
+        project = db.insert_project(project_id, name, description, folder_name, domain, interest)
         (folder / "project.json").write_text(json.dumps({
             "id": project_id, "name": project["name"], "description": project["description"],
+            "domain": project["domain"], "interest": project["interest"],
             "created_at": project["created_at"],
         }, indent=2), encoding="utf-8")
     except Exception:

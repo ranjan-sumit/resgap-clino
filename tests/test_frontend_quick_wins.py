@@ -83,12 +83,11 @@ def test_no_off_cards_when_references_were_not_fetched(app_test, isolated_env):
     assert ">Off<" not in text and "were not fetched for this run" in text
 
 
-def test_new_analysis_folds_away_when_a_run_is_on_screen(app_test, isolated_env):
-    empty = app_test(timeout=90)
-    assert [e for e in empty.expander if e.label == "New analysis"][0].proto.expanded is True
+def test_the_form_is_not_on_the_results_page_any_more(app_test, isolated_env):
     seed_run(golden_results())
-    loaded = app_test(timeout=90)
-    assert [e for e in loaded.expander if e.label == "New analysis"][0].proto.expanded is False
+    at = app_test(timeout=90)
+    assert not [e for e in at.expander if e.label == "New analysis"]
+    assert not at.file_uploader                        # uploading happens in the New analysis form
 
 
 # ── deprecation ────────────────────────────────────────────────────────────────
