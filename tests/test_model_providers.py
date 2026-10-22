@@ -15,8 +15,25 @@ from utils.azure_client import NVIDIA_BASE_URL, MASTER_MODEL, FALLBACK_MODEL
 
 
 class ProviderRegistryShapeTests(unittest.TestCase):
-    def test_all_four_expected_providers_exist(self):
-        self.assertEqual(set(PROVIDER_REGISTRY.keys()), {"nvidia", "openai", "gemini", "qwen"})
+    def test_all_expected_providers_exist(self):
+        # groq was added with the per-role model selection; "custom" (any
+        # OpenAI-compatible endpoint) is handled in utils/model_router.py, not here.
+        self.assertEqual(set(PROVIDER_REGISTRY.keys()), {"nvidia", "openai", "gemini", "groq", "qwen"})
+
+    def test_groq_is_registered_unverified_with_a_default_in_its_models(self):
+        cfg = PROVIDER_REGISTRY["groq"]
+        self.assertFalse(cfg.verified_live)           # never exercised with a real key yet
+        self.assertIn(cfg.default_model, cfg.known_models)
+        self.assertEqual(cfg.api_key_env, "GROQ_API_KEY")
+        self.assertTrue(cfg.base_url.startswith("https://api.groq.com/openai/"))
+
+    def test_groq_lists_only_chat_models_from_its_catalogue(self):
+        models = PROVIDER_REGISTRY["groq"].known_models
+        for expected in ("openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b",
+                         "llama-3.3-70b-versatile", "llama-3.1-8b-instant"):
+            self.assertIn(expected, models)
+        for not_chat in ("whisper", "orpheus", "guard", "safeguard"):
+            self.assertFalse(any(not_chat in m for m in models), not_chat)
 
     def test_default_provider_is_nvidia(self):
         self.assertEqual(DEFAULT_PROVIDER_KEY, "nvidia")
@@ -30,9 +47,18 @@ class ProviderRegistryShapeTests(unittest.TestCase):
         self.assertEqual(cfg.default_model, MASTER_MODEL)
         self.assertEqual(cfg.fallback_model, FALLBACK_MODEL)
 
-    def test_only_nvidia_is_marked_verified_live(self):
-        self.assertTrue(PROVIDER_REGISTRY["nvidia"].verified_live)
-        for key in ("openai", "gemini", "qwen"):
+    def test_gemini_defaults_to_the_fast_model_its_full_run_was_verified_on(self):
+        cfg = PROVIDER_REGISTRY["gemini"]
+        self.assertEqual(cfg.default_model, "gemini-3.5-flash-lite")
+        self.assertEqual(cfg.known_models[0], cfg.default_model)   # first in the dropdown
+        self.assertNotEqual(cfg.fallback_model, cfg.default_model)
+
+    def test_only_live_checked_providers_are_marked_verified(self):
+        # nvidia: in production. gemini: checked live 2026-10-19 (chat, full
+        # pipeline run, image input). openai/qwen: no real key has exercised them.
+        for key in ("nvidia", "gemini"):
+            self.assertTrue(PROVIDER_REGISTRY[key].verified_live, f"{key} should be verified_live=True")
+        for key in ("openai", "qwen"):
             self.assertFalse(PROVIDER_REGISTRY[key].verified_live, f"{key} should be verified_live=False")
 
     def test_nvidia_known_models_include_deepseek_and_kimi(self):

@@ -120,6 +120,29 @@ def unwrap(result: "Result[T]") -> T:
     raise LLMCallError(result.error)
 
 
+_MAX_RETRY_AFTER = 65.0   # seconds; a longer wait is not worth blocking a run on
+
+_RETRY_AFTER_PATTERNS = (
+    re.compile(r"retry in ([0-9]+(?:\.[0-9]+)?)\s*s\b", re.I),                 # Gemini: "Please retry in 39.4s."
+    re.compile(r'"retryDelay"\s*:\s*"([0-9]+(?:\.[0-9]+)?)s"', re.I),         # Gemini RetryInfo
+    re.compile(r"try again in ([0-9]+(?:\.[0-9]+)?)\s*(ms|s)\b", re.I),        # OpenAI / Groq: "try again in 1.5s" / "250ms"
+)
+
+
+def _retry_after_seconds(err: str) -> float | None:
+    """How long the provider asked us to wait before retrying, if its error says
+    so (capped at _MAX_RETRY_AFTER). Waiting what the provider asks is what lets a
+    per-minute limit clear, where a fixed 1-2-4 s backoff just burns the retries."""
+    for pattern in _RETRY_AFTER_PATTERNS:
+        m = pattern.search(err or "")
+        if m:
+            seconds = float(m.group(1))
+            if len(m.groups()) > 1 and m.group(2).lower() == "ms":
+                seconds /= 1000.0
+            return min(seconds + 1.0, _MAX_RETRY_AFTER)
+    return None
+
+
 def _classify_error(err: str) -> Literal["timeout", "rate_limit", "api_error"]:
     """Priority order: rate_limit, then timeout, then api_error — first match wins.
     Single source of truth for both chat()'s retry-eligibility check and error.kind
@@ -193,6 +216,20 @@ def _stream_options_error(err: str) -> bool:
     return "stream_options" in low or "include_usage" in low
 
 
+# Extra request fields some models need. Gemini's "thinking" models spend a
+# large and variable share of the token budget on hidden reasoning, which
+# breaks strict-JSON stages (cut-off or malformed output) and, for
+# gemini-3.7-flash, makes a single call take ~135 s. A low reasoning effort
+# keeps the reasoning small. Sent as extra_body so it works on any SDK version.
+_MODEL_EXTRA_BODY = {
+    "gemini-3.6-flash": {"reasoning_effort": "low"},
+    "gemini-3.7-flash": {"reasoning_effort": "low"},
+    # NVIDIA's thinking model took 92 s for a one-line JSON reply with thinking
+    # on, 13 s with it off (measured 2026-10-20).
+    "nvidia/nemotron-3.5-super-vl-120b-a12b": {"chat_template_kwargs": {"enable_thinking": False}},
+}
+
+
 def make_nvidia_client(api_key: str) -> OpenAI:
     return OpenAI(base_url=NVIDIA_BASE_URL, api_key=api_key)
 
@@ -220,7 +257,8 @@ class AzureOpenAIClient:
 
     def __init__(self, api_key: str, fallback_model=_FALLBACK_UNSET,
                  base_url: str = NVIDIA_BASE_URL, model: str = MASTER_MODEL,
-                 top_p: float = 1.0, token_meter=None, **kwargs):
+                 top_p: float = 1.0, token_meter=None, vision_model=_FALLBACK_UNSET,
+                 **kwargs):
         # NVIDIA (the default) still goes through make_nvidia_client() --
         # unchanged code path, same mockable seam existing tests rely on.
         # A different base_url (another provider) builds a plain OpenAI
@@ -253,6 +291,15 @@ class AzureOpenAIClient:
         self.token_meter = token_meter
         self.current_stage = None
         self._base_url = base_url
+        # The model vision() calls. VISION_MODEL is an NVIDIA NIM model ID, so
+        # it is only the default for the NVIDIA base_url -- sending it to
+        # another provider's endpoint (e.g. Gemini) is a guaranteed
+        # "model not found". None means this provider has no known vision
+        # model: vision() then returns a clean Failure instead of a bad call.
+        if vision_model is self._FALLBACK_UNSET:
+            self.vision_model = VISION_MODEL if base_url == NVIDIA_BASE_URL else None
+        else:
+            self.vision_model = vision_model
 
     def set_stage(self, stage: str) -> None:
         """Clinova Phase 4, Epic 4.3: callers (app.py) set this around each
@@ -319,6 +366,8 @@ class AzureOpenAIClient:
         )
         if want_usage:
             create_kwargs["stream_options"] = {"include_usage": True}
+        if model in _MODEL_EXTRA_BODY:
+            create_kwargs["extra_body"] = _MODEL_EXTRA_BODY[model]
 
         try:
             # See _collect_stream()'s docstring: the SDK's own `timeout=`
@@ -348,8 +397,10 @@ class AzureOpenAIClient:
                                   timeout_seconds=timeout_seconds, max_retries=max_retries,
                                   _retry=_retry, _model=_model)
             if _retry < MAX_RETRIES and kind in ("rate_limit", "timeout"):
-                wait = 2 ** _retry   # exponential back-off: 1s, 2s
-                time.sleep(wait)
+                # Wait what the provider asked for when it says (a per-minute
+                # quota needs ~40s, not 1s); otherwise exponential back-off.
+                wait = _retry_after_seconds(err) if kind == "rate_limit" else None
+                time.sleep(wait if wait is not None else 2 ** _retry)
                 return self.chat(system, user, temperature, max_tokens,
                                   timeout_seconds=timeout_seconds, max_retries=max_retries,
                                   _retry=_retry + 1, _model=model)
@@ -380,8 +431,38 @@ class AzureOpenAIClient:
         return self.chat(system_json, user, temperature=0.1, max_tokens=max_tokens,
                           timeout_seconds=timeout_seconds, max_retries=max_retries)
 
+    # A vision call that has not finished by now is abandoned. Measured
+    # 2026-10-20: NVIDIA's vision model took 764 s (and then failed) for ONE page
+    # because the connection/first-byte wait is not bounded by the SDK timeout.
+    VISION_HARD_TIMEOUT = 75
+
     def vision(self, system: str, user_text: str,
                image_bytes: bytes, max_tokens: int = 2048, _retry: int = 0) -> Result[str]:
+        """One image question, with a hard wall-clock limit (VISION_HARD_TIMEOUT).
+        The call runs in a daemon thread so a hung connection cannot freeze the
+        run; on timeout the abandoned thread is left to finish by itself and a
+        timeout Failure is returned (never retried: a hung endpoint stays hung)."""
+        import threading
+        box: dict = {}
+
+        def _runner():
+            try:
+                box["result"] = self._vision_call(system, user_text, image_bytes, max_tokens, _retry)
+            except BaseException as e:               # noqa: BLE001 - reported as a Failure below
+                box["error"] = e
+
+        worker = threading.Thread(target=_runner, daemon=True)
+        worker.start()
+        worker.join(self.VISION_HARD_TIMEOUT)
+        if worker.is_alive():
+            return Failure(ErrorInfo(kind="timeout",
+                                     detail=f"No answer from the vision model within {self.VISION_HARD_TIMEOUT} s"))
+        if "error" in box:
+            return Failure(ErrorInfo(kind="api_error", detail=str(box["error"])))
+        return box["result"]
+
+    def _vision_call(self, system: str, user_text: str,
+                     image_bytes: bytes, max_tokens: int = 2048, _retry: int = 0) -> Result[str]:
         """Vision call — see VISION_MODEL's module-level comment (B26) for
         which model actually supports image input on NVIDIA NIM and why.
         Returns Result[str].
@@ -398,6 +479,10 @@ class AzureOpenAIClient:
         Still no model fallback within vision() itself: a second
         unconfirmed model is no better than the first."""
         import time
+        if not self.vision_model:
+            return Failure(ErrorInfo(
+                kind="unsupported",
+                detail="Image analysis is not available for the selected model provider."))
         MAX_RETRIES = 2
         b64 = base64.b64encode(image_bytes).decode("utf-8")
         # Same token-instrumentation contract as chat(): usage is only
@@ -407,7 +492,7 @@ class AzureOpenAIClient:
         want_usage = self.token_meter is not None and _STREAM_OPTIONS_SUPPORT.get(self._base_url, True)
         try:
             create_kwargs = dict(
-                model=VISION_MODEL,
+                model=self.vision_model,
                 messages=[
                     {"role": "system", "content": system},
                     {
@@ -424,21 +509,21 @@ class AzureOpenAIClient:
                 top_p=1,
                 max_tokens=max_tokens,
                 stream=True,
-                timeout=120,
+                timeout=60,
             )
             if want_usage:
                 create_kwargs["stream_options"] = {"include_usage": True}
             # Same real-wall-clock-deadline fix as chat() -- see
             # _collect_stream()'s docstring. Starts before create()
             # returns for the same reason as chat()'s deadline.
-            deadline = time.monotonic() + 120
+            deadline = time.monotonic() + 60
             stream = self.client.chat.completions.create(**create_kwargs)
             usage_sink = {} if want_usage else None
             content = _collect_stream(stream, deadline=deadline, usage_sink=usage_sink)
             if want_usage:
                 _STREAM_OPTIONS_SUPPORT.setdefault(self._base_url, True)
                 if usage_sink and self.token_meter is not None:
-                    self.token_meter.record(stage=self.current_stage, model=VISION_MODEL, usage=usage_sink)
+                    self.token_meter.record(stage=self.current_stage, model=self.vision_model, usage=usage_sink)
             return Success(content)
         except Exception as e:
             err = str(e)
@@ -447,9 +532,11 @@ class AzureOpenAIClient:
             # call to this base_url, exactly like chat().
             if want_usage and _stream_options_error(err) and self._base_url not in _STREAM_OPTIONS_SUPPORT:
                 _STREAM_OPTIONS_SUPPORT[self._base_url] = False
-                return self.vision(system, user_text, image_bytes, max_tokens, _retry=_retry)
+                return self._vision_call(system, user_text, image_bytes, max_tokens, _retry=_retry)
             kind = _classify_error(err)
-            if _retry < MAX_RETRIES and kind in ("rate_limit", "timeout"):
-                time.sleep(2 ** _retry)
-                return self.vision(system, user_text, image_bytes, max_tokens, _retry=_retry + 1)
+            # Only a rate limit is worth retrying: a timeout means the endpoint
+            # is hung or slow, and trying again just multiplies the wait.
+            if _retry < 1 and kind == "rate_limit":
+                time.sleep(5)
+                return self._vision_call(system, user_text, image_bytes, max_tokens, _retry=_retry + 1)
             return Failure(ErrorInfo(kind=kind, detail=err))

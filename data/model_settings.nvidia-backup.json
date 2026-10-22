@@ -1,0 +1,33 @@
+{
+  "roles": {
+    "extraction": {
+      "provider": "nvidia",
+      "model": "openai/gpt-oss-20b"
+    },
+    "wiki": {
+      "provider": "nvidia",
+      "model": "openai/gpt-oss-20b"
+    },
+    "analysis": {
+      "provider": "nvidia",
+      "model": "openai/gpt-oss-20b"
+    },
+    "council_a": {
+      "provider": "nvidia",
+      "model": "openai/gpt-oss-20b"
+    },
+    "council_b": {
+      "provider": "nvidia",
+      "model": "openai/gpt-oss-20b"
+    },
+    "council_c": {
+      "provider": "nvidia",
+      "model": "openai/gpt-oss-20b"
+    },
+    "council_chair": {
+      "provider": "nvidia",
+      "model": "openai/gpt-oss-20b"
+    }
+  },
+  "fallback": null
+}

@@ -1,0 +1,36 @@
+{
+  "roles": {
+    "extraction": {
+      "provider": "gemini",
+      "model": "gemini-3.5-flash-lite"
+    },
+    "wiki": {
+      "provider": "gemini",
+      "model": "gemini-3.5-flash-lite"
+    },
+    "analysis": {
+      "provider": "gemini",
+      "model": "gemini-3.5-flash-lite"
+    },
+    "council_chair": {
+      "provider": "gemini",
+      "model": "gemini-3.6-flash"
+    },
+    "council_a": {
+      "provider": "gemini",
+      "model": "gemini-3.6-flash"
+    },
+    "council_b": {
+      "provider": "gemini",
+      "model": "gemini-3.5-flash-lite"
+    },
+    "council_c": {
+      "provider": "gemini",
+      "model": "gemini-3.6-flash"
+    }
+  },
+  "fallback": {
+    "provider": "gemini",
+    "model": "gemini-3.6-flash"
+  }
+}

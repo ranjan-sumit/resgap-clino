@@ -71,14 +71,14 @@ class ChatResultTests(unittest.TestCase):
         self.assertIsInstance(result, Success)
         self.assertEqual(result.value, "Hello, world!")
 
-    def test_default_timeout_is_120_when_not_overridden(self):
+    def test_default_timeout_is_300_when_not_overridden(self):
         # Epic 3.6: timeout_seconds is now a real per-call override -- this
         # locks in that omitting it preserves the exact prior hardcoded
-        # default, so every pre-Epic-3.6 caller's behavior is unchanged.
+        # default (300 s since B30), so every caller that passes nothing is unchanged.
         self.mock_client.chat.completions.create.return_value = _fake_stream("ok")
         self.client.chat("system", "user")
         call = self.mock_client.chat.completions.create.call_args
-        self.assertEqual(call.kwargs["timeout"], 120)
+        self.assertEqual(call.kwargs["timeout"], 300)
 
     def test_timeout_seconds_override_is_passed_through(self):
         self.mock_client.chat.completions.create.return_value = _fake_stream("ok")
@@ -136,15 +136,15 @@ class ChatResultTests(unittest.TestCase):
 
     @patch("time.sleep", return_value=None)
     def test_chat_rate_limit_exhaustion_returns_failure(self, _sleep):
-        # B22 fix: after the primary model's 3 attempts are exhausted, one
-        # more attempt is made on the fallback model (also fails here) --
-        # call_count is 4, not 3, because of that new fallback attempt.
+        # B22/B30: after the primary model's attempts are exhausted (1 try + 3
+        # retries), one more attempt is made on the fallback model (also fails
+        # here) -- call_count is 5 because of that fallback attempt.
         self.mock_client.chat.completions.create.side_effect = Exception("429 Too Many Requests")
         result = self.client.chat("system", "user")
         self.assertIsInstance(result, Failure)
         self.assertIsInstance(result.error, ErrorInfo)
         self.assertEqual(result.error.kind, "rate_limit")
-        self.assertEqual(self.mock_client.chat.completions.create.call_count, 4)  # 3 primary + 1 fallback
+        self.assertEqual(self.mock_client.chat.completions.create.call_count, 5)  # 4 primary + 1 fallback
 
     @patch("time.sleep", return_value=None)
     def test_chat_falls_back_to_smaller_model_after_primary_exhausted(self, _sleep):
@@ -153,17 +153,19 @@ class ChatResultTests(unittest.TestCase):
             Exception("429 Too Many Requests"),  # primary attempt 1
             Exception("429 Too Many Requests"),  # primary attempt 2
             Exception("429 Too Many Requests"),  # primary attempt 3
+            Exception("429 Too Many Requests"),  # primary attempt 4 (the last retry)
             _fake_stream("recovered on fallback model"),  # fallback attempt
         ]
         result = self.client.chat("system", "user")
         self.assertIsInstance(result, Success)
         self.assertEqual(result.value, "recovered on fallback model")
         calls = self.mock_client.chat.completions.create.call_args_list
-        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(calls), 5)
         self.assertEqual(calls[0].kwargs["model"], MASTER_MODEL)
         self.assertEqual(calls[1].kwargs["model"], MASTER_MODEL)
         self.assertEqual(calls[2].kwargs["model"], MASTER_MODEL)
-        self.assertEqual(calls[3].kwargs["model"], FALLBACK_MODEL)
+        self.assertEqual(calls[3].kwargs["model"], MASTER_MODEL)
+        self.assertEqual(calls[4].kwargs["model"], FALLBACK_MODEL)
 
     @patch("time.sleep", return_value=None)
     def test_chat_fallback_attempt_itself_is_not_retried(self, _sleep):
@@ -172,7 +174,7 @@ class ChatResultTests(unittest.TestCase):
         self.mock_client.chat.completions.create.side_effect = Exception("429 Too Many Requests")
         result = self.client.chat("system", "user")
         self.assertIsInstance(result, Failure)
-        self.assertEqual(self.mock_client.chat.completions.create.call_count, 4)  # not 5, 6, ...
+        self.assertEqual(self.mock_client.chat.completions.create.call_count, 5)  # not 6, 7, ...
 
     def test_chat_non_retryable_error_skips_fallback_too(self):
         # api_error (not rate_limit/timeout) fails fast on the primary model
@@ -191,7 +193,7 @@ class ChatResultTests(unittest.TestCase):
         mock_client.chat.completions.create.side_effect = Exception("429 Too Many Requests")
         result = client.chat("system", "user")
         self.assertIsInstance(result, Failure)
-        self.assertEqual(mock_client.chat.completions.create.call_count, 3)  # no 4th fallback attempt
+        self.assertEqual(mock_client.chat.completions.create.call_count, 4)  # 1 try + 3 retries, no fallback attempt
 
     @patch("time.sleep", return_value=None)
     def test_chat_timeout_exhaustion_returns_failure(self, _sleep):
@@ -269,16 +271,26 @@ class ChatResultTests(unittest.TestCase):
         self.assertEqual(self.mock_client.chat.completions.create.call_count, 1)  # api_error: no retry
 
     @patch("time.sleep", return_value=None)
-    def test_vision_retries_on_timeout_then_recovers(self, _sleep):
-        # B22 fix: vision() previously had zero retries at all.
+    def test_vision_retries_once_on_a_rate_limit_then_recovers(self, _sleep):
+        # B22 fix: vision() previously had zero retries at all. Only a rate
+        # limit is retried now: a timeout means a hung endpoint (measured 764 s
+        # for one page on NVIDIA), and retrying multiplies the wait.
         self.mock_client.chat.completions.create.side_effect = [
-            Exception("Request timeout after 120s"),
+            Exception("429 Too Many Requests"),
             _fake_stream("a cat", " (recovered)"),
         ]
         result = self.client.vision("system", "what is this?", b"fake-image-bytes")
         self.assertIsInstance(result, Success)
         self.assertEqual(result.value, "a cat (recovered)")
         self.assertEqual(self.mock_client.chat.completions.create.call_count, 2)
+
+    @patch("time.sleep", return_value=None)
+    def test_vision_does_not_retry_a_timeout(self, _sleep):
+        self.mock_client.chat.completions.create.side_effect = Exception("Request timeout after 60s")
+        result = self.client.vision("system", "what is this?", b"fake-image-bytes")
+        self.assertIsInstance(result, Failure)
+        self.assertEqual(result.error.kind, "timeout")
+        self.assertEqual(self.mock_client.chat.completions.create.call_count, 1)
 
     @patch("time.sleep", return_value=None)
     def test_vision_does_not_fall_back_to_a_different_model(self, _sleep):
@@ -290,7 +302,7 @@ class ChatResultTests(unittest.TestCase):
         result = self.client.vision("system", "what is this?", b"fake-image-bytes")
         self.assertIsInstance(result, Failure)
         calls = self.mock_client.chat.completions.create.call_args_list
-        self.assertEqual(len(calls), 3)  # initial + 2 retries, no 4th fallback attempt
+        self.assertEqual(len(calls), 2)  # initial + 1 rate-limit retry, no fallback attempt
         self.assertTrue(all(c.kwargs["model"] == VISION_MODEL for c in calls))
 
     def test_vision_uses_vision_model_not_master_model(self):

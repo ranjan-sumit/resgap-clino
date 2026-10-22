@@ -14,11 +14,11 @@ for the smallest change that's honestly correct (same reasoning that kept
 `pipeline/relevance_ranking.py` on plain `requests` instead of a vector-DB
 client).
 
-`verified_live` is an honest flag, not decoration: only `nvidia` has been
-exercised against the real API this session (it's the pre-existing
-default, already in production). `openai`/`gemini`/`qwen` are structurally
-correct and unit-tested, but nothing here has a real key to confirm their
-live behavior (exact error shapes, auth quirks, any per-provider deviation
+`verified_live` is an honest flag, not decoration: `nvidia` (the
+pre-existing default, in production) and `gemini` (checked live 2026-10-19,
+see its entry) have been exercised against the real API. `openai`/`qwen`
+are structurally correct and unit-tested, but nothing here has a real key
+to confirm their live behavior (exact error shapes, auth quirks, any per-provider deviation
 from strict OpenAI-compatibility) -- do not treat `verified_live=False` as
 "probably fine," treat it as "unconfirmed."
 
@@ -54,6 +54,10 @@ class ProviderConfig:
     fallback_model: str | None
     known_models: tuple
     verified_live: bool
+    # Model used for image input (figure/table analysis). None = this provider
+    # has no known-good vision model here, so the UI hides the option rather
+    # than sending an NVIDIA-only model ID to the wrong endpoint.
+    vision_model: str | None = None
 
 
 PROVIDER_REGISTRY = {
@@ -79,8 +83,13 @@ PROVIDER_REGISTRY = {
         known_models=(
             "openai/gpt-oss-20b",
             "moonshotai/kimi-k3", "deepseek-ai/deepseek-v4-flash-0731",
+            # Added 2026-10-20: 120B vision-language model, answers on this
+            # account (13 s for a one-line reply with thinking off). Slow, so
+            # it suits council seats, not the call-heavy jobs.
+            "nvidia/nemotron-3.5-super-vl-120b-a12b",
         ),
         verified_live=True,
+        vision_model="meta/llama-3.2-11b-vision-instruct",
     ),
     "openai": ProviderConfig(
         key="openai", label="OpenAI",
@@ -93,8 +102,36 @@ PROVIDER_REGISTRY = {
         key="gemini", label="Google Gemini",
         base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
         api_key_env="GEMINI_API_KEY",
-        default_model="gemini-3.6-flash", fallback_model="gemini-3.5-flash-lite",
-        known_models=("gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"),
+        # flash-lite is the default because it is the model a full 2-paper
+        # pipeline run was verified on, and it is fast (one wiki page in ~6s
+        # vs ~42s on NVIDIA's gpt-oss-20b). gemini-3.6-flash is the fallback.
+        default_model="gemini-3.5-flash-lite", fallback_model="gemini-3.6-flash",
+        known_models=("gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-3.7-flash"),
+        # Live-checked 2026-10-19 with a real key: /models lists all three IDs,
+        # each answered a chat call, a full 2-paper pipeline run completed on
+        # gemini-3.5-flash-lite, and image input (vision_model below) described
+        # a real PDF page correctly. Google returned a transient 503 "high demand"
+        # on gemini-3.6-flash once -- the client's retry/fallback covers that.
+        verified_live=True,
+        vision_model="gemini-3.6-flash",
+    ),
+    "groq": ProviderConfig(
+        # Groq serves open models behind an OpenAI-compatible API, with very fast
+        # inference. Not exercised against the live service yet (no key tested):
+        # use "Test models" before relying on it, and "Refresh model list" to see
+        # exactly which models your key can use.
+        key="groq", label="Groq",
+        base_url="https://api.groq.com/openai/v1", api_key_env="GROQ_API_KEY",
+        default_model="llama-3.3-70b-versatile", fallback_model=None,
+        # From Groq's own model page (2026-10-20), chat models only: no speech
+        # (whisper, orpheus) or safety classifiers (prompt-guard, safeguard).
+        # Listed prices per 1M tokens, input/output: gpt-oss-20b $0.075/$0.30
+        # (1000 tok/s), gpt-oss-120b $0.15/$0.60 (500 tok/s), qwen3.8-27b
+        # $0.80/$4.00; the llama, minimax and muse-spark models are "contact sales".
+        # minimax-m2.7 and muse-spark-open are preview models (may be withdrawn).
+        known_models=("llama-3.3-70b-versatile", "llama-3.1-8b-instant",
+                      "openai/gpt-oss-120b", "openai/gpt-oss-20b",
+                      "qwen/qwen3.8-27b", "minimaxai/minimax-m2.7", "meta-models/muse-spark-open"),
         verified_live=False,
     ),
     "qwen": ProviderConfig(
@@ -151,4 +188,5 @@ def build_client(provider_key: str, api_key: str, model: str = None, token_meter
         fallback_model=cfg.fallback_model,
         top_p=_MODEL_TOP_P_OVERRIDES.get(resolved_model, 1.0),
         token_meter=token_meter,
+        vision_model=cfg.vision_model,
     )
