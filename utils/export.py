@@ -408,8 +408,92 @@ def _evidence_rows(evidence_by_paper: dict) -> str:
     return "".join(rows)
 
 
-def to_enterprise_html_report(results: dict, context: dict, narrative: dict | None = None) -> str:
-    """Build a polished standalone HTML report."""
+def _lab_text(item) -> str:
+    """One Lab finding as text: the insight council returns plain strings in
+    some fields and {representative|text|title|claim} dicts in others."""
+    if isinstance(item, dict):
+        item = item.get("representative") or item.get("text") or item.get("title") or item.get("claim") or ""
+    return str(item or "").strip()
+
+
+def _lab_summary(comp: dict) -> dict:
+    """The parts of the Computational Lab output worth reading in a report,
+    normalised once so the HTML and PDF stay in step."""
+    comp = comp or {}
+    suff = comp.get("sufficiency") or {}
+    disc = comp.get("discovery") or {}
+    mc = (comp.get("model_council") or {}).get("final_decision") or {}
+    sim = comp.get("sim_results") or {}
+    ins = (comp.get("insight_council") or {}).get("final_decision") or {}
+    novel = ins.get("novel_finding")
+    novel_text = ""
+    if isinstance(novel, dict):
+        novel_text = " — ".join(x for x in (_lab_text(novel.get("title")), _lab_text(novel.get("claim"))) if x)
+    else:
+        novel_text = _lab_text(novel)
+    return {
+        "params": [p for p in (comp.get("params") or []) if isinstance(p, dict)],
+        "coverage": suff.get("coverage_score"),
+        "recommendation": suff.get("recommendation") or "",
+        "why": suff.get("why_score_is_low") or "",
+        "missing": [_lab_text(x) for x in (suff.get("missing_critical") or [])],
+        "hypotheses": [h for h in (disc.get("hypotheses") or []) if isinstance(h, dict)],
+        "model": mc.get("selected_model") or sim.get("model_used") or "",
+        "rationale": mc.get("rationale") or "",
+        "headline": {k: v for k, v in (sim.get("headline_numbers") or {}).items()
+                     if isinstance(v, (int, float, str))},
+        "drivers": [d for d in (sim.get("sensitivity_ranking") or []) if isinstance(d, dict)][:5],
+        "novel": novel_text,
+        "clinical": [_lab_text(x) for x in (ins.get("clinical_insights") or [])],
+        "research": [_lab_text(x) for x in (ins.get("research_insights") or [])],
+        "next_steps": [_lab_text(x) for x in (ins.get("actionable_next_steps") or [])],
+        "limitations": [_lab_text(x) for x in (ins.get("limitations") or [])],
+        "interpretation": _lab_text(ins.get("simulation_interpretation")),
+    }
+
+
+def _lab_html(comp: dict | None) -> str:
+    """The Computational Lab section, or "" when the run has no Lab output."""
+    if not comp:
+        return ""
+    s = _lab_summary(comp)
+    param_rows = "".join(
+        f"<tr><td>{_esc(p.get('name'))}</td><td>{_esc(p.get('value'))} {_esc(p.get('unit'))}</td>"
+        f"<td>{_esc(p.get('category'))}</td><td>{_esc(p.get('source_paper'))}</td><td>{_esc(p.get('confidence'))}</td></tr>"
+        for p in s["params"][:60])
+    hyp = "".join(
+        f"<div class='item'><h3>{_esc(h.get('hypothesis_id'))} · {_esc(h.get('title'))}</h3><p>{_esc(h.get('claim'))}</p></div>"
+        for h in s["hypotheses"])
+    headline = "".join(f"<tr><td>{_esc(str(k).replace('_', ' '))}</td><td>{_esc(round(v, 4) if isinstance(v, float) else v)}</td></tr>"
+                       for k, v in s["headline"].items())
+    drivers = "".join(f"<li>{_esc(d.get('parameter'))} (importance {_esc(d.get('importance'))})</li>" for d in s["drivers"])
+    def block(title, items):
+        return f"<h3>{title}</h3><ul>{_bullets(items)}</ul>" if items else ""
+    return f"""
+  <section>
+    <h2>Computational Lab</h2>
+    <p>Quantitative parameters pulled from the papers, simulated under base, optimistic and conservative scenarios, then interpreted by a council of models.
+       <strong>Data coverage:</strong> {_esc(s['coverage'])}/10 ({_esc(s['recommendation'])}). {_esc(s['why'])}</p>
+    {block('Parameters still missing', s['missing'])}
+    <h3>Extracted parameters ({len(s['params'])})</h3>
+    <table><thead><tr><th>Parameter</th><th>Value</th><th>Category</th><th>Source paper</th><th>Confidence</th></tr></thead><tbody>{param_rows}</tbody></table>
+    {f"<h3>Hypotheses from combining papers</h3>{hyp}" if hyp else ""}
+    {f"<h3>Simulation</h3><p><strong>Model:</strong> {_esc(s['model'])}. {_esc(s['rationale'])}</p>" if s['model'] else ""}
+    {f"<table><thead><tr><th>Result</th><th>Value</th></tr></thead><tbody>{headline}</tbody></table>" if headline else ""}
+    {f"<h4>Most influential parameters</h4><ul>{drivers}</ul>" if drivers else ""}
+    {f"<div class='note'><strong>Novel finding:</strong> {_esc(s['novel'])}</div>" if s['novel'] else ""}
+    {f"<p>{_esc(s['interpretation'])}</p>" if s['interpretation'] else ""}
+    {block('Clinical insights', s['clinical'])}
+    {block('Research insights', s['research'])}
+    {block('Suggested next steps', s['next_steps'])}
+    {block('Limitations of the Lab analysis', s['limitations'])}
+  </section>"""
+
+
+def to_enterprise_html_report(results: dict, context: dict, narrative: dict | None = None,
+                              comp_results: dict | None = None) -> str:
+    """Build a polished standalone HTML report. When `comp_results` (the
+    Computational Lab output) is given, the report includes its section."""
     narrative = narrative or generate_report_narrative(results, context)
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     papers = results.get("papers", [])
@@ -569,6 +653,8 @@ def to_enterprise_html_report(results: dict, context: dict, narrative: dict | No
     {proposal_cards}
   </section>
 
+  {_lab_html(comp_results)}
+
   <section>
     <h2>Risks and Limitations</h2>
     <ul>{_bullets(narrative.get('risk_and_limitations', []))}</ul>
@@ -597,7 +683,8 @@ def to_enterprise_html_report(results: dict, context: dict, narrative: dict | No
 </html>"""
 
 
-def to_enterprise_pdf_report(results: dict, context: dict, narrative: dict | None = None) -> bytes:
+def to_enterprise_pdf_report(results: dict, context: dict, narrative: dict | None = None,
+                             comp_results: dict | None = None) -> bytes:
     """Generate a PDF with the same report sections as the HTML report."""
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import letter
@@ -709,6 +796,33 @@ def to_enterprise_pdf_report(results: dict, context: dict, narrative: dict | Non
         story.append(para(f"{i}. {p.get('title','Untitled')}", "Heading4"))
         story.append(para(p.get("problem_statement", "")))
         story.append(para(f"Methodology: {p.get('methodology','')}", "Small2"))
+
+    if comp_results:
+        lab = _lab_summary(comp_results)
+        story.append(Paragraph("Computational Lab", styles["Section2"]))
+        story.append(para(f"Data coverage: {lab['coverage']}/10 ({lab['recommendation']}). {lab['why']}"))
+        if lab["missing"]:
+            story.append(para("Parameters still missing", "Heading4"))
+            story.extend(bullet_list(lab["missing"]))
+        if lab["params"]:
+            rows = [["Parameter", "Value", "Source paper"]]
+            for p in lab["params"][:40]:
+                rows.append([Paragraph(_esc(p.get("name")), styles["Small2"]),
+                             Paragraph(_esc(f"{p.get('value')} {p.get('unit') or ''}"), styles["Small2"]),
+                             Paragraph(_esc(p.get("source_paper")), styles["Small2"])])
+            story.append(simple_table(rows, [2.4*inch, 1.5*inch, 2.6*inch]))
+        for h in lab["hypotheses"]:
+            story.append(para(f"{h.get('hypothesis_id', '')} · {h.get('title', '')}", "Heading4"))
+            story.append(para(h.get("claim", "")))
+        if lab["model"]:
+            story.append(para(f"Simulation model: {lab['model']}. {lab['rationale']}"))
+        if lab["novel"]:
+            story.append(para(f"Novel finding: {lab['novel']}"))
+        for title, items in (("Clinical insights", lab["clinical"]), ("Research insights", lab["research"]),
+                             ("Suggested next steps", lab["next_steps"]), ("Limitations of the Lab analysis", lab["limitations"])):
+            if items:
+                story.append(para(title, "Heading4"))
+                story.extend(bullet_list(items))
 
     story.append(Paragraph("Risks and Limitations", styles["Section2"]))
     story.extend(bullet_list(narrative.get("risk_and_limitations", [])))

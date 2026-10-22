@@ -65,7 +65,8 @@ _BRANDING = _load_branding()
 
 # ── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title=_BRANDING["product_name"],
+    page_title=(f'{_BRANDING["product_name"]} — {_BRANDING["tagline"]}'
+                if _BRANDING["tagline"] else _BRANDING["product_name"]),
     page_icon="🔬",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -553,16 +554,25 @@ import tempfile, os, json, traceback
 from datetime import datetime
 
 from utils.azure_client import AzureOpenAIClient, MASTER_MODEL, FALLBACK_MODEL
-from utils.model_providers import PROVIDER_REGISTRY, DEFAULT_PROVIDER_KEY, build_client
+from utils.model_providers import PROVIDER_REGISTRY
+from utils.model_router import (
+    ModelRouter, ModelSpec, ModelConfig, ALL_ROLES, MAIN_ROLES, COUNCIL_ROLES, ROLE_LABELS, ROLE_HELP,
+    ROLE_EXTRACTION, ROLE_ANALYSIS, CUSTOM_PROVIDER, run_model_tests, fetch_models, can_read_images,
+)
+from utils.model_settings import load_config, save_config, recommend, explain, BENCHMARK
 from utils.export import (
     to_json, to_markdown_report, to_pdf_report,
     generate_report_narrative, to_enterprise_html_report,
     to_enterprise_pdf_report,
 )
 from utils.database import (
-    init_db, save_run, list_runs, load_run, delete_run,
+    init_db, save_run, list_runs, load_run, delete_run, get_run_row,
     record_artifact, record_run_manifest,
+    DEFAULT_PROJECT_ID, list_projects, get_project, list_feedback, upsert_feedback,
+    list_project_files, attach_comp_results, update_run_proposals,
 )
+from utils import project_store
+from pipeline.feedback_context import POSITIVE_REASONS, NEGATIVE_REASONS
 from pipeline.pdf_parser import parse_pdf
 from pipeline.page_index import build_tree, tree_to_summary
 from pipeline.wiki_compiler import build_wiki
@@ -577,12 +587,13 @@ from pipeline.run_compare import compare_runs
 from pipeline.lineage import record_run_lineage, get_technical_lineage, get_scientific_lineage
 from utils.token_meter import TokenMeter
 from pipeline.graph_persistence import (
-    connect_ok as arcadedb_connect_ok, save_graph_snapshot, load_graph_snapshot,
+    connect_ok as graph_store_connect_ok, save_graph_snapshot, load_graph_snapshot,
     list_graph_snapshots, diff_graph_snapshots, GRAPH_PERSISTENCE_VERSION,
 )
 from pipeline.relevance_ranking import EMBEDDING_MODEL, RERANK_MODEL
 from pipeline.academic_search import validate_gaps
-from pipeline.proposal_generator import generate_proposals
+from pipeline.coverage import paper_coverage
+from pipeline.run_lab import run_computational_lab
 from pipeline.param_extractor import (
     extract_parameters, derive_cross_paper_parameters,
     check_sufficiency, params_to_csv, group_params_by_category,
@@ -602,15 +613,15 @@ from pipeline.multi_run import run_multi_council
 # in this file. Extracted so the FastAPI app can run the identical
 # pipeline; this file injects its Streamlit progress/trace/warning
 # callbacks into it, so behaviour here is unchanged.
-from pipeline.run_pipeline import PipelineInputError, RunOptions, run_full_pipeline
+from pipeline.run_pipeline import PipelineInputError, RunOptions, redo_proposal_step, run_full_pipeline
 from pipeline.doc_generator import build_zip
-from domain_config import get_domain_display_options, parse_domain_selection, get_domain_config
+from domain_config import get_ui_domain_choices, get_domain_config
 # Clinova Phase 1 (Epics 1.2-1.3) -- opt-in Corpus Quality Engine + canonical
 # reference resolution. Not imported into the always-on Stage 1-6 flow
-# above: Docling (docling_parser.py) is measured heavy on CPU (~1.1GB RSS,
-# ~86s/paper, evals/benchmarks/baseline/docling-resource-measurement.md),
-# so this stays behind the "enable_quality_engine" sidebar toggle rather
-# than silently adding that cost to every run.
+# above: the second parser (docling_parser.py, now PyMuPDF-based -- Docling
+# was removed for its ~5.8GB torch/CUDA footprint) stays behind the
+# "enable_quality_engine" sidebar toggle so the extra pass and quality gate
+# are not silently added to every run.
 from pipeline.docling_parser import extract_with_docling, DOCLING_STAGE_VERSION
 from pipeline.extraction_reconciler import reconcile_paper
 from pipeline.corpus_quality import (
@@ -636,6 +647,8 @@ _DEFAULTS = {
     "report_bundle":  None,
     "current_run_name": "",
     "current_run_id": None,
+    "current_project_id": DEFAULT_PROJECT_ID,   # the project new runs are saved to
+    "project_select": DEFAULT_PROJECT_ID,       # the sidebar picker's widget state
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
@@ -647,6 +660,81 @@ def _badge(text, color="#0066cc", bg="#e5f2ff", border="#7ab8f5"):
             f'border-radius:10px;font-family:\'DM Mono\',monospace;font-size:0.65rem;'
             f'font-weight:500;color:{color};background:{bg};border:1px solid {border};'
             f'margin-right:0.3rem;">{text}</span>')
+
+def _load_run_into_session(run_id: str, run_name: str) -> bool:
+    """Make a saved run the one on screen. Returns False if it has no results
+    (nothing is changed in that case)."""
+    loaded = load_run(run_id)
+    if not loaded.get("results"):
+        return False
+    st.session_state.results      = loaded["results"]
+    st.session_state.comp_results = loaded.get("comp_results")
+    st.session_state.ref_papers   = loaded["results"].get("ref_papers", [])
+    st.session_state.ref_diagnostics = loaded["results"].get("ref_diagnostics", {})
+    st.session_state.corpus       = loaded["results"].get("corpus", loaded["results"].get("papers", []))
+    st.session_state.loaded_run_id = run_id
+    st.session_state.current_run_id = run_id
+    st.session_state.current_run_name = run_name
+    return True
+
+
+def _clear_results() -> None:
+    """Nothing on screen (e.g. after switching to a project with no runs)."""
+    st.session_state.results = None
+    st.session_state.comp_results = None
+    st.session_state.ref_papers = []
+    st.session_state.ref_diagnostics = {}
+    st.session_state.corpus = []
+    st.session_state.loaded_run_id = None
+    st.session_state.current_run_id = None
+    st.session_state.current_run_name = ""
+
+
+def _switch_project(project_id: str) -> None:
+    """Make `project_id` current and show its most recent run (or nothing)."""
+    st.session_state.current_project_id = project_id
+    latest = list_runs(limit=1, project_id=project_id)
+    if not (latest and _load_run_into_session(latest[0]["id"], latest[0]["name"])):
+        _clear_results()
+
+
+def _on_project_change() -> None:
+    _switch_project(st.session_state["project_select"])
+
+
+# Open every new session on the most recent saved run -- and the project that
+# run belongs to -- so its results are already on screen. Session state is per
+# browser tab and is empty after a refresh, but the run itself is persisted.
+# Done once per session: after that, whatever the user loads or runs stays in
+# control.
+if not st.session_state.get("_latest_run_checked"):
+    st.session_state["_latest_run_checked"] = True
+    if st.session_state.results is None and not st.session_state.running:
+        _latest = list_runs(limit=1)
+        if _latest:
+            _load_run_into_session(_latest[0]["id"], _latest[0]["name"])
+            st.session_state.current_project_id = _latest[0].get("project_id") or DEFAULT_PROJECT_ID
+            st.session_state["project_select"] = st.session_state.current_project_id
+
+
+@st.dialog("New project")
+def _new_project_dialog() -> None:
+    name = st.text_input("Project name", placeholder="e.g., Cystic fibrosis review")
+    description = st.text_area("Description (optional)", height=80,
+                               placeholder="What this project is about")
+    st.caption("A folder is created for the project. The papers you upload, each run's results and "
+               "reports, and your feedback are saved there and in the database.")
+    if st.button("Create project", type="primary"):
+        try:
+            project = project_store.create_project(name, description)
+        except ValueError as e:
+            st.error(str(e))
+            return
+        _clear_results()                          # a new project starts empty
+        st.session_state.current_project_id = project["id"]
+        st.session_state["_pending_project"] = project["id"]   # applied to the picker on the next run
+        st.rerun()
+
 
 def _tier_badge(tier: int) -> str:
     label, color, _ = TIER_LABELS.get(tier, ("Unknown","#55708f",""))
@@ -677,480 +765,1010 @@ def _add_trace(stage, inp, out, status="✅"):
         {"stage": stage, "inputs": inp, "outputs": out, "status": status}
     )
 
+# ── Models: which provider and model does which job ───────────────────────────
+# The assignment lives in st.session_state["model_config"] (a ModelConfig, saved
+# to data/model_settings.json -- never any keys). The widgets mirror it under the
+# keys mp_<role> (provider), mm_<role> (model) and mc_<role> (typed custom id);
+# every change goes through _on_model_change, which rebuilds and saves the config.
+
+_NO_FALLBACK = "(none)"
+_CUSTOM_MODEL = "Custom…"
+_MODEL_ROWS = list(ALL_ROLES) + ["fallback"]
+
+
+def _provider_name(pk: str) -> str:
+    return "Custom endpoint" if pk == CUSTOM_PROVIDER else PROVIDER_REGISTRY[pk].label.split(" (")[0]
+
+
+def _provider_options(role: str) -> list:
+    options = [*PROVIDER_REGISTRY, CUSTOM_PROVIDER]
+    return [_NO_FALLBACK] + options if role == "fallback" else options
+
+
+def _provider_label(pk: str) -> str:
+    if pk == _NO_FALLBACK:
+        return "No fallback"
+    return _provider_name(pk) + ("" if pk in st.session_state.get("_available_providers", set()) else " (no key)")
+
+
+def _model_choices(pk: str) -> list:
+    if pk == _NO_FALLBACK:
+        return []
+    known = [] if pk == CUSTOM_PROVIDER else list(PROVIDER_REGISTRY[pk].known_models)
+    live = st.session_state.get("_fetched_models", {}).get(pk, [])
+    return known + [m for m in live if m not in known]
+
+
+def _default_model(pk: str) -> str:
+    return "" if pk == CUSTOM_PROVIDER else PROVIDER_REGISTRY[pk].default_model
+
+
+def _set_widget_state(cfg: ModelConfig) -> None:
+    for role in _MODEL_ROWS:
+        spec = cfg.fallback if role == "fallback" else cfg.spec_for(role)
+        if spec is None:
+            st.session_state[f"mp_{role}"], st.session_state[f"mm_{role}"], st.session_state[f"mc_{role}"] = _NO_FALLBACK, "", ""
+            continue
+        st.session_state[f"mp_{role}"] = spec.provider
+        if spec.model in _model_choices(spec.provider):
+            st.session_state[f"mm_{role}"], st.session_state[f"mc_{role}"] = spec.model, ""
+        else:
+            st.session_state[f"mm_{role}"], st.session_state[f"mc_{role}"] = _CUSTOM_MODEL, spec.model
+
+
+def _spec_from_widgets(role: str):
+    pk = st.session_state.get(f"mp_{role}")
+    if pk in (None, _NO_FALLBACK):
+        return None
+    choice = st.session_state.get(f"mm_{role}", "")
+    model = (st.session_state.get(f"mc_{role}", "") if choice == _CUSTOM_MODEL else choice).strip() or _default_model(pk)
+    if not model:
+        return None
+    return ModelSpec(pk, model, st.session_state.get("_custom_base_url", "") if pk == CUSTOM_PROVIDER else "")
+
+
+def _on_model_change() -> None:
+    roles = {role: _spec_from_widgets(role) for role in ALL_ROLES}
+    if any(roles[r] is None for r in MAIN_ROLES):
+        return                                  # incomplete (e.g. a custom model id still empty): keep the last good config
+    cfg = ModelConfig({r: s for r, s in roles.items() if s}, _spec_from_widgets("fallback"))
+    st.session_state["model_config"] = cfg
+    st.session_state.pop("_model_test", None)   # a test of the old choice says nothing about the new one
+    save_config(cfg)
+
+
+def _on_provider_change(role: str) -> None:
+    pk = st.session_state[f"mp_{role}"]
+    if pk == _NO_FALLBACK:                       # only the fallback row offers this
+        st.session_state[f"mm_{role}"] = ""
+    else:
+        st.session_state[f"mm_{role}"] = _CUSTOM_MODEL if pk == CUSTOM_PROVIDER else _default_model(pk)
+    st.session_state[f"mc_{role}"] = ""
+    _on_model_change()
+
+
+def _apply_preset(preset: str) -> None:
+    cfg = recommend(st.session_state.get("_available_providers", set()), preset)
+    st.session_state["model_config"] = cfg
+    save_config(cfg)
+    _set_widget_state(cfg)
+    st.session_state.pop("_model_test", None)
+
+
+def _refresh_model_lists() -> None:
+    """Ask each provider that has a key which models it offers."""
+    from concurrent.futures import ThreadPoolExecutor
+    keys, base = _keys, st.session_state.get("_custom_base_url", "")
+    todo = [p for p in st.session_state.get("_available_providers", set())]
+    with ThreadPoolExecutor(max_workers=max(1, len(todo))) as pool:
+        found = list(pool.map(lambda p: fetch_models(p, keys[p], base if p == CUSTOM_PROVIDER else ""), todo))
+    st.session_state["_fetched_models"] = {p: m for p, m in zip(todo, found) if m}
+    st.session_state["_models_refreshed"] = {p: len(m) for p, m in zip(todo, found)}
+    _set_widget_state(st.session_state["model_config"])   # a model may now be in the list instead of "Custom…"
+
+
+def _model_row(role: str) -> None:
+    label = ROLE_LABELS.get(role, "Fallback")
+    tip = ROLE_HELP.get(role, "Used when a role's own model fails. A different provider is best, so one outage "
+                              "cannot take out both.")
+    c_role, c_prov, c_model = st.columns([1.1, 1.3, 2.2], vertical_alignment="center")
+    c_role.markdown(f'<span title="{html.escape(tip)}" style="font-weight:600;font-size:0.9rem;">{label}</span>',
+                    unsafe_allow_html=True)
+    # A fixed snapshot of the labels (not a function that reads session state), so
+    # they are the same wherever Streamlit evaluates them.
+    _labels = {p: _provider_label(p) for p in _provider_options(role)}
+    c_prov.selectbox("Provider", list(_labels), key=f"mp_{role}", format_func=_labels.__getitem__,
+                     label_visibility="collapsed", on_change=_on_provider_change, args=(role,))
+    pk = st.session_state[f"mp_{role}"]
+    if pk == _NO_FALLBACK:
+        c_model.caption("If a model fails, the call fails.")
+        return
+    options = _model_choices(pk) + [_CUSTOM_MODEL]
+    if st.session_state.get(f"mm_{role}") not in options:
+        st.session_state[f"mm_{role}"] = options[0]
+    c_model.selectbox("Model", options, key=f"mm_{role}", label_visibility="collapsed", on_change=_on_model_change)
+    if st.session_state[f"mm_{role}"] == _CUSTOM_MODEL:
+        c_model.text_input("Model id", key=f"mc_{role}", label_visibility="collapsed", on_change=_on_model_change,
+                           placeholder="model id, exactly as the provider names it")
+
+
+def _config_signature(cfg: ModelConfig) -> str:
+    return json.dumps(cfg.to_dict(), sort_keys=True)
+
+
+def _render_model_picker() -> list:
+    """The 'Models for this run' panel, shown right above Run analysis. Returns
+    the problems that would make the run fail (missing keys) so Run can be held."""
+    import pandas as pd_module
+    cfg = st.session_state["model_config"]
+    if "mp_analysis" not in st.session_state:
+        _set_widget_state(cfg)
+    available = st.session_state.get("_available_providers", set())
+
+    head, b_test, b_rec, b_fast = st.columns([2.4, 1, 1.3, 1], vertical_alignment="center")
+    head.markdown('<div class="section-label" style="margin:0;">Models for this run</div>', unsafe_allow_html=True)
+    test_clicked = b_test.button("Test models", key="test_models_btn", help="Sends each selected model a tiny real "
+                                 "request (plain, then strict JSON) and shows the time or the exact error.")
+    b_rec.button("Use recommended", key="preset_recommended", on_click=_apply_preset, args=("recommended",),
+                 help="Fast model for extraction and wiki, a stronger one for analysis, a mixed council, "
+                      "and a fallback on another provider, chosen from the keys you have.")
+    b_fast.button("Fastest", key="preset_fastest", on_click=_apply_preset, args=("fastest",),
+                  help="The fast model for every role.")
+
+    notes = explain(cfg)
+    summary = " · ".join(f"{ROLE_LABELS[r]}: {cfg.spec_for(r).model}" for r in MAIN_ROLES)
+    summary += f" · Fallback: {cfg.fallback.model}" if cfg.fallback else " · No fallback"
+    st.caption(summary)
+
+    if test_clicked:
+        with st.spinner("Testing models…"):
+            st.session_state["_model_test"] = {"sig": _config_signature(cfg),
+                                               "results": run_model_tests(cfg, _keys)}
+    test = st.session_state.get("_model_test")
+    if test and test["sig"] == _config_signature(cfg):
+        for r in test["results"]:
+            roles = ", ".join(r["roles"])
+            if r["ok"]:
+                if r["json_ok"] is None:
+                    json_note = f" · JSON check skipped: {html.escape(r['json_note'])}" if r.get("json_note") else ""
+                elif r["json_ok"]:
+                    json_note = ""
+                else:
+                    json_note = (" · <b>replies, but not in strict JSON</b>" if not r.get("json_note")
+                                 else f" · <b>JSON check failed:</b> {html.escape(r['json_note'])}")
+                st.markdown(f'<span style="color:#087f5b;font-weight:700;">✓</span> {html.escape(r["label"])} '
+                            f'— {r["latency_s"]} s{json_note} <span style="color:#55708f;">({html.escape(roles)})</span>',
+                            unsafe_allow_html=True)
+            else:
+                st.markdown(f'<span style="color:#c81e1e;font-weight:700;">✗</span> {html.escape(r["label"])} '
+                            f'<span style="color:#55708f;">({html.escape(roles)})</span><br>'
+                            f'<span style="color:#c81e1e;font-size:0.82rem;">{html.escape(r["error"])}</span>',
+                            unsafe_allow_html=True)
+
+    with st.expander("Choose models"):
+        st.caption("Each job can use a different provider and model. Hover a name to see what it does.")
+        for role in MAIN_ROLES:
+            _model_row(role)
+            if notes.get(role):
+                st.caption(f"↳ {notes[role]}")
+        _model_row("fallback")
+        st.markdown('<div style="margin-top:0.6rem;font-weight:600;font-size:0.9rem;">Council (Computational Lab)</div>',
+                    unsafe_allow_html=True)
+        for role in COUNCIL_ROLES:
+            _model_row(role)
+        st.button("Refresh model lists", key="refresh_models_btn", on_click=_refresh_model_lists,
+                  help="Asks each provider you have a key for which models it offers right now.")
+        refreshed = st.session_state.get("_models_refreshed")
+        if refreshed:
+            st.caption("Models listed: " + " · ".join(f"{_provider_name(p)} {n}" for p, n in refreshed.items()))
+        with st.expander("Why these recommendations?"):
+            st.caption("Measured on the same wiki-compile task (one 16-page paper, the app's own prompt):")
+            st.table(pd_module.DataFrame(BENCHMARK).rename(columns={
+                "model": "Model", "time": "Time per call", "valid_json": "Valid JSON", "quality": "Quality"}))
+            st.caption("So: a fast model for the high-volume stages, a stronger one only where reasoning matters, "
+                       "council seats from different models (independent views are the point), and a fallback on "
+                       "a different provider. Not benchmarked here: OpenAI, Groq, and custom endpoints, so use "
+                       "Test models with them.")
+
+    issues = []
+    for role in MAIN_ROLES:
+        spec = cfg.spec_for(role)
+        if spec.provider not in available:
+            issues.append(f"{ROLE_LABELS[role]}: add a {_provider_name(spec.provider)} key under API keys & endpoints.")
+    if cfg.fallback and cfg.fallback.provider not in available:
+        st.caption(f"⚠ The fallback ({cfg.fallback.label}) has no key, so it cannot take over.")
+    return issues
+
+
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown(f"### 🔬 {_BRANDING['product_name']}")
-    if _BRANDING["tagline"]:
-        st.caption(_BRANDING["tagline"])
-    st.markdown("---")
+    st.markdown(f'<div class="sb-brand">{html.escape(_BRANDING["product_name"])}</div>', unsafe_allow_html=True)
 
-    # API config
-    st.markdown("##### API Configuration")
-    # B25 fix (2026-08-22): reads MASTER_MODEL/FALLBACK_MODEL from
-    # utils/azure_client.py instead of hardcoding the label, so this panel
-    # can't silently go stale the next time the master/fallback roles
-    # change (exactly what happened here -- this label still said
-    # "gpt-oss-120b" after B25 swapped the master model to gpt-oss-20b).
-    _master_short = MASTER_MODEL.replace("openai/", "")
-    _fallback_short = FALLBACK_MODEL.replace("openai/", "")
-    st.markdown(f"""
-    <div style="background:#edf6ff;border:1px solid #7ab8f5;border-radius:6px;
-                padding:0.8rem 1rem;margin-bottom:0.8rem;">
-      <div style="font-family:'DM Mono',monospace;font-size:0.65rem;color:#0066cc;
-                  text-transform:uppercase;letter-spacing:0.1em;margin-bottom:0.5rem;">Model Stack</div>
-      <div style="font-size:0.78rem;color:#0b1f3a;font-weight:500;">🧠 Master — {_master_short}</div>
-      <div style="font-family:'DM Mono',monospace;font-size:0.62rem;color:#55708f;line-height:1.9;">
-        Fallback · {_fallback_short}<br>
-        Council A1 · gpt-oss-20b<br>Council A2 · llama-3.2-3b<br>
-        Council A3 · nemotron-30b<br>Chair · kimi-k3 · NVIDIA NIM
-      </div>
-    </div>""", unsafe_allow_html=True)
+    # ── Project: every analysis, its papers and files, and feedback belong to one ──
+    st.markdown("##### Project")
+    _projects = list_projects()
+    _project_ids = [p["id"] for p in _projects]
+    _project_by_id = {p["id"]: p for p in _projects}
+    if "_pending_project" in st.session_state:   # set by the New project dialog; the picker
+        st.session_state["project_select"] = st.session_state.pop("_pending_project")   # can't be set after it exists
+    if st.session_state.get("project_select") not in _project_ids:
+        st.session_state["project_select"] = DEFAULT_PROJECT_ID
+    st.session_state.current_project_id = st.session_state["project_select"]
+    st.selectbox(
+        "Project", _project_ids, key="project_select", on_change=_on_project_change,
+        format_func=lambda pid: f"{_project_by_id[pid]['name']} ({_project_by_id[pid]['run_count']})",
+        label_visibility="collapsed")
+    if st.button("New project", key="new_project_btn"):
+        _new_project_dialog()
 
-    api_key = st.text_input("NVIDIA API Key", type="password",
-                             placeholder="nvapi-••••••••••••••••")
-    st.markdown('<div style="font-family:\'DM Mono\',monospace;font-size:0.62rem;color:#55708f;">'
-                '🔗 <a href="https://build.nvidia.com" target="_blank" style="color:#0066cc;">'
-                'Get key → build.nvidia.com</a></div>', unsafe_allow_html=True)
+    # Containers fix the on-screen ORDER (setup first, model last) while the
+    # code below fills the model one first: the analysis options depend on the
+    # selected provider (e.g. whether it supports image input).
+    setup_c = st.container()
+    options_c = st.container()
+    model_c = st.container()
 
-    ss_api_key = st.text_input("Semantic Scholar API Key (optional)", type="password",
-                                placeholder="Leave blank to use the free, rate-limited tier")
-    st.markdown('<div style="font-family:\'DM Mono\',monospace;font-size:0.62rem;color:#55708f;">'
-                '🔗 <a href="https://www.semanticscholar.org/product/api" target="_blank" style="color:#0066cc;">'
-                'Get key → semanticscholar.org/product/api</a></div>', unsafe_allow_html=True)
+    # ── API keys & endpoints (set once; WHICH model does what is chosen next to Run) ──
+    with model_c:
+        with st.expander("API keys & endpoints"):
+            st.caption("Keys stay in this session and are never written to disk. "
+                       "Leave a field blank to use the environment variable named in its help.")
+            _typed_keys = {}
+            for _pk, _pcfg in PROVIDER_REGISTRY.items():
+                _typed_keys[_pk] = st.text_input(
+                    f"{_pcfg.label.split(' (')[0]} API key", type="password", placeholder="Paste key",
+                    key=f"key_{_pk}", help=f"Leave blank to use {_pcfg.api_key_env}.")
+            st.markdown("**Custom endpoint** — any OpenAI-compatible API")
+            _typed_custom_base = st.text_input(
+                "Base URL", key="custom_base_url", placeholder="https://api.example.com/v1",
+                value=os.environ.get("CUSTOM_LLM_BASE_URL", ""),
+                help="Anything that speaks the OpenAI chat format. Choose \"Custom endpoint\" as a provider below.")
+            _typed_custom_key = st.text_input(
+                "Custom endpoint API key", type="password", placeholder="Paste key", key="key_custom",
+                help="Leave blank to use CUSTOM_LLM_API_KEY.")
+            ss_api_key = st.text_input(
+                "Semantic Scholar API key (optional)", type="password", placeholder="Paste key",
+                help="Leave blank to use SEMANTIC_SCHOLAR_API_KEY from the environment; with neither, the free, "
+                     "rate-limited tier is used. Get a key at semanticscholar.org/product/api.")
+            # Like every other key, the environment is a valid source (it was ignored here, so
+            # runs used the slow free tier even with a key in .env).
+            ss_api_key = (ss_api_key or "").strip() or os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "").strip()
+            if ss_api_key:
+                st.caption("Semantic Scholar key in use.")
 
-    st.markdown("---")
-    st.markdown("##### Model Provider")
-    # Model selector (2026-08-23): NVIDIA stays the default -- selecting it
-    # changes nothing about existing behavior. The other three read their
-    # key straight from .env (OPENAI_API_KEY/GEMINI_API_KEY/DASHSCOPE_API_KEY),
-    # same convention as ARCADEDB_*/POSTGRES_* -- no sidebar re-entry, since
-    # these aren't the primary always-visible credential the NVIDIA field is.
-    _provider_keys = list(PROVIDER_REGISTRY.keys())
-    selected_provider_key = st.selectbox(
-        "Provider", options=_provider_keys,
-        index=_provider_keys.index(DEFAULT_PROVIDER_KEY),
-        format_func=lambda k: PROVIDER_REGISTRY[k].label,
-        help="NVIDIA NIM is the current default. The others are structurally "
-             "wired in but unverified against the real service this session "
-             "-- see utils/model_providers.py's own docstring.",
-    )
-    _selected_cfg = PROVIDER_REGISTRY[selected_provider_key]
-    if not _selected_cfg.verified_live:
-        st.caption(f"⚠️ {_selected_cfg.label} is not yet live-verified in this app.")
+        # An env var is a valid source for every key, so a deployed app can ship its
+        # keys as secrets while users may still paste their own.
+        _keys = {pk: (_typed_keys[pk] or os.environ.get(pcfg.api_key_env, "")).strip()
+                 for pk, pcfg in PROVIDER_REGISTRY.items()}
+        _custom_base = (_typed_custom_base or "").strip()
+        _keys[CUSTOM_PROVIDER] = (_typed_custom_key or os.environ.get("CUSTOM_LLM_API_KEY", "")).strip()
+        _available = {pk for pk in PROVIDER_REGISTRY if _keys[pk]}
+        if _keys[CUSTOM_PROVIDER] and _custom_base:
+            _available.add(CUSTOM_PROVIDER)
+        st.session_state["_available_providers"] = _available
+        st.session_state["_custom_base_url"] = _custom_base
+        api_key = _keys["nvidia"]          # also used for relevance ranking in Deep gap validation
+        if "model_config" not in st.session_state:
+            st.session_state["model_config"] = load_config(_available)
+        _found = [_provider_name(p) for p in (*PROVIDER_REGISTRY, CUSTOM_PROVIDER) if p in _available]
+        st.caption("Keys found: " + " · ".join(_found) if _found else
+                   "No API keys found. Add one above, or set it in the environment.")
 
-    _model_options = list(_selected_cfg.known_models) + ["Custom…"]
-    _model_choice = st.selectbox("Model", options=_model_options, index=0)
-    selected_model = (
-        st.text_input("Custom model ID", value=_selected_cfg.default_model)
-        if _model_choice == "Custom…" else _model_choice
-    )
+    # ── Research setup (used on every run -> always visible) ─────────────────
+    with setup_c:
+        st.markdown("##### Research setup")
+        _domain_choices = dict(get_ui_domain_choices())          # label -> domain key
+        _domain_label = st.selectbox("Domain", list(_domain_choices), index=0)
+        selected_domain = _domain_choices[_domain_label]
+        domain_cfg   = get_domain_config(selected_domain)
+        st.caption(domain_cfg["description"])
+        interest = st.text_area("Research interest",
+                                 placeholder=f"e.g., {domain_cfg.get('gap_examples','')[:80]}...",
+                                 height=80)
+        gap_type = st.selectbox("Gap type", ["Any", "Methodology", "Application", "Dataset",
+                                             "Evaluation", "Theory", "Benchmark"])
 
-    if selected_provider_key == "nvidia":
-        provider_api_key = api_key
-    else:
-        provider_api_key = os.environ.get(_selected_cfg.api_key_env, "").strip()
-        if not provider_api_key:
-            st.caption(f"⚠️ No key found -- add {_selected_cfg.api_key_env} to .env to use {_selected_cfg.label}.")
+    # ── Analysis options ──────────────────────────────────────────────────────
+    with options_c:
+        st.markdown("##### Analysis")
+        extract_refs = st.checkbox(
+            "Include cited references", value=False,
+            help="Looks up each paper's cited references on Semantic Scholar to widen the corpus. "
+                 "Slow: about 3-5 seconds per reference (more when Semantic Scholar throttles), "
+                 "so 50 references per paper adds roughly 5-10 minutes per paper. "
+                 "An optional Semantic Scholar API key (Model & API keys) speeds this up.")
+        ref_limit = st.selectbox(
+            "References per paper", ["25", "50", "100", "All"], index=1,
+            disabled=not extract_refs,
+            help="Higher limits take longer but improve reference coverage.")
 
-    st.markdown("---")
+        with st.expander("Advanced options"):
+            enable_quality_engine = st.checkbox(
+                "Quality check", value=False,
+                help="Cross-checks each paper with a second parser and resolves cited references "
+                     "before gap analysis. The run is blocked if extraction quality is too low. "
+                     "Adds a few seconds per new paper (cached afterwards).")
+            override_quality_gate = False
+            if enable_quality_engine:
+                override_quality_gate = st.checkbox(
+                    "Continue even if the quality check fails", value=False,
+                    help="A failed check blocks the run by default. Tick this to proceed anyway; "
+                         "the quality warning is still recorded in the results.")
 
-    # Domain
-    st.markdown("##### Research Domain")
-    opts         = get_domain_display_options()
-    default_idx  = next((i for i, d in enumerate(opts) if "Healthcare" in d), 0)
-    sel_display  = st.selectbox("Select Domain", opts, index=default_idx)
-    selected_domain = parse_domain_selection(sel_display)
-    domain_cfg   = get_domain_config(selected_domain)
+            enable_gap_challenger = st.checkbox(
+                "Deep gap validation", value=False,
+                help="Adds an extra literature search and a six-level status "
+                     "(open, partially open, contested, likely closed, closed, insufficient evidence) "
+                     "for each gap, based on how thoroughly the literature was searched. "
+                     "Slower: roughly 30 seconds per gap.")
+            if enable_gap_challenger and not api_key:
+                st.caption("No NVIDIA key found: candidate papers will not be relevance-ranked.")
 
-    st.markdown(f"""
-    <div style="background:#edf6ff;border:1px solid #7ab8f5;border-radius:6px;
-                padding:0.7rem 0.9rem;margin-top:0.3rem;">
-      <div style="font-size:0.78rem;color:#0b1f3a;">{domain_cfg['description']}</div>
-    </div>""", unsafe_allow_html=True)
-
-    st.markdown("---")
-    st.markdown("##### Research Context")
-    interest = st.text_area("Your Specific Interest",
-                             placeholder=f"e.g., {domain_cfg.get('gap_examples','')[:80]}...",
-                             height=70)
-    gap_type = st.selectbox("Gap Type Focus",
-                             ["Any","Methodology","Application","Dataset",
-                              "Evaluation","Theory","Benchmark"])
-
-    st.markdown("---")
-    st.markdown("##### Options")
-    use_vision = st.checkbox("🖼️ Vision (figures/tables)", value=False)
-    extract_refs = st.checkbox("📚 Extract & enrich references (50+ papers)", value=True,
-                               help="Parse cited papers, query Semantic Scholar for abstracts.")
-    ref_limit = st.selectbox("Reference limit per paper",
-                             ["25", "50", "100", "All"],
-                             index=1,
-                             help="Higher limits take longer but improve reference coverage.")
-    show_prompts = st.checkbox("🔍 Show prompts (explainability)", value=False)
-    n_council_runs = st.select_slider("🔄 Council runs", options=[1,2,3], value=2,
-                                       help="Run insight council N times and merge findings.")
-
-    enable_quality_engine = st.checkbox(
-        "🔬 Corpus Quality Engine (multi-parser + gate)", value=False,
-        help="Cross-checks each paper with a second parser (Docling) and canonically "
-             "resolves references before gap analysis runs. Adds ~90s per NEW paper "
-             "(cached after the first run on that paper). Blocks the run if quality is "
-             "too low unless you check the override below.")
-    override_quality_gate = False
-    if enable_quality_engine:
-        override_quality_gate = st.checkbox(
-            "⚠️ Proceed even if the quality gate is FAIL", value=False,
-            help="A FAIL gate blocks the run by default (Clinova Phase 1, Story 1.2.3). "
-                 "Check this to proceed anyway -- the DEGRADED/FAIL provenance still "
-                 "propagates into the results either way.")
-
-    enable_gap_challenger = st.checkbox(
-        "🥊 Gap Challenger (rich status + search coverage)", value=False,
-        help="Clinova Phase 3, Epic 3.4. Replaces the plain open/partial/solved "
-             "validation with the full 6-status lifecycle (INSUFFICIENT_EVIDENCE / "
-             "OPEN / PARTIALLY_OPEN / CONTESTED / LIKELY_CLOSED / CLOSED), assigned "
-             "deterministically from a measured Search Coverage Score -- a technically-"
-             "empty search can never silently resolve to OPEN. Runs an extra search + "
-             "LLM judgment per gap on top of the existing validation, adding real time "
-             "(~30s+ per gap, live-measured) -- opt-in for that reason.")
-
-    enable_graph_persistence = st.checkbox(
-        "🗄️ Persist graph to ArcadeDB (cross-run graph history)", value=False,
-        help="Clinova Phase 3, Epic 3.1. Saves this run's knowledge graph to a local "
-             "ArcadeDB server so it can be compared against other runs later (which "
-             "entities/relationships are new, which persist across analyses). Requires "
-             "ArcadeDB running locally first -- see RESUME.md for setup. If the server "
-             "isn't reachable, the run still completes normally; only the graph save is "
-             "skipped, with a warning.")
+            _mc = st.session_state["model_config"]
+            if any(can_read_images(s) for s in (_mc.spec_for(ROLE_EXTRACTION), _mc.spec_for(ROLE_ANALYSIS), _mc.fallback) if s):
+                use_vision = st.checkbox(
+                    "Analyze figures and tables", value=False,
+                    help="Sends up to 5 figure-heavy pages per paper to a vision model. "
+                         "Slower and uses more tokens.")
+            else:
+                use_vision = False
+                st.caption("Figure analysis needs a model that can read images (for example Gemini or NVIDIA "
+                           "as extraction, analysis or fallback model).")
 
     st.markdown("---")
 
-    # ── Run History ────────────────────────────────────────────────────────────
-    st.markdown("##### 🕑 Run History")
-    runs = list_runs(limit=10)
+    # ── Recent runs (this project) ─────────────────────────────────────────────
+    st.markdown("##### Recent runs")
+    runs = list_runs(limit=5, project_id=st.session_state.current_project_id)
     if not runs:
-        st.markdown('<div style="font-family:\'DM Mono\',monospace;font-size:0.72rem;'
-                    'color:#55708f;">No saved runs yet.</div>', unsafe_allow_html=True)
+        st.caption("No saved runs in this project yet.")
     else:
         for run in runs:
             ts_short = run["created_at"][:16].replace("T", " ")
-            comp_dot = " 🧬" if run["has_comp"] else ""
+            on_screen = "● " if run["id"] == st.session_state.current_run_id else ""
             if st.button(
-                f"📄 {run['name'][:22]}{comp_dot}",
+                f"{on_screen}{run['name'][:30]}",
                 key=f"load_{run['id']}",
                 help=f"{ts_short} · {run['domain']} · {run['n_papers']} papers · {run['n_gaps']} gaps",
             ):
-                loaded = load_run(run["id"])
-                if loaded.get("results"):
-                    st.session_state.results      = loaded["results"]
-                    st.session_state.comp_results = loaded.get("comp_results")
-                    st.session_state.ref_papers   = loaded["results"].get("ref_papers", [])
-                    st.session_state.ref_diagnostics = loaded["results"].get("ref_diagnostics", {})
-                    st.session_state.corpus       = loaded["results"].get("corpus", loaded["results"].get("papers", []))
-                    st.session_state.loaded_run_id = run["id"]
-                    st.session_state.current_run_id = run["id"]
-                    st.session_state.current_run_name = run["name"]
+                if _load_run_into_session(run["id"], run["name"]):
                     st.rerun()
 
             st.markdown(
-                f'<div style="font-family:\'DM Mono\',monospace;font-size:0.62rem;'
-                f'color:#55708f;margin-top:-0.5rem;margin-bottom:0.4rem;padding-left:0.2rem;">'
-                f'{ts_short} · {run["n_papers"]}p · {run["n_gaps"]}g</div>',
+                f'<div style="font-size:0.72rem;color:#55708f;'
+                f'margin-top:-0.5rem;margin-bottom:0.4rem;padding-left:0.2rem;">'
+                f'{ts_short} · {run["n_papers"]} papers · {run["n_gaps"]} gaps'
+                f'{" · Lab ✓" if run["has_comp"] else ""}</div>',
                 unsafe_allow_html=True,
             )
+        st.caption("All runs, comparison, files and feedback: Project view.")
 
-    if runs:
-        # Clinova Phase 3, Epic 3.6: makes pipeline/repeatability_score.py
-        # actually usable from the app, not just a standalone tested
-        # module -- select 2+ saved runs (from repeated analyses of the
-        # SAME corpus/context; this function can't verify that from gap
-        # lists alone, so picking unrelated runs will just produce a low,
-        # honestly-meaningless score, not an error) and see how stable
-        # the gap output was across them.
-        with st.expander("🔁 Repeatability Check (compare saved runs)"):
-            run_options = {f"{r['name'][:30]} ({r['id'][:8]}, {r['n_gaps']}g)": r["id"] for r in runs}
-            selected_labels = st.multiselect(
-                "Pick 2+ runs from repeated analyses of the same corpus/context",
-                options=list(run_options.keys()),
-                key="repeatability_run_select",
+# ── Main header (hero) ────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+  .hero, .hero * { font-family: Inter, "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif !important; }
+  .hero {
+    position: relative; overflow: hidden;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.1rem 1.9rem 1.2rem;
+    margin: 0 0 1.1rem;
+    box-shadow: 0 1px 2px rgba(11, 31, 58, 0.05), 0 6px 20px rgba(0, 76, 147, 0.06);
+  }
+  .hero::before {
+    content: ""; position: absolute; inset: 0 0 auto 0; height: 4px;
+    background: linear-gradient(90deg, var(--accent-strong), var(--accent) 55%, #19a7ce);
+  }
+  .hero-brand {
+    display: flex; align-items: center; gap: 0.7rem;
+    padding-bottom: 0.85rem; margin-bottom: 1.1rem; border-bottom: 1px solid #e3eefb;
+  }
+  .hero-mark {
+    width: 2.1rem; height: 2.1rem; border-radius: 8px; flex: none;
+    display: flex; align-items: center; justify-content: center;
+    background: linear-gradient(135deg, var(--accent-strong), var(--accent));
+  }
+  .hero-mark svg { width: 1.3rem; height: 1.3rem; }
+  .hero-name { font-size: 1.05rem; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent-strong); }
+  .hero-divider { width: 1px; height: 1.1rem; background: var(--border); }
+  .hero-platform { font-size: 0.86rem; font-weight: 500; color: var(--muted); }
+  .hero-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 2.2rem; align-items: start; }
+  .hero .hero-h1 {
+    margin: 0 0 0.55rem !important; font-size: 1.65rem; font-weight: 700;
+    line-height: 1.2; letter-spacing: -0.02em; color: var(--text);
+  }
+  .hero .hero-desc {
+    margin: 0 !important; max-width: 36rem; font-size: 0.95rem; line-height: 1.6; color: var(--muted);
+  }
+  .hero-points { display: flex; flex-direction: column; gap: 0.65rem; padding-left: 1.6rem; border-left: 1px solid #e3eefb; }
+  .hero-point { display: flex; gap: 0.7rem; align-items: flex-start; }
+  .hero-point svg { flex: none; width: 1.15rem; height: 1.15rem; margin-top: 0.12rem; }
+  .hero-point b { display: block; font-size: 0.9rem; font-weight: 600; color: var(--text); }
+  .hero-point span { display: block; font-size: 0.82rem; line-height: 1.45; color: var(--muted); }
+  .hero-flow { display: flex; }
+  .hero-flow-title {
+    font-size: 0.68rem; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--muted); margin: 1.1rem 0 0.7rem; padding-top: 0.85rem; border-top: 1px solid #e3eefb;
+  }
+  .flow-step { flex: 1; position: relative; min-width: 0; }
+  .flow-step:not(:last-child)::after {
+    content: ""; position: absolute; top: 0.8rem; left: 2.1rem; right: 0.4rem; height: 1px; background: var(--border);
+  }
+  .flow-dot {
+    width: 1.6rem; height: 1.6rem; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    background: var(--accent-soft); border: 1px solid #7ab8f5; color: var(--accent-strong);
+    font-size: 0.72rem; font-weight: 600; position: relative; z-index: 1;
+  }
+  .flow-label { margin-top: 0.45rem; font-size: 0.8rem; font-weight: 500; color: var(--text); }
+  @media (max-width: 900px) {
+    .hero-grid { grid-template-columns: 1fr; gap: 1.2rem; }
+    .hero-points { padding-left: 0; border-left: none; }
+    .hero-flow { flex-wrap: wrap; gap: 0.8rem 0; }
+    .flow-step { flex: 0 0 33%; }
+    .flow-step::after { display: none; }
+  }
+  .sb-brand {
+    font-size: 1.05rem; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--accent-strong); padding: 0.3rem 0 0.7rem; margin-bottom: 0.4rem;
+    border-bottom: 1px solid var(--border);
+    font-family: Inter, "Segoe UI", system-ui, sans-serif !important;
+  }
+  [data-testid="stSidebar"] .stButton > button {
+    background: var(--surface) !important; color: var(--accent-strong) !important;
+    border: 1px solid var(--border) !important; width: 100%;
+    justify-content: flex-start; text-align: left; font-weight: 500 !important;
+  }
+  [data-testid="stSidebar"] .stButton > button:hover {
+    background: var(--accent-soft) !important; border-color: #7ab8f5 !important;
+  }
+  [data-testid="stSidebar"] .stButton > button:disabled {
+    background: #f2f5f8 !important; color: #8aa0b8 !important; border-color: #e3eefb !important;
+  }
+  .section-label { font-size: 1rem; font-weight: 600; color: var(--text); margin: 0 0 0.15rem; }
+  .section-hint { font-size: 0.82rem; color: var(--muted); margin: 0 0 0.6rem; }
+  .run-status { font-size: 0.86rem; color: var(--muted); margin: 0 !important; line-height: 1.2; }
+  .run-status.ready { color: var(--success); font-weight: 500; }
+  [data-testid="stVerticalBlockBorderWrapper"] {
+    background: var(--surface) !important;
+    border-radius: 12px !important;
+    border-color: var(--border) !important;
+    box-shadow: 0 1px 2px rgba(11, 31, 58, 0.05), 0 6px 20px rgba(0, 76, 147, 0.06) !important;
+  }
+  .stButton > button[kind="primary"] { padding: 0.6rem 1.6rem !important; font-weight: 600 !important; }
+  .stButton > button:disabled { background: #c9d6e2 !important; border-color: #c9d6e2 !important; color: #ffffff !important; }
+</style>
+""", unsafe_allow_html=True)
+
+_CHECK = ('<svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="9" fill="#e5f2ff" stroke="#7ab8f5"/>'
+          '<path d="M6 10.4l2.6 2.6L14 7.6" stroke="#0066cc" stroke-width="1.8" stroke-linecap="round" '
+          'stroke-linejoin="round"/></svg>')
+_MARK = ('<svg viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round">'
+         '<path d="M6.5 7.5L17 6.5M6.5 7.5L11 17.5M17 6.5L11 17.5"/>'
+         '<circle cx="6.5" cy="7.5" r="2.2" fill="#ffffff"/><circle cx="17" cy="6.5" r="2.2" fill="#ffffff"/>'
+         '<circle cx="11" cy="17.5" r="2.2" fill="#ffffff"/></svg>')
+_hero_points = [
+    ("Evidence-linked", "Every gap is traced to evidence in your papers."),
+    ("Literature-validated", "Checked against Semantic Scholar and arXiv."),
+    ("Auditable runs", "Model, parser and code versions recorded."),
+]
+_hero_steps = ["Parse", "Evidence", "Knowledge graph", "Gap detection", "Validation", "Proposals"]
+_points_html = "".join(
+    f'<div class="hero-point">{_CHECK}<div><b>{t}</b><span>{d}</span></div></div>' for t, d in _hero_points)
+_flow_html = "".join(
+    f'<div class="flow-step"><div class="flow-dot">{i}</div><div class="flow-label">{s}</div></div>'
+    for i, s in enumerate(_hero_steps, 1))
+st.markdown(
+    '<div class="hero">'
+    '<div class="hero-brand">'
+    f'<div class="hero-mark">{_MARK}</div>'
+    f'<div class="hero-name">{html.escape(_BRANDING["product_name"])}</div>'
+    '<div class="hero-divider"></div>'
+    f'<div class="hero-platform">{html.escape(_BRANDING["tagline"])}</div>'
+    '</div>'
+    '<div class="hero-grid">'
+    '<div>'
+    '<div class="hero-h1">Identify and validate the research gaps across your literature.</div>'
+    '<div class="hero-desc">Upload 2&ndash;5 papers. AI agents read them, map what is already known, '
+    'and surface the open questions &mdash; with the evidence behind each one.</div>'
+    '</div>'
+    f'<div class="hero-points">{_points_html}</div>'
+    '</div>'
+    '<div class="hero-flow-title">Analysis pipeline</div>'
+    f'<div class="hero-flow">{_flow_html}</div>'
+    '</div>',
+    unsafe_allow_html=True)
+
+# ── Project: tools shared by the Project view ───────────────────────────────
+# The run-comparison tools used to live in the sidebar. They are in the Project
+# view now, where a project's runs are listed and can be selected together.
+
+def _render_run_comparison(id_a: str, id_b: str) -> None:
+    """Diffs two saved runs directly, in full: papers, evidence counts, graph
+    entities/relationships, gaps (with confidence changes), proposals, and the
+    model/pipeline version each run used. Reads only already-saved data
+    (pipeline/run_compare.py), no new LLM calls. A is the older run."""
+    try:
+        cmp = compare_runs(id_a, id_b)
+        m = cmp["manifest"]
+
+        def _gate(value) -> str:
+            if isinstance(value, dict):
+                return " · ".join(f"{k}: {v or 'not run'}" for k, v in value.items()) or "unknown"
+            return str(value or "unknown")
+
+        st.markdown(
+            f"**Model:** `{m['model_bundle_version_a'] or 'unknown'}` → "
+            f"`{m['model_bundle_version_b'] or 'unknown'}`  \n"
+            f"**Duration:** {m['run_duration_seconds_a'] or '?'}s → "
+            f"{m['run_duration_seconds_b'] or '?'}s  \n"
+            f"**Quality gate:** {_gate(m['quality_gate_results_a'])} → "
+            f"{_gate(m['quality_gate_results_b'])}"
+        )
+        st.markdown("")
+        p = cmp["papers"]
+        st.markdown(f"**Papers:** {p['common_count']} common · "
+                    f"{len(p['added'])} added · {len(p['removed'])} removed")
+        e = cmp["evidence"]
+        st.markdown(f"**Evidence objects:** {e['count_a']} → {e['count_b']} "
+                    f"({'+' if e['delta'] >= 0 else ''}{e['delta']})")
+        g = cmp["graph"]
+        st.markdown(
+            f"**Graph entities:** {g['entities_common_count']} common · "
+            f"{len(g['entities_added'])} added · {len(g['entities_removed'])} removed  \n"
+            f"**Graph relationships:** {g['relationships_common_count']} common · "
+            f"{len(g['relationships_added'])} added · {len(g['relationships_removed'])} removed"
+        )
+        gp = cmp["gaps"]
+        st.markdown(
+            f"**Gaps:** {gp['common_count']} common · "
+            f"{len(gp['added'])} new · {len(gp['removed'])} no longer generated · "
+            f"{len(gp['confidence_changes'])} confidence change(s)"
+        )
+        pr = cmp["proposals"]
+        st.markdown(f"**Proposals:** {pr['common_count']} common · "
+                    f"{pr['added_count']} added · {pr['removed_count']} removed")
+        if gp["added"]:
+            st.markdown("")
+            _section_label(f"New gaps in the newer run ({id_b[:8]})")
+            for t in gp["added"][:15]:
+                _item(f"🆕 {t}")
+        if gp["removed"]:
+            st.markdown("")
+            _section_label(f"Gaps no longer generated (in the older run, {id_a[:8]}, only)")
+            for t in gp["removed"][:15]:
+                _item(f"➖ {t}")
+        if gp["confidence_changes"]:
+            st.markdown("")
+            _section_label("Confidence changes")
+            for c in gp["confidence_changes"][:15]:
+                _item(f"🔀 {c['title']}: {c['confidence_a']} → {c['confidence_b']}")
+    except ValueError as e:
+        st.error(str(e))
+
+
+def _render_repeatability(selected_ids: list[str]) -> None:
+    """How stable the gap output was across repeated analyses of the same
+    corpus/context (pipeline/repeatability_score.py). Unrelated runs just give
+    a low, honestly-meaningless score, not an error."""
+    gap_sets = [load_run(rid).get("results", {}).get("gaps", []) for rid in selected_ids]
+    try:
+        report = compute_repeatability_score(gap_sets, run_ids=selected_ids)
+        st.markdown(
+            f"**Gap overlap:** {report['gap_overlap_mean']} · "
+            f"**Claim stability:** {report['claim_stability_mean']} · "
+            f"**Ranking correlation:** {report['ranking_correlation_mean']} · "
+            f"**Confidence drift:** {report['confidence_drift_mean']}"
+        )
+        if report.get("duplicate_run_note"):
+            st.warning(
+                f"⚠️ {report['n_duplicate_pairs_excluded']} pair(s) excluded from the "
+                f"averages above -- {report['duplicate_run_note']}"
             )
-            if st.button("Compute Repeatability Score", key="compute_repeatability",
-                         disabled=len(selected_labels) < 2):
-                selected_ids = [run_options[lbl] for lbl in selected_labels]
-                gap_sets = [load_run(rid).get("results", {}).get("gaps", []) for rid in selected_ids]
-                try:
-                    report = compute_repeatability_score(gap_sets, run_ids=selected_ids)
-                    st.markdown(
-                        f"**Gap overlap:** {report['gap_overlap_mean']} · "
-                        f"**Claim stability:** {report['claim_stability_mean']} · "
-                        f"**Ranking correlation:** {report['ranking_correlation_mean']} · "
-                        f"**Confidence drift:** {report['confidence_drift_mean']}"
-                    )
-                    if report.get("duplicate_run_note"):
-                        st.warning(
-                            f"⚠️ {report['n_duplicate_pairs_excluded']} pair(s) excluded from the "
-                            f"averages above -- {report['duplicate_run_note']}"
-                        )
-                    st.caption(report["ranking_proxy_note"])
-                    st.markdown("")
-                    _section_label("Per-Pair Detail")
-                    for p in report["pairs"]:
-                        dup = " ⚠️ likely duplicate (excluded above)" if p["likely_duplicate_run"] else ""
-                        st.markdown(
-                            f"`{p['run_a'][:8]}` vs `{p['run_b'][:8]}`{dup} — "
-                            f"overlap {p['gap_overlap']}, stability {p['claim_stability']}, "
-                            f"ranking corr {p['ranking_correlation']}, drift {p['confidence_drift']} "
-                            f"({p['n_common_gaps']} common gaps)"
-                        )
-                except ValueError as e:
-                    st.error(str(e))
-
-        # Clinova Phase 3, Epic 3.1 -- browses graphs persisted to
-        # ArcadeDB (opt-in "Persist graph to ArcadeDB" toggle above, per
-        # run). A separate list from Run History above: only runs saved
-        # WITH that toggle checked appear here, and ArcadeDB must be
-        # reachable right now for this panel to show anything but a
-        # clear "not connected" message.
-        with st.expander("🗄️ Graph History (ArcadeDB, cross-run diff)"):
-            ok, msg = arcadedb_connect_ok()
-            if not ok:
-                st.caption(f"Not connected -- {msg}")
-            else:
-                try:
-                    graph_runs = list_graph_snapshots()
-                except Exception as e:
-                    graph_runs = []
-                    st.error(f"Could not list saved graphs: {e}")
-                if not graph_runs:
-                    st.caption("No graphs persisted yet -- check the toggle above and run an analysis.")
-                else:
-                    graph_options = {
-                        f"{g['name'][:30]} ({g['run_id'][:8]}, {g['entity_count']}e/{g['relationship_count']}r"
-                        + (f", {g['build_status']} {g['quality_score']:.2f})" if g.get("build_status") else ")"): g["run_id"]
-                        for g in graph_runs
-                    }
-                    selected_graph_labels = st.multiselect(
-                        "Pick exactly 2 persisted graphs to diff",
-                        options=list(graph_options.keys()),
-                        key="graph_diff_select",
-                    )
-                    if st.button("Diff Graphs", key="diff_graphs",
-                                 disabled=len(selected_graph_labels) != 2):
-                        id_a, id_b = [graph_options[lbl] for lbl in selected_graph_labels]
-                        try:
-                            diff = diff_graph_snapshots(id_a, id_b)
-                            st.markdown(
-                                f"**Entities:** {len(diff['entities_common'])} common · "
-                                f"{len(diff['entities_only_in_a'])} only in `{id_a[:8]}` · "
-                                f"{len(diff['entities_only_in_b'])} only in `{id_b[:8]}`"
-                            )
-                            st.markdown(
-                                f"**Relationships:** {len(diff['relationships_common'])} common · "
-                                f"{len(diff['relationships_only_in_a'])} only in `{id_a[:8]}` · "
-                                f"{len(diff['relationships_only_in_b'])} only in `{id_b[:8]}`"
-                            )
-                            if diff["entities_only_in_a"]:
-                                st.markdown("")
-                                _section_label(f"Entities only in {id_a[:8]}")
-                                for name_ in diff["entities_only_in_a"][:15]:
-                                    _item(f"🔹 {name_}")
-                            if diff["entities_only_in_b"]:
-                                st.markdown("")
-                                _section_label(f"Entities only in {id_b[:8]}")
-                                for name_ in diff["entities_only_in_b"][:15]:
-                                    _item(f"🔹 {name_}")
-                        except Exception as e:
-                            st.error(f"Diff failed: {e}")
-
-        # Clinova Phase 4, Epic 4.4's motivating slice (FR-28) -- unlike
-        # Repeatability Check (aggregate stability metrics across N runs)
-        # or Graph History (ArcadeDB-persisted graphs only), this diffs
-        # any two saved runs directly, in full: papers, evidence counts,
-        # graph entities/relationships, gaps (with confidence changes),
-        # proposals, and the model/pipeline-version each run actually
-        # used -- the real answer to "did switching models change the
-        # result," not just a guess. Reads only already-saved data
-        # (pipeline/run_compare.py), no new LLM calls.
-        with st.expander("🔀 Compare Runs (what changed between two runs)"):
-            compare_options = {f"{r['name'][:30]} ({r['id'][:8]}, {r['n_gaps']}g)": r["id"] for r in runs}
-            compare_labels = st.multiselect(
-                "Pick exactly 2 saved runs to compare",
-                options=list(compare_options.keys()),
-                key="compare_runs_select",
+        st.caption(report["ranking_proxy_note"])
+        st.markdown("")
+        _section_label("Per-Pair Detail")
+        for p in report["pairs"]:
+            dup = " ⚠️ likely duplicate (excluded above)" if p["likely_duplicate_run"] else ""
+            st.markdown(
+                f"`{p['run_a'][:8]}` vs `{p['run_b'][:8]}`{dup} — "
+                f"overlap {p['gap_overlap']}, stability {p['claim_stability']}, "
+                f"ranking corr {p['ranking_correlation']}, drift {p['confidence_drift']} "
+                f"({p['n_common_gaps']} common gaps)"
             )
-            if st.button("Compare Runs", key="compare_runs_button",
-                         disabled=len(compare_labels) != 2):
-                id_a, id_b = [compare_options[lbl] for lbl in compare_labels]
-                try:
-                    cmp = compare_runs(id_a, id_b)
-                    m = cmp["manifest"]
-                    st.markdown(
-                        f"**Model:** `{m['model_bundle_version_a'] or 'unknown'}` → "
-                        f"`{m['model_bundle_version_b'] or 'unknown'}`  \n"
-                        f"**Duration:** {m['run_duration_seconds_a'] or '?'}s → "
-                        f"{m['run_duration_seconds_b'] or '?'}s  \n"
-                        f"**Quality gate:** {m['quality_gate_results_a'] or 'unknown'} → "
-                        f"{m['quality_gate_results_b'] or 'unknown'}"
-                    )
-                    st.markdown("")
-                    p = cmp["papers"]
-                    st.markdown(f"**Papers:** {p['common_count']} common · "
-                                f"{len(p['added'])} added · {len(p['removed'])} removed")
-                    e = cmp["evidence"]
-                    st.markdown(f"**Evidence objects:** {e['count_a']} → {e['count_b']} "
-                                f"({'+' if e['delta'] >= 0 else ''}{e['delta']})")
-                    g = cmp["graph"]
-                    st.markdown(
-                        f"**Graph entities:** {g['entities_common_count']} common · "
-                        f"{len(g['entities_added'])} added · {len(g['entities_removed'])} removed  \n"
-                        f"**Graph relationships:** {g['relationships_common_count']} common · "
-                        f"{len(g['relationships_added'])} added · {len(g['relationships_removed'])} removed"
-                    )
-                    gp = cmp["gaps"]
-                    st.markdown(
-                        f"**Gaps:** {gp['common_count']} common · "
-                        f"{len(gp['added'])} new · {len(gp['removed'])} no longer generated · "
-                        f"{len(gp['confidence_changes'])} confidence change(s)"
-                    )
-                    pr = cmp["proposals"]
-                    st.markdown(f"**Proposals:** {pr['common_count']} common · "
-                                f"{pr['added_count']} added · {pr['removed_count']} removed")
+    except ValueError as e:
+        st.error(str(e))
 
-                    if gp["added"]:
-                        st.markdown("")
-                        _section_label(f"New gaps in {id_b[:8]}")
-                        for t in gp["added"][:15]:
-                            _item(f"🆕 {t}")
-                    if gp["removed"]:
-                        st.markdown("")
-                        _section_label(f"Gaps no longer generated (present in {id_a[:8]} only)")
-                        for t in gp["removed"][:15]:
-                            _item(f"➖ {t}")
-                    if gp["confidence_changes"]:
-                        st.markdown("")
-                        _section_label("Confidence changes")
-                        for c in gp["confidence_changes"][:15]:
-                            _item(f"🔀 {c['title']}: {c['confidence_a']} → {c['confidence_b']}")
-                except ValueError as e:
-                    st.error(str(e))
 
-        # Clinova Phase 4, Epic 4.4 (FR-24) -- Technical lineage is a real
-        # query over research_artifacts.parent_artifact (Epic 4.1's
-        # registry, now populated per-stage instead of one row per run);
-        # Scientific lineage is a pure in-memory join over one run's
-        # already-saved results, tracing each gap back to the real
-        # graph relationships/evidence objects that motivated it.
-        with st.expander("🧬 Lineage (technical + scientific)"):
-            lineage_options = {f"{r['name'][:30]} ({r['id'][:8]}, {r['n_gaps']}g)": r["id"] for r in runs}
-            lineage_label = st.selectbox(
-                "Pick a saved run", options=list(lineage_options.keys()),
-                key="lineage_run_select",
+def _render_lineage(run_id: str) -> None:
+    """Technical lineage (the artifact chain) and scientific lineage (each gap
+    traced back to the evidence and graph relationships behind it)."""
+    try:
+        tech = get_technical_lineage(run_id)
+        _section_label("Technical lineage (artifact chain)")
+        if tech["root"] is None:
+            st.caption("No artifact chain recorded for this run.")
+        else:
+            by_id = {n["artifact_id"]: n for n in tech["nodes"]}
+            for e in tech["edges"]:
+                child = by_id.get(e["child"], {})
+                _item(f"🔗 {e['parent']} → {e['child']} ({child.get('artifact_type','?')})")
+            if tech["fan_in_edges"]:
+                st.caption(f"{len(tech['fan_in_edges'])} fan-in edge(s) (e.g. N papers → 1 evidence set)")
+            if tech["orphans"]:
+                st.warning(f"⚠️ {len(tech['orphans'])} artifact(s) with an unresolved parent.")
+
+        sci = get_scientific_lineage(run_id)
+        st.markdown("")
+        _section_label("Scientific lineage (per-gap chain)")
+        if not sci["gaps"] and not sci["n_gaps_without_identity"]:
+            st.caption("No gaps recorded for this run.")
+        if sci["n_gaps_without_identity"]:
+            st.caption(f"{sci['n_gaps_without_identity']} gap(s) on this run have no gap_id "
+                       f"(saved before gap identity existed) and are excluded below.")
+        for g in sci["gaps"][:10]:
+            c = g["chain"]
+            u = g["unresolved"]
+            n_unresolved = (len(u["evidence_ids_not_found"]) + len(u["relationship_ids_not_found"])
+                            + len(u["entity_ids_not_found"]))
+            _item(
+                f"🧩 {g['title']} [{g['source']}/{g['evidence_basis']}] — "
+                f"{len(c['evidence'])} evidence · {len(c['relationships'])} relationships · "
+                f"{len(c['proposals'])} proposal(s)"
+                + (f" · ⚠️ {n_unresolved} unresolved id(s)" if n_unresolved else "")
             )
-            if st.button("Show Lineage", key="lineage_button") and lineage_label:
-                run_id = lineage_options[lineage_label]
-                try:
-                    tech = get_technical_lineage(run_id)
-                    _section_label("Technical lineage (artifact chain)")
-                    if tech["root"] is None:
-                        st.caption("No artifact chain recorded for this run (predates Epic 4.4).")
-                    else:
-                        by_id = {n["artifact_id"]: n for n in tech["nodes"]}
-                        for e in tech["edges"]:
-                            child = by_id.get(e["child"], {})
-                            _item(f"🔗 {e['parent']} → {e['child']} ({child.get('artifact_type','?')})")
-                        if tech["fan_in_edges"]:
-                            st.caption(f"{len(tech['fan_in_edges'])} fan-in edge(s) "
-                                       f"(e.g. N papers → 1 evidence set)")
-                        if tech["orphans"]:
-                            st.warning(f"⚠️ {len(tech['orphans'])} artifact(s) with an unresolved parent.")
+    except ValueError as e:
+        st.error(str(e))
 
-                    sci = get_scientific_lineage(run_id)
+
+def _render_graph_history(project_run_ids: set) -> None:
+    """Knowledge graphs saved for this project's runs, and a diff of any two."""
+    ok, msg = graph_store_connect_ok()
+    if not ok:
+        st.caption(f"Not connected -- {msg}")
+        return
+    try:
+        graph_runs = [g for g in list_graph_snapshots() if g["run_id"] in project_run_ids]
+    except Exception as e:
+        st.error(f"Could not list saved graphs: {e}")
+        return
+    if not graph_runs:
+        st.caption("No saved graphs for this project yet. Run an analysis first.")
+        return
+    graph_options = {
+        f"{g['name'][:30]} ({g['run_id'][:8]}, {g['entity_count']}e/{g['relationship_count']}r"
+        + (f", {g['build_status']} {g['quality_score']:.2f})" if g.get("build_status") else ")"): g["run_id"]
+        for g in graph_runs
+    }
+    labels = st.multiselect("Pick exactly 2 saved graphs to diff", options=list(graph_options.keys()),
+                            key="graph_diff_select")
+    if st.button("Diff graphs", key="diff_graphs", disabled=len(labels) != 2):
+        id_a, id_b = [graph_options[lbl] for lbl in labels]
+        try:
+            diff = diff_graph_snapshots(id_a, id_b)
+            st.markdown(
+                f"**Entities:** {len(diff['entities_common'])} common · "
+                f"{len(diff['entities_only_in_a'])} only in `{id_a[:8]}` · "
+                f"{len(diff['entities_only_in_b'])} only in `{id_b[:8]}`"
+            )
+            st.markdown(
+                f"**Relationships:** {len(diff['relationships_common'])} common · "
+                f"{len(diff['relationships_only_in_a'])} only in `{id_a[:8]}` · "
+                f"{len(diff['relationships_only_in_b'])} only in `{id_b[:8]}`"
+            )
+            for key, rid in (("entities_only_in_a", id_a), ("entities_only_in_b", id_b)):
+                if diff[key]:
                     st.markdown("")
-                    _section_label("Scientific lineage (per-gap chain)")
-                    if not sci["gaps"] and not sci["n_gaps_without_identity"]:
-                        st.caption("No gaps recorded for this run.")
-                    if sci["n_gaps_without_identity"]:
-                        st.caption(f"{sci['n_gaps_without_identity']} gap(s) on this run have no real gap_id "
-                                   f"(predates Epic 4.4's identity fields) and are excluded below.")
-                    for g in sci["gaps"][:10]:
-                        c = g["chain"]
-                        u = g["unresolved"]
-                        n_unresolved = (len(u["evidence_ids_not_found"]) + len(u["relationship_ids_not_found"])
-                                        + len(u["entity_ids_not_found"]))
-                        _item(
-                            f"🧩 {g['title']} [{g['source']}/{g['evidence_basis']}] — "
-                            f"{len(c['evidence'])} evidence · {len(c['relationships'])} relationships · "
-                            f"{len(c['proposals'])} proposal(s)"
-                            + (f" · ⚠️ {n_unresolved} unresolved id(s)" if n_unresolved else "")
-                        )
-                except ValueError as e:
-                    st.error(str(e))
+                    _section_label(f"Entities only in {rid[:8]}")
+                    for name_ in diff[key][:15]:
+                        _item(f"🔹 {name_}")
+        except Exception as e:
+            st.error(f"Diff failed: {e}")
 
-        if st.button("🗑 Clear all history", key="clear_history"):
-            for r in runs:
-                delete_run(r["id"])
-            st.rerun()
 
-# ── Main header ───────────────────────────────────────────────────────────────
-st.markdown(f'<div class="main-header">{html.escape(_BRANDING["product_name"])}</div>', unsafe_allow_html=True)
+_FILE_MIME = {"results": "application/json", "manifest": "application/json",
+              "report_html": "text/html", "report_pdf": "application/pdf"}
+_FILE_LABEL = {"results": "Results (JSON)", "manifest": "Run manifest (JSON)",
+               "report_html": "Report (HTML)", "report_pdf": "Report (PDF)"}
+
+
+def _render_run_files(project_id: str, run: dict) -> None:
+    """Download buttons for what one run saved in the project folder."""
+    files = [f for f in list_project_files(project_id, run_id=run["id"]) if f["kind"] in _FILE_MIME]
+    if not files:
+        st.caption("No saved files for this run (it predates projects, or saving failed).")
+        return
+    cols = st.columns(len(files))
+    for col, f in zip(cols, files):
+        with col:
+            try:
+                st.download_button(
+                    _FILE_LABEL.get(f["kind"], f["filename"]),
+                    data=project_store.read_project_file(project_id, f["rel_path"]),
+                    file_name=f"{project_store.safe_filename(run['name'])}_{f['filename']}",
+                    mime=_FILE_MIME[f["kind"]], key=f"dl_{run['id']}_{f['kind']}")
+            except (OSError, ValueError):
+                st.caption(f"{_FILE_LABEL.get(f['kind'], f['filename'])}: no longer on disk")
+
+
+def _table(df, **kwargs):
+    """st.dataframe at full width on any Streamlit version: newer releases want
+    width="stretch" (use_container_width is being retired), older ones only know
+    use_container_width."""
+    try:
+        return st.dataframe(df, width="stretch", **kwargs)
+    except (TypeError, st.errors.StreamlitAPIException):
+        return st.dataframe(df, use_container_width=True, **kwargs)
+
+
+def _render_project_view(project: dict, runs: list[dict]) -> None:
+    import pandas as pd
+    from collections import Counter
+    pid = project["id"]
+    st.markdown(f"### {html.escape(project['name'])}")
+    if project.get("description"):
+        st.caption(project["description"])
+    st.caption(f"Folder: `{project_store.project_path(pid)}`")
+
+    # ── Runs ─────────────────────────────────────────────────────────────────
+    st.markdown("#### Runs")
+    selected: list[dict] = []
+    if not runs:
+        st.info("No analyses in this project yet. Switch to **Analysis**, add papers and run one. "
+                "Run it again with different settings to compare the results here.")
+    else:
+        fb_rows = list_feedback(project_id=pid)
+        fb_by_run = Counter(f["run_id"] for f in fb_rows)
+        df = pd.DataFrame([{
+            "Run": r["name"], "Created": r["created_at"][:16].replace("T", " "),
+            "Papers": r["n_papers"], "Gaps": r["n_gaps"], "Proposals": r["n_proposals"],
+            "Feedback": fb_by_run.get(r["id"], 0), "ID": r["id"][:8],
+        } for r in runs])
+        st.caption("Select one run to open or download it, two to compare them, "
+                   "two or more to check how repeatable the results are.")
+        event = _table(df, hide_index=True, on_select="rerun",
+                             selection_mode="multi-row", key=f"project_runs_{pid}")
+        selected = [runs[i] for i in event.selection.rows if i < len(runs)]
+
+    if len(selected) == 1:
+        run = selected[0]
+        st.markdown(f"**{html.escape(run['name'])}** · {run['created_at'][:16].replace('T', ' ')}")
+        if st.button("Open in Analysis view", key=f"open_{run['id']}", type="primary"):
+            if _load_run_into_session(run["id"], run["name"]):
+                st.session_state["_pending_view"] = "Analysis"
+                st.rerun()
+        _render_run_files(pid, run)
+        with st.expander("Lineage (technical and scientific)"):
+            _render_lineage(run["id"])
+    elif len(selected) == 2:
+        newer, older = sorted(selected, key=lambda r: (r["created_at"], r["id"]), reverse=True)
+        st.markdown(f"#### Compare: {html.escape(older['name'])} → {html.escape(newer['name'])}")
+        st.caption("Older run on the left of the arrow, newer on the right.")
+        _render_run_comparison(older["id"], newer["id"])
+    elif len(selected) > 2:
+        st.caption(f"{len(selected)} runs selected. Select exactly two to compare them directly.")
+    if len(selected) >= 2:
+        with st.expander("Repeatability across the selected runs"):
+            if st.button("Compute repeatability score", key="compute_repeatability"):
+                _render_repeatability([r["id"] for r in selected])
+    if selected:
+        with st.expander("Delete selected runs"):
+            st.caption("Removes the runs and their feedback from the database. "
+                       "Files already saved in the project folder are kept.")
+            if (st.checkbox("I understand this cannot be undone", key="confirm_delete_runs")
+                    and st.button(f"Delete {len(selected)} run(s)", key="delete_runs_btn")):
+                for r in selected:
+                    delete_run(r["id"])
+                st.session_state["confirm_delete_runs"] = False
+                if st.session_state.current_run_id in {r["id"] for r in selected}:
+                    _clear_results()
+                st.rerun()
+
+    # ── Feedback ─────────────────────────────────────────────────────────────
+    st.markdown("#### Feedback")
+    fb_rows = list_feedback(project_id=pid)
+    if not fb_rows:
+        st.caption("No feedback yet. Use the Feedback button on any gap in the Analysis view "
+                   "(Research Gaps tab), or add a note on a whole run.")
+    else:
+        run_names = {r["id"]: r["name"] for r in runs}
+        fdf = pd.DataFrame([{
+            "Run": run_names.get(f["run_id"], f["run_id"][:8]),
+            "About": {"gap": "Gap", "proposal": "Proposal", "run": "Whole run"}[f["target_type"]],
+            "Item": f["target_label"] or "",
+            "Rating": {1: "Useful", -1: "Not useful"}.get(f["rating"], ""),
+            "Reason": f["reason"] or "", "Comment": f["comment"] or "",
+            "Updated": (f["updated_at"] or "")[:16].replace("T", " "),
+        } for f in fb_rows])
+        _table(fdf, hide_index=True)
+        st.download_button("Download feedback (JSON)", data=json.dumps(fb_rows, indent=2, default=str),
+                           file_name=f"{project_store.safe_filename(project['name'])}_feedback.json",
+                           mime="application/json", key=f"dl_feedback_{pid}")
+
+    # ── Files and downloads ──────────────────────────────────────────────────
+    st.markdown("#### Files")
+    pfiles = list_project_files(pid)
+    n_papers = sum(1 for f in pfiles if f["kind"] == "paper")
+    with st.expander(f"Project files ({len(pfiles)}) · {n_papers} paper(s)"):
+        if pfiles:
+            _table(pd.DataFrame([{
+                "Kind": f["kind"].replace("_", " "), "File": f["filename"],
+                "Size (KB)": round(f["size_bytes"] / 1024, 1), "Path": f["rel_path"],
+            } for f in pfiles]), hide_index=True)
+        else:
+            st.caption("No files saved for this project yet.")
+    with st.expander("Knowledge graph history"):
+        _render_graph_history({r["id"] for r in runs})
+
+    zip_key = f"project_zip_{pid}"
+    if st.button("Prepare project download", key=f"prep_zip_{pid}"):
+        st.session_state[zip_key] = project_store.build_project_zip(pid)
+    if st.session_state.get(zip_key):
+        st.download_button("Download project (.zip)", data=st.session_state[zip_key],
+                           file_name=f"{project_store.safe_filename(project['name'])}.zip",
+                           mime="application/zip", key=f"dl_zip_{pid}")
+        st.caption("The zip holds the papers, every run's results and reports, and a database export "
+                   "with the project's runs and feedback.")
+
+
+# ── Project: feedback forms (used by the Analysis view) ──────────────────────
+_FEEDBACK_REASONS = ["(none)"] + list(POSITIVE_REASONS) + [r for r in NEGATIVE_REASONS if r not in POSITIVE_REASONS]
+
+
+def _feedback_form(form_key: str, *, project_id: str, run_id: str, target_type: str, target_id: str,
+                   target_label: str, existing: dict | None, question: str) -> None:
+    """One form for a gap / proposal / run: rating, reason, comment. Saving
+    updates the single feedback row for this target; Clear removes it."""
+    with st.form(key=f"fb_{form_key}", border=False):
+        rating_idx = {1: 0, -1: 1}.get((existing or {}).get("rating"))
+        rating = st.radio(question, ["Useful", "Not useful"], index=rating_idx, horizontal=True)
+        old_reason = (existing or {}).get("reason") or "(none)"
+        reason = st.selectbox("Reason", _FEEDBACK_REASONS,
+                              index=_FEEDBACK_REASONS.index(old_reason) if old_reason in _FEEDBACK_REASONS else 0)
+        comment = st.text_area("Comment (optional)", value=(existing or {}).get("comment") or "", height=80)
+        c_save, c_clear, _ = st.columns([1, 1, 2])
+        saved = c_save.form_submit_button("Save", type="primary")
+        cleared = c_clear.form_submit_button("Clear") if existing else False
+    if saved or cleared:
+        if saved:
+            upsert_feedback(project_id, run_id, target_type, target_id,
+                            rating={"Useful": 1, "Not useful": -1}.get(rating),
+                            reason="" if reason == "(none)" else reason, comment=comment,
+                            target_label=target_label)
+        else:
+            upsert_feedback(project_id, run_id, target_type, target_id)   # empty = clear
+        st.toast("Feedback saved" if saved else "Feedback cleared")
+        st.rerun()
+
+
+def _gap_feedback_key(gap: dict, idx: int) -> str:
+    """The stable gap_id, so feedback follows the gap across runs; older runs
+    saved before gap identity existed fall back to a hash of the title."""
+    import hashlib
+    return gap.get("gap_id") or "title:" + hashlib.sha1(
+        (gap.get("title") or f"gap-{idx}").encode("utf-8")).hexdigest()[:12]
+
+
+_GAP_LENS_LABELS = {
+    "limitation_miner": "From the authors' limitations",
+    "cross_paper_synthesizer": "Across papers",
+    "methodology_auditor": "Methodology audit",
+    "semantic": "Model-written",
+    "deterministic": "Rule-based check",
+    "graph_structural": "Graph signal",
+}
+
+
+def _gap_feedback(gap: dict, idx: int, run_id: str, project_id: str, existing: dict) -> None:
+    gap_key = _gap_feedback_key(gap, idx)
+    fb = existing.get(gap_key)
+    tag = {1: "useful", -1: "not useful"}.get((fb or {}).get("rating"), "noted") if fb else None
+    with st.popover("Feedback" + (f" · {tag}" if tag else "")):
+        _feedback_form(f"gap_{run_id}_{gap_key}", project_id=project_id, run_id=run_id,
+                       target_type="gap", target_id=gap_key, target_label=gap.get("title", ""),
+                       existing=fb, question="Was this gap useful?")
+
+
+# ── Project strip and view switch ────────────────────────────────────────────
+_cur_project = get_project(st.session_state.current_project_id) or get_project(DEFAULT_PROJECT_ID)
+_cur_project_stats = _project_by_id.get(_cur_project["id"], {})
+_proj_runs = list_runs(limit=1000, project_id=_cur_project["id"])
+st.markdown(
+    '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:0.3rem 1rem;'
+    'font-family:Inter,Segoe UI,system-ui,sans-serif;margin:0 0 0.5rem;">'
+    '<span style="font-size:0.72rem;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;'
+    'color:#55708f;">Project</span>'
+    f'<span style="font-size:1rem;font-weight:600;color:#0b1f3a;">{html.escape(_cur_project["name"])}</span>'
+    f'<span style="font-size:0.82rem;color:#55708f;">{len(_proj_runs)} run(s) · '
+    f'{_cur_project_stats.get("paper_count", 0)} paper(s) saved</span>'
+    '</div>', unsafe_allow_html=True)
+st.session_state.setdefault("main_view", "Analysis")
+if "_pending_view" in st.session_state:   # set by "Open in Analysis view"; the control can't be set after it exists
+    st.session_state["main_view"] = st.session_state.pop("_pending_view")
+_view = st.segmented_control("View", ["Analysis", "Project"], key="main_view", label_visibility="collapsed")
+if _view == "Project":
+    _render_project_view(_cur_project, _proj_runs)
+    st.stop()
 
 # Show loaded run banner
 if st.session_state.loaded_run_id:
     runs_meta = {r["id"]: r for r in list_runs()}
     run_meta  = runs_meta.get(st.session_state.loaded_run_id, {})
-    st.markdown(f"""
-    <div style="background:#fff7e6;border:1px solid #f0c36a;border-radius:8px;
-                padding:0.7rem 1.2rem;margin-bottom:0.5rem;">
-      <span style="font-family:'DM Mono',monospace;font-size:0.68rem;color:#b7791f;">
-        📂 Showing saved run: <strong>{run_meta.get('name','')}</strong>
-        — {run_meta.get('created_at','')[:16].replace('T',' ')}
-      </span>
-      <span style="font-size:0.75rem;color:#55708f;margin-left:1rem;">
-        Upload new papers above to run a fresh analysis</span>
-    </div>""", unsafe_allow_html=True)
+    _rm_name = html.escape(run_meta.get("name", "") or st.session_state.current_run_name or "Saved run")
+    _rm_when = run_meta.get("created_at", "")[:16].replace("T", " ")
+    _rm_stats = (f" · {run_meta['n_papers']} papers · {run_meta['n_gaps']} gaps" if run_meta else "")
+    st.markdown(
+        '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:0.4rem 1rem;'
+        'background:#edf6ff;border:1px solid #c9dff5;border-left:3px solid #0066cc;'
+        'border-radius:8px;padding:0.65rem 1.1rem;margin-bottom:0.9rem;'
+        'font-family:Inter,Segoe UI,system-ui,sans-serif;">'
+        '<span style="font-size:0.72rem;font-weight:600;letter-spacing:0.08em;'
+        'text-transform:uppercase;color:#004b93;">Showing saved run</span>'
+        f'<span style="font-size:0.9rem;font-weight:600;color:#0b1f3a;">{_rm_name}</span>'
+        f'<span style="font-size:0.82rem;color:#55708f;">{_rm_when}{_rm_stats}</span>'
+        '<span style="font-size:0.82rem;color:#55708f;margin-left:auto;">'
+        'Add papers below to start a new analysis.</span>'
+        '</div>',
+        unsafe_allow_html=True)
 
-st.markdown('<div class="sub-header">Upload papers → AI discovers what the field hasn\'t found yet</div>',
-            unsafe_allow_html=True)
-
-uploaded_files = st.file_uploader(
-    "Upload up to 5 research papers (PDF)",
-    type=["pdf"], accept_multiple_files=True,
-)
-if uploaded_files and len(uploaded_files) > 5:
-    st.warning("Maximum 5 papers. Only first 5 will be processed.")
-    uploaded_files = uploaded_files[:5]
-
-if uploaded_files:
-    cols = st.columns(min(len(uploaded_files), 5))
-    for i, (col, f) in enumerate(zip(cols, uploaded_files)):
-        with col:
-            st.markdown(
-                f'<div class="stage-card" style="text-align:center;padding:0.8rem;">'
-                f'<div class="stage-title">{_tier_badge(1)} Paper {i+1}</div>'
-                f'<div class="stage-body" style="font-size:0.78rem;word-break:break-word;">{f.name}</div>'
-                f'<div style="font-family:\'DM Mono\',monospace;font-size:0.65rem;color:#55708f;">'
-                f'{len(f.getvalue())//1024} KB</div></div>',
+with st.container(border=True):
+    st.markdown('<div class="section-label">New analysis</div>'
+                '<div class="section-hint">Add 2&ndash;5 PDFs (up to 200 MB each). '
+                'Gap detection compares papers against each other, so at least two are needed.</div>',
                 unsafe_allow_html=True)
+    uploaded_files = st.file_uploader(
+        "Research papers (PDF)", type=["pdf"], accept_multiple_files=True,
+        label_visibility="collapsed",
+    )
+    if uploaded_files and len(uploaded_files) > 5:
+        st.warning("Maximum 5 papers. Only first 5 will be processed.")
+        uploaded_files = uploaded_files[:5]
 
-st.markdown("")
-run_col, name_col, _ = st.columns([1, 2, 1])
-with run_col:
-    run_btn = st.button("🚀 Run Analysis", disabled=st.session_state.running)
-with name_col:
-    run_name = st.text_input("Run name (for history)", value="", placeholder="e.g., Diabetes AI review",
-                              label_visibility="collapsed")
+    if uploaded_files:
+        cols = st.columns(min(len(uploaded_files), 5))
+        for i, (col, f) in enumerate(zip(cols, uploaded_files)):
+            with col:
+                st.markdown(
+                    f'<div class="stage-card" style="text-align:center;padding:0.8rem;">'
+                    f'<div class="stage-title">{_tier_badge(1)} Paper {i+1}</div>'
+                    f'<div class="stage-body" style="font-size:0.78rem;word-break:break-word;">{html.escape(f.name)}</div>'
+                    f'<div style="font-size:0.7rem;color:#55708f;">'
+                    f'{len(f.getvalue())//1024} KB</div></div>',
+                    unsafe_allow_html=True)
+
+    run_name = st.text_input(
+        "Run name (optional)", value="", placeholder="e.g., Diabetes AI review",
+        help="Used to find this analysis later in Run History. Leave blank to name it automatically.")
+
+    st.markdown("---")
+    _model_issues = _render_model_picker()      # which model does which job, and a test, in the same step as Run
+
+    _n_files = len(uploaded_files or [])
+    run_col, status_col = st.columns([1, 5], vertical_alignment="center")
+    with run_col:
+        run_btn = st.button("Run analysis", type="primary",
+                            disabled=st.session_state.running or _n_files < 2 or bool(_model_issues))
+    with status_col:
+        if st.session_state.running:
+            _status, _cls = "Analysis in progress…", ""
+        elif _model_issues:
+            _status, _cls = html.escape(_model_issues[0]), ""
+        elif _n_files >= 2:
+            _status, _cls = (f"✓ {_n_files} papers ready · saved to project "
+                             f"“{html.escape(_cur_project['name'])}” · a run usually takes 5–10 minutes"), " ready"
+        elif _n_files == 1:
+            _status, _cls = "Add at least one more paper to begin.", ""
+        else:
+            _status, _cls = "Add 2–5 PDFs to begin.", ""
+        st.markdown(f'<div class="run-status{_cls}">{_status}</div>', unsafe_allow_html=True)
 
 # ── Main Pipeline ─────────────────────────────────────────────────────────────
 if run_btn and uploaded_files:
-    # provider_api_key == api_key when NVIDIA (the default) is selected --
-    # this one check correctly covers both "no NVIDIA key entered" and "no
-    # key configured for the selected non-NVIDIA provider," rather than two
-    # separate checks that could disagree.
-    if not provider_api_key:
-        st.error(f"No API key configured for {_selected_cfg.label}. "
-                 + (f"Add {_selected_cfg.api_key_env} to .env, or switch the sidebar's "
-                    "Model Provider back to NVIDIA."
-                    if selected_provider_key != "nvidia" else "Please enter your NVIDIA API key."))
+    # The Run button is already held when a needed key is missing; this is the
+    # same check again for any path that reaches here anyway.
+    if _model_issues:
+        st.error(" ".join(_model_issues))
         st.stop()
     if len(uploaded_files) < 2:
         st.warning("Upload at least 2 papers.")
@@ -1163,7 +1781,9 @@ if run_btn and uploaded_files:
     # Clinova Phase 4, Epic 4.3 token instrumentation -- real, not
     # fabricated (see utils/token_meter.py).
     token_meter = TokenMeter()
-    client  = build_client(selected_provider_key, provider_api_key, model=selected_model, token_meter=token_meter)
+    _model_cfg = st.session_state["model_config"]
+    # One client-shaped router: each pipeline stage is sent to the model chosen for its role.
+    client  = ModelRouter(_model_cfg, _keys, token_meter=token_meter)
     context = {
         "domain":   selected_domain,
         "interest": interest or "General research",
@@ -1188,15 +1808,18 @@ if run_btn and uploaded_files:
             client=client,
             name=run_name,
             options=RunOptions(
-                provider_key=selected_provider_key,
-                model=selected_model,
+                provider_key=_model_cfg.spec_for(ROLE_ANALYSIS).provider,
+                model=_model_cfg.spec_for(ROLE_ANALYSIS).model,
+                models=_model_cfg.to_dict(),
                 use_vision=use_vision,
                 extract_refs=extract_refs,
                 ref_limit=None if ref_limit == "All" else int(ref_limit),
                 enable_quality_engine=enable_quality_engine,
                 override_quality_gate=override_quality_gate,
                 enable_gap_challenger=enable_gap_challenger,
-                enable_graph_persistence=enable_graph_persistence,
+                nvidia_api_key=api_key,
+                enable_graph_persistence=True,   # SQLite makes this free; no longer an opt-in
+                project_id=st.session_state.current_project_id,
                 ss_api_key=ss_api_key,
                 domain_config=domain_cfg,
                 git_commit=_GIT_COMMIT,
@@ -1268,6 +1891,16 @@ if st.session_state.results:
         {context.get('domain','')} — Domain-Tuned Analysis</span>
     </div>""", unsafe_allow_html=True)
 
+    # Feedback on the whole run (per-gap feedback is in the Research Gaps tab).
+    _rf_run = st.session_state.current_run_id
+    _rf_project = (get_run_row(_rf_run) or {}).get("project_id") if _rf_run else None
+    if _rf_project:
+        _rf_existing = next(iter(list_feedback(run_id=_rf_run, target_type="run")), None)
+        with st.expander("Feedback on this run" + (" · added" if _rf_existing else "")):
+            _feedback_form(f"run_{_rf_run}", project_id=_rf_project, run_id=_rf_run, target_type="run",
+                           target_id="", target_label="Overall analysis", existing=_rf_existing,
+                           question="Was this analysis useful overall?")
+
     # B23 fix: this run's gate-blocked status must stay visible after the
     # original st.warning() toast is gone (e.g. reloading a saved run from
     # history) -- gaps/proposals being empty here is a gate block, not a
@@ -1284,18 +1917,26 @@ if st.session_state.results:
     c_stats = res.get("corpus_stats", {})
     ref_sum = res.get("ref_summary", {})
     if c_stats:
+        # No reference diagnostics means the reference stage never ran (it is
+        # off by default); "Off" is honest where "0" reads like a failure.
+        refs_ran = bool(res.get("ref_diagnostics"))
+        off = "Off"
         t1,t2,t3,t4 = st.columns(4)
         for col,(val,lbl,color) in zip([t1,t2,t3,t4],[
             (c_stats.get("tier1",0), "Uploaded PDFs", "#0066cc"),
-            (c_stats.get("tier2",0), "Cited (w/ abstract)", "#087f5b"),
-            (c_stats.get("tier3",0), "Distant refs", "#55708f"),
-            (ref_sum.get("total",0), "Total corpus", "#b7791f"),
+            (c_stats.get("tier2",0) if refs_ran else off, "Cited (w/ abstract)", "#087f5b"),
+            (c_stats.get("tier3",0) if refs_ran else off, "Distant refs", "#55708f"),
+            (ref_sum.get("total",0) if refs_ran else off, "Total corpus", "#b7791f"),
         ]):
             with col:
+                muted = "#8a99ad" if val == off else color
                 st.markdown(f'<div class="stat-box"><span class="stat-number" '
-                            f'style="color:{color};">{val}</span>'
+                            f'style="color:{muted};">{val}</span>'
                             f'<span class="stat-label">{lbl}</span></div>',
                             unsafe_allow_html=True)
+        if not refs_ran:
+            st.caption("Reference fetching was off for this run. Turn on “Include cited references” "
+                       "in the sidebar under Analysis to build a wider corpus.")
         st.markdown("")
 
     # Summary row
@@ -1310,6 +1951,25 @@ if st.session_state.results:
         with col:
             st.markdown(f'<div class="stat-box"><span class="stat-number">{val}</span>'
                         f'<span class="stat-label">{lbl}</span></div>', unsafe_allow_html=True)
+
+    # One row per paper, so a paper that silently contributed nothing is visible.
+    _cov = paper_coverage(res)
+    if _cov:
+        import pandas as pd
+        _bad = [r for r in _cov if r["status"] != "ok"]
+        with st.expander(f"Paper coverage — {len(_cov) - len(_bad)} of {len(_cov)} papers fully processed"
+                         + (" · ⚠️ check" if _bad else ""), expanded=bool(_bad)):
+            _table(pd.DataFrame([{
+                "Paper": r["title"][:44] + ("…" if len(r["title"]) > 44 else ""),
+                "Type": (r["study_type"] or "—").replace("_", " ").replace("systematic or narrative ", "")
+                                                .replace(" or questionnaire", "").replace(" or lab", ""),
+                "Wiki": r["wiki_items"], "Evid.": r["evidence"], "Quoted": r["quoted"],
+                "Entities": r["entities"], "Gaps": r["gaps"], "Props": r["proposals"],
+                "OK": "✅" if r["status"] == "ok" else "⚠️ " + "; ".join(r["problems"]),
+            } for r in _cov]), hide_index=True)
+            st.caption("Wiki = facts compiled from the paper · Evid. = evidence items · Quoted = items with a verified "
+                       "quote and page · Entities = knowledge-graph entities · Gaps / Props = gaps and proposals "
+                       "that rest on the paper.")
 
     st.markdown("")
 
@@ -1576,35 +2236,52 @@ if st.session_state.results:
         edges = network_data.get("edges",[])
         if nodes:
             try:
-                import plotly.graph_objects as go, math
+                import plotly.graph_objects as go, math, textwrap
+                from pipeline.graph_builder import layout_positions, node_color
                 n = len(nodes)
-                angles = [2*math.pi*i/n for i in range(n)]
-                radius = max(1, n/(2*math.pi))
-                px = [radius*math.cos(a) for a in angles]
-                py = [radius*math.sin(a) for a in angles]
-                ex,ey = [],[]
+                for nd in nodes:                                   # also recolours runs saved with grey nodes
+                    nd["color"] = node_color(nd.get("type"))
+                if all("x" in nd for nd in nodes):                 # laid out by the pipeline
+                    px = [nd["x"] for nd in nodes]; py = [nd["y"] for nd in nodes]
+                else:                                              # runs saved before layouts existed
+                    pos = layout_positions(n, edges)
+                    px = [p[0] for p in pos]; py = [p[1] for p in pos]
+                ex, ey, mx, my, mtext = [], [], [], [], []
                 for e in edges:
-                    si,ti = e["source_idx"],e["target_idx"]
-                    if si<n and ti<n:
-                        ex+=[px[si],px[ti],None]; ey+=[py[si],py[ti],None]
+                    si, ti = e["source_idx"], e["target_idx"]
+                    if si < n and ti < n:
+                        ex += [px[si], px[ti], None]; ey += [py[si], py[ti], None]
+                        mx.append((px[si]+px[ti])/2); my.append((py[si]+py[ti])/2)
+                        mtext.append(f"{nodes[si]['name']} → {nodes[ti]['name']}<br>"
+                                     f"<b>{str(e.get('relation','')).replace('_',' ')}</b>"
+                                     + (f"<br>{textwrap.shorten(e['evidence'], 140)}" if e.get("evidence") else ""))
                 fig = go.Figure()
-                fig.add_trace(go.Scatter(x=ex,y=ey,mode="lines",
-                                         line=dict(width=1,color="#c9dff5"),hoverinfo="none"))
-                fig.add_trace(go.Scatter(x=px,y=py,mode="markers+text",
-                    text=[nd["name"][:18] for nd in nodes],textposition="top center",
-                    textfont=dict(size=9,color="#0b1f3a"),
-                    marker=dict(size=[nd["size"] for nd in nodes],
-                                color=[nd["color"] for nd in nodes],
-                                line=dict(width=1,color="#0b1f3a")),
-                    hovertext=[f"{nd['name']}<br>Type: {nd['type']}" for nd in nodes],
-                    hoverinfo="text"))
-                fig.update_layout(showlegend=False,paper_bgcolor="#ffffff",
-                    plot_bgcolor="#ffffff",font=dict(color="#0b1f3a",size=10),
-                    xaxis=dict(showgrid=False,zeroline=False,showticklabels=False),
-                    yaxis=dict(showgrid=False,zeroline=False,showticklabels=False),
-                    height=430,margin=dict(l=10,r=10,t=30,b=10),
+                fig.add_trace(go.Scatter(x=ex, y=ey, mode="lines", showlegend=False,
+                                         line=dict(width=1.6, color="#9db8d6"), hoverinfo="none"))
+                fig.add_trace(go.Scatter(x=mx, y=my, mode="markers", showlegend=False,
+                                         marker=dict(size=9, color="rgba(0,0,0,0)"),
+                                         hovertext=mtext, hoverinfo="text"))
+                for ntype in dict.fromkeys(nd["type"] for nd in nodes):   # one legend entry per type
+                    idx = [i for i, nd in enumerate(nodes) if nd["type"] == ntype]
+                    fig.add_trace(go.Scatter(
+                        x=[px[i] for i in idx], y=[py[i] for i in idx],
+                        mode="markers+text", name=str(ntype).replace("_", " "),
+                        text=["<br>".join(textwrap.wrap(nodes[i]["name"], 22)) for i in idx],
+                        textposition="top center", textfont=dict(size=10, color="#0b1f3a"),
+                        marker=dict(size=[nodes[i]["size"] + 4 for i in idx], color=nodes[idx[0]]["color"],
+                                    line=dict(width=1, color="#ffffff")),
+                        hovertext=[f"<b>{nodes[i]['name']}</b><br>{ntype} · {nodes[i]['importance']} importance"
+                                   f"<br>{'; '.join(nodes[i].get('papers', []))[:120]}" for i in idx],
+                        hoverinfo="text"))
+                fig.update_layout(paper_bgcolor="#ffffff", plot_bgcolor="#ffffff",
+                    font=dict(color="#0b1f3a", size=11),
+                    xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-1.7, 1.7]),
+                    yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-1.6, 1.6]),
+                    height=620, margin=dict(l=10, r=10, t=40, b=10),
+                    legend=dict(orientation="h", y=-0.02, x=0),
                     title="Knowledge Graph — Entity Network")
                 st.plotly_chart(fig, use_container_width=True)
+                st.caption("Hover a line to see how two entities are related, and the supporting text.")
             except ImportError:
                 st.info("pip install plotly for network diagram")
 
@@ -1665,6 +2342,7 @@ if st.session_state.results:
             "partial": _badge("Partial","#b7791f","#fff7e6","#f0c36a"),
             "solved":  _badge("Solved","#c81e1e","#fff1f1","#f0a0a0"),
             "pending": _badge("Pending","#55708f","#f2f5f8","#c9dff5"),
+            "unverified": _badge("Not checked — search unavailable","#8a5a00","#fff4d6","#e8c66a"),
         }
         # Clinova Phase 3, Epic 3.4 -- only present when the opt-in Gap
         # Challenger toggle ran; additive to status_badge above, not a
@@ -1677,21 +2355,34 @@ if st.session_state.results:
             "LIKELY_CLOSED":         _badge("Likely Closed","#c8681e","#fff1e6","#f0b380"),
             "CLOSED":                _badge("Closed","#c81e1e","#fff1f1","#f0a0a0"),
         }
-        for gap in gaps:
+        _gap_fb_run = st.session_state.current_run_id
+        _gap_fb_project = (get_run_row(_gap_fb_run) or {}).get("project_id") if _gap_fb_run else None
+        _gap_fb_existing = ({f["target_id"]: f for f in list_feedback(run_id=_gap_fb_run, target_type="gap")}
+                            if _gap_fb_run else {})
+        for gap_idx, gap in enumerate(gaps):
             status = gap.get("validation_status","pending")
             conf   = gap.get("confidence","medium")
             source = gap.get("source", "semantic")
-            source_badge = _badge(source.replace("_", " ").title(), "#55708f", "#f2f5f8", "#c9dff5")
+            _lens = source.split(":", 1)[1] if source.startswith("agent:") else source
+            source_badge = _badge(_GAP_LENS_LABELS.get(_lens, _lens.replace("_", " ").title()),
+                                  "#55708f", "#f2f5f8", "#c9dff5")
+            rank_badge = (_badge(f"#{gap['rank']} · {gap['composite_score']}/5", "#0b1f3a", "#eaf1fb", "#9db8d6")
+                          if gap.get("rank") and gap.get("composite_score") is not None else "")
             challenger_status = gap.get("challenger_status")
             st.markdown(
                 f'<div class="gap-card {status}">'
                 f'<div class="gap-title">{gap.get("title","Untitled")}</div>'
-                f'<div class="gap-meta">{status_badge.get(status,"")} '
+                f'<div class="gap-meta">{rank_badge} {status_badge.get(status,"")} '
                 f'{_badge(conf.title()+" Conf","#004b93","#e5f2ff","#7ab8f5")} '
                 f'{source_badge}'
                 f'{challenger_badge.get(challenger_status, "")}</div>'
                 f'<div class="gap-desc">{gap.get("description","")}</div></div>',
                 unsafe_allow_html=True)
+            if gap.get("critique"):
+                _sc = gap.get("scores") or {}
+                st.caption(f"Critic: {gap['critique']}  \n"
+                           f"novelty {_sc.get('novelty', '–')} · importance {_sc.get('importance', '–')} · "
+                           f"feasibility {_sc.get('feasibility', '–')} (1–5)")
             if gap.get("confidence_caveat"):
                 st.caption(f"⚠️ {gap['confidence_caveat']}")
             with st.expander("Evidence + validation"):
@@ -1731,10 +2422,55 @@ if st.session_state.results:
                         st.code(q, language=None)
                 elif gap.get("challenger_error"):
                     st.caption(f"Gap Challenger failed for this gap: {gap['challenger_error']}")
+            if _gap_fb_project:
+                _gap_feedback(gap, gap_idx, _gap_fb_run, _gap_fb_project, _gap_fb_existing)
+
+        _rejected = res.get("rejected_gaps") or []
+        if _rejected:
+            with st.expander(f"Considered and set aside by the critic ({len(_rejected)})"):
+                st.caption("Candidates the finder agents proposed that the critic merged into another gap, "
+                           "judged generic or already answered, or ranked below the top list.")
+                for g in _rejected:
+                    _item(f"{g.get('title', 'Untitled')} — {g.get('rejected_reason', '')}")
+        _supp = res.get("supplementary_gaps") or []
+        if _supp:
+            with st.expander(f"Supplementary signals — not validated ({len(_supp)})"):
+                st.caption("Rule-based checks (only for papers whose study type they fit) and knowledge-graph hints. "
+                           "They are leads, not findings: they are not searched against the literature or used for proposals.")
+                for g in _supp:
+                    _item(f"{g.get('title', 'Untitled')}: {g.get('description', '')}")
 
     # ── Tab 5: Proposals ───────────────────────────────────────────────────────
     with tab5:
         st.markdown("### Research Proposals")
+        _open_gaps = [g for g in res.get("gaps", []) if g.get("validation_status") in ("open", "partial")]
+        if not proposals and _open_gaps:
+            # A run can finish with no proposals (the model's reply was unreadable);
+            # fill them in for this run instead of repeating the whole analysis.
+            st.warning(f"This run has no proposals, although it found {len(_open_gaps)} open or partial gaps.")
+            if st.button("Generate proposals now", key="gen_proposals_now", type="primary",
+                         help="Runs only the proposal step on this run's gaps (about 10–30 seconds)."):
+                try:
+                    with st.spinner("Generating proposals…"):
+                        _pclient = ModelRouter(st.session_state["model_config"], _keys)
+                        _new = redo_proposal_step(res, context, _pclient, domain_config=domain_cfg)
+                    if not _new:
+                        st.error("The model returned nothing usable. Try again, or choose another Analysis model.")
+                    else:
+                        res["proposals"] = _new
+                        st.session_state.results = res
+                        _rid = st.session_state.current_run_id
+                        if _rid:
+                            update_run_proposals(_rid, _new)
+                            try:
+                                project_store.refresh_run_results(
+                                    st.session_state.current_project_id, _rid, res, context,
+                                    st.session_state.comp_results)
+                            except Exception:
+                                pass
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Could not generate proposals: {e}")
         for i, proposal in enumerate(proposals, 1):
             conf   = proposal.get("confidence","medium")
             effort = proposal.get("effort_estimate","")
@@ -1752,6 +2488,14 @@ if st.session_state.results:
                 f'<div class="proposal-section">Novelty</div>'
                 f'<div class="proposal-body">{proposal.get("novelty","")}</div></div>',
                 unsafe_allow_html=True)
+            _rv = proposal.get("review")
+            if _rv:
+                _rs = _rv.get("scores") or {}
+                st.caption(
+                    f"Reviewer: {'revised after review' if _rv.get('revised') else _rv.get('verdict', '')} · "
+                    f"specificity {_rs.get('specificity', '–')} · novelty {_rs.get('novelty', '–')} · "
+                    f"feasibility {_rs.get('feasibility', '–')} · impact {_rs.get('impact', '–')} (1–5)"
+                    + (f"  \nIssues raised: {'; '.join(_rv['issues'])}" if _rv.get("issues") else ""))
             with st.expander("Experiments + datasets"):
                 e1,e2 = st.columns(2)
                 with e1:
@@ -1769,25 +2513,20 @@ if st.session_state.results:
             'Novel findings → Download package.</div>',
             unsafe_allow_html=True)
 
-        cr_col, ci_col = st.columns([1, 3])
+        cr_col, cn_col, ci_col = st.columns([1.3, 1.5, 2.2], vertical_alignment="center")
         with cr_col:
-            run_comp = st.button("🧬 Run Computational Lab", key="run_comp")
+            run_comp = st.button("Run Computational Lab", key="run_comp")
+        with cn_col:
+            n_council_runs = st.select_slider(
+                "Council runs", options=[1, 2, 3], value=2, key="n_council_runs",
+                help="Run the insight council N times and merge the findings. More runs are slower but steadier.")
         with ci_col:
             st.markdown(
                 '<div style="font-size:0.78rem;color:#55708f;padding-top:0.5rem;">'
                 f'Stages 7–12 · Uses Tier 1 + Tier 2 params · {n_council_runs}× council runs</div>',
                 unsafe_allow_html=True)
-        default_lab_name = (
-            st.session_state.current_run_name
-            or context.get("domain")
-            or f"Analysis — {datetime.now().strftime('%H:%M')}"
-        )
-        lab_run_name = st.text_input(
-            "Computational Lab run name",
-            value=f"{default_lab_name} · Computational Lab",
-            key="comp_run_name",
-            help="This name is used in run history after the lab output is saved.",
-        )
+        st.caption(f"Results are added to this run (“{st.session_state.current_run_name or 'current run'}”), "
+                   "so the run and its Lab output stay together in one report.")
 
         if run_comp:
             comp_prog = st.progress(0)
@@ -1797,112 +2536,50 @@ if st.session_state.results:
                 comp_stat.markdown(_card("Computational Lab", f"⟳ {msg}"),
                                    unsafe_allow_html=True)
             try:
-                client = build_client(selected_provider_key, provider_api_key, model=selected_model)
-
-                # Stage 8A: Tier 1 parameter extraction
-                papers_raw = [
-                    {"sections": p.get("sections",{}), "tables": p.get("tables",[]),
-                     "filename": p.get("filename","")}
-                    for p in res.get("papers",[])
-                ]
-                cupd("Stage 8A — Extracting Tier 1 parameters…", 8)
-                t1_params = extract_parameters(wiki, papers_raw, client)
-
-                # Stage 8A-ext: Tier 2 parameters from reference abstracts
-                t2_params = []
-                tier2_refs = [r for r in ref_papers if r.get("tier")==2 and r.get("abstract")]
-                if tier2_refs:
-                    cupd(f"Stage 8A-T2 — Extracting Tier 2 params from {len(tier2_refs)} ref abstracts…", 14)
-                    t2_params = extract_tier2_parameters(tier2_refs, client)
-
-                params = t1_params + t2_params
-
-                cupd("Stage 8A — Deriving cross-paper values…", 18)
-                derived = derive_cross_paper_parameters(params, client)
-                params += derived
-
-                sufficiency = check_sufficiency(params, client)
-                csv_data    = params_to_csv(params)
-                _add_trace("Stage 8A — Parameters",
-                           f"{len(papers_raw)} T1 papers + {len(tier2_refs)} T2 abstracts",
-                           f"{len(t1_params)} T1 + {len(t2_params)} T2 + {len(derived)} derived = {len(params)} total")
-                comp_prog.progress(25)
-
-                # Stage 8B: Discovery
-                cupd("Stage 8B — Cross-paper discovery engine…", 27)
-                discovery = run_discovery_engine(wiki, params, context, client, domain_cfg)
-                _add_trace("Stage 8B — Discovery",
-                           f"{len(wiki.get('pages',[]))} wiki pages",
-                           f"{len(discovery.get('hypotheses',[]))} novel hypotheses")
-                comp_prog.progress(40)
-
-                # Stage 9: Council model selection
-                cupd(f"Stage 9 — LLM Council selecting model ({len(params)} params)…", 42)
-                model_council = council_select_model(params, sufficiency, context, client)
-                comp_prog.progress(55)
-
-                # Stage 10: Multi-algorithm simulation
-                simulation_params, _ = filter_confident_params(params)
-                models_auto = resolve_models_to_run(simulation_params, model_council, sufficiency)
-                cupd(f"Stage 10 — Running {len(models_auto)} algorithms: {', '.join(models_auto)}…", 57)
-                sim_results = run_simulation(params, model_council, sufficiency)
-                _add_trace("Stage 10 — Simulation",
-                           f"{len(models_auto)} algorithms selected",
-                           f"Models: {sim_results.get('models_run',[])} run")
-                comp_prog.progress(72)
-
-                # Stage 11: Multi-run council
-                def _cp(run_num, total):
-                    cupd(f"Stage 11 — Council run {run_num}/{total}…",
-                         74 + int((run_num-1)/total*12))
-                cupd(f"Stage 11 — Council synthesising insights ({n_council_runs}× runs)…", 74)
-                merged_council = run_multi_council(
-                    n_runs=n_council_runs,
-                    sim_results=sim_results, discovery=discovery,
-                    params=params, gaps=gaps, context=context,
-                    client=client, progress_callback=_cp,
-                )
-                comp_prog.progress(88)
-
-                # Stage 12: Package
-                cupd("Stage 12 — Building report package…", 90)
-                zip_bytes = build_zip(
-                    params_csv=csv_data, sim_results=sim_results,
-                    model_council=model_council, insight_council=merged_council,
-                    context=context, params=params, sufficiency=sufficiency,
-                    discovery=discovery,
-                )
+                # Same per-role models as the main run; the council seats and chair
+                # come from the Council rows under "Models for this run". The stages
+                # (and the data-sufficiency gate on the simulation) live in pipeline/run_lab.py.
+                client = ModelRouter(st.session_state["model_config"], _keys)
+                st.session_state.comp_results = run_computational_lab(
+                    res, context, client, domain_config=domain_cfg, n_council_runs=n_council_runs,
+                    progress=cupd, trace=_add_trace)
                 comp_prog.progress(100)
-
-                st.session_state.comp_results = {
-                    "params": params, "derived_count": len(derived),
-                    "t1_count": len(t1_params), "t2_count": len(t2_params),
-                    "sufficiency": sufficiency, "csv_data": csv_data,
-                    "discovery": discovery, "model_council": model_council,
-                    "sim_results": sim_results, "insight_council": merged_council,
-                    "n_runs": n_council_runs, "zip_bytes": zip_bytes,
-                }
-                # Save comp results to existing run
+                # The Lab output belongs to the run it was computed from: attach it
+                # there (one analysis = one run), and refresh that run's saved
+                # results and report so they include it.
                 if st.session_state.results:
                     try:
-                        saved_comp_id = save_run(
-                            lab_run_name.strip() or f"{default_lab_name} · Computational Lab",
-                            st.session_state.results,
-                            st.session_state.comp_results,
-                        )
-                        st.session_state.current_run_id = saved_comp_id
-                        st.session_state.current_run_name = lab_run_name.strip() or f"{default_lab_name} · Computational Lab"
-                        st.session_state.loaded_run_id = saved_comp_id
+                        _run_id = st.session_state.current_run_id
+                        if not (_run_id and attach_comp_results(_run_id, st.session_state.comp_results)):
+                            _run_id = save_run(
+                                st.session_state.current_run_name or f"Analysis — {datetime.now().strftime('%H:%M')}",
+                                st.session_state.results, st.session_state.comp_results,
+                                project_id=st.session_state.current_project_id)
+                            st.session_state.current_run_id = _run_id
+                            st.session_state.loaded_run_id = _run_id
+                        st.session_state.report_bundle = None          # the old report lacks the Lab section
+                        try:
+                            project_store.refresh_run_results(
+                                st.session_state.current_project_id, _run_id,
+                                st.session_state.results, context, st.session_state.comp_results)
+                        except Exception:
+                            pass       # files are a convenience; the database copy is already saved
                     except Exception:
-                        pass
+                        st.warning("The Lab finished but could not be saved to the run.")
 
                 comp_prog.empty(); comp_stat.empty()
+                _cr = st.session_state.comp_results
+                _skip = _cr.get("simulation_skipped")
                 st.success(
-                    f"✅ Computational Lab saved — {len(params)} params "
-                    f"(T1:{len(t1_params)} T2:{len(t2_params)} derived:{len(derived)}), "
-                    f"{len(models_auto)} simulations, "
-                    f"{len(discovery.get('hypotheses',[]))} hypotheses. "
-                    f"Run history will show the 🧬 marker.")
+                    f"✅ Computational Lab saved — {len(_cr['params'])} params "
+                    f"(T1:{_cr.get('t1_count', 0)} T2:{_cr.get('t2_count', 0)} derived:{_cr.get('derived_count', 0)}), "
+                    + ("simulation skipped (not enough quantitative data), " if _skip else
+                       f"{len(_cr['sim_results'].get('models_run', []))} simulations, ")
+                    + f"{len(_cr['discovery'].get('hypotheses', []))} hypotheses. "
+                    f"Added to this run; generate the final report in the Export tab.")
+                if _cr.get("council_error"):
+                    st.warning(f"⚠️ {_cr['council_error']}. Run the Lab again in a few minutes, or choose "
+                               "different Council models under “Models for this run”.")
 
             except Exception as e:
                 comp_prog.empty(); comp_stat.empty()
@@ -1942,6 +2619,22 @@ if st.session_state.results:
                 {sufficiency.get('why_score_is_low','')}
               </div>
             </div>""", unsafe_allow_html=True)
+
+            # Per-paper coverage: a paper with no stated numbers (results shown
+            # only in figures, or a narrative review) must be visible, not silent.
+            _papers = res.get("papers", [])
+            if _papers:
+                _per = {}
+                for _p in params:
+                    if not _p.get("is_derived") and _p.get("paper_index") is not None:
+                        _per[_p["paper_index"]] = _per.get(_p["paper_index"], 0) + 1
+                st.caption("Parameters per paper: " + " · ".join(
+                    f"{pp.get('filename', f'Paper {i + 1}')}: {_per.get(i, 0)}"
+                    for i, pp in enumerate(_papers)))
+                _none = [pp.get("filename", f"Paper {i + 1}") for i, pp in enumerate(_papers) if not _per.get(i)]
+                if _none:
+                    st.caption("No parameters were found in " + ", ".join(_none) +
+                               ": the paper may report its results in figures or prose rather than as stated numbers.")
 
             # Parameters grouped
             st.markdown("#### Stage 8 — Extracted Parameters")
@@ -1990,6 +2683,9 @@ if st.session_state.results:
                     + _badge(conf.title()+" Conf",cc,"#ffffff",cc)
                     + '</div></div>',
                     unsafe_allow_html=True)
+                if h.get("unsupported_numbers"):
+                    st.caption("⚠️ Contains figures no paper reports (" + ", ".join(h["unsupported_numbers"])
+                               + "): unsupported, confidence lowered.")
                 with st.expander(f"Evidence + opportunities for {h.get('hypothesis_id','')}"):
                     hc1,hc2 = st.columns(2)
                     with hc1:
@@ -2003,6 +2699,11 @@ if st.session_state.results:
 
             # Simulation
             st.markdown(f"#### Stage 10 — Simulation: {sim_results.get('model_used','')}")
+            if sim_results.get("skipped"):
+                st.info("**Simulation skipped.** The papers do not contain enough usable quantitative parameters "
+                        f"({sim_results.get('skip_reason', 'insufficient data')}). Running a model on this would "
+                        "produce numbers with no real meaning, so the insights below are qualitative and make no "
+                        "numerical prediction.")
             models_run = sim_results.get("models_run",[])
             if models_run:
                 st.markdown("Algorithms run: " +
@@ -2024,6 +2725,9 @@ if st.session_state.results:
                         f'<div style="background:#0066cc;width:{bar}%;height:6px;border-radius:3px;"></div>'
                         f'</div></div>', unsafe_allow_html=True)
 
+            if cr.get("council_error"):
+                st.warning(f"⚠️ {cr['council_error']}. The insight sections below are empty for that reason; "
+                           "run the Lab again in a few minutes, or choose different Council models.")
             # Council insights (multi-run merged)
             st.markdown(f"#### Stage 11 — Council Findings ({n_runs}× runs merged)")
             ic = insight_council
@@ -2070,6 +2774,10 @@ if st.session_state.results:
                     f'<div style="font-size:0.75rem;color:#55708f;margin-top:0.4rem;font-style:italic;">'
                     f'What\'s new: {nf.get("what_makes_it_new","")}</div></div>',
                     unsafe_allow_html=True)
+                if nf.get("unsupported_numbers"):
+                    st.caption("⚠️ This finding states figures no paper reports ("
+                               + ", ".join(nf["unsupported_numbers"]) + "). Treat them as unsupported guesses; "
+                               "the finding is a hypothesis to test, not a result.")
 
             # Insights grid
             def _show_groups(groups, icon):
@@ -2136,44 +2844,53 @@ if st.session_state.results:
                     f'</div></div>',
                     unsafe_allow_html=True)
 
-        if show_prompts:
-            st.markdown("---")
-            st.markdown("#### Active Prompts")
-            from pipeline.wiki_compiler import WIKI_SYSTEM_PROMPT
-            from pipeline.gap_detector import GAP_DETECTION_PROMPT
-            with st.expander("Wiki Compiler Prompt"):
-                st.code(WIKI_SYSTEM_PROMPT, language=None)
-            with st.expander("Gap Detection Prompt"):
-                st.code(GAP_DETECTION_PROMPT, language=None)
+        st.markdown("---")
+        st.markdown("#### Active prompts")
+        from pipeline.wiki_compiler import WIKI_SYSTEM_PROMPT
+        from pipeline.gap_detector import GAP_DETECTION_PROMPT
+        with st.expander("Wiki compiler prompt"):
+            st.code(WIKI_SYSTEM_PROMPT, language=None)
+        with st.expander("Gap detection prompt"):
+            st.code(GAP_DETECTION_PROMPT, language=None)
 
     # ── Tab 8: Export ──────────────────────────────────────────────────────────
     with tab8:
         st.markdown("### Export Results")
         st.markdown(
             '<div class="stage-card"><div class="stage-title">Polished Final Report</div>'
-            '<div class="stage-body">Generates an enterprise HTML report and matching PDF with cover page, executive summary, corpus overview, references, graph, gaps, validation, proposals, risks, and appendices.</div></div>',
+            '<div class="stage-body">One report for this run: cover page, executive summary, corpus overview, references, graph, gaps, validation, proposals, '
+            'the Computational Lab results (when the Lab has been run), risks, and appendices.</div></div>',
             unsafe_allow_html=True)
+        _lab_in_report = bool(st.session_state.comp_results)
+        st.caption("Includes the Computational Lab results." if _lab_in_report else
+                   "The Computational Lab has not been run for this run, so the report will not have a Lab section. "
+                   "Run it in the Computational Lab tab first if you want it included.")
         gen_col, mode_col = st.columns([1, 2])
         with gen_col:
             generate_report = st.button("Generate final report", key="generate_final_report")
         with mode_col:
             use_llm_report = st.checkbox("Use LLM narrative polish", value=True,
-                                         help="Uses the NVIDIA API key to write concise report narrative from existing structured results only.")
+                                         help="Uses the Analysis model to write a concise report narrative from existing structured results only.")
 
         if generate_report:
             try:
+                _report_spec = st.session_state["model_config"].spec_for(ROLE_ANALYSIS)
                 report_client = (
-                    build_client(selected_provider_key, provider_api_key, model=selected_model)
-                    if (use_llm_report and provider_api_key) else None
+                    ModelRouter(st.session_state["model_config"], _keys)
+                    if (use_llm_report and _keys.get(_report_spec.provider)) else None
                 )
+                _comp = st.session_state.comp_results
                 narrative = generate_report_narrative(res, context, client=report_client)
-                html_report = to_enterprise_html_report(res, context, narrative=narrative)
-                pdf_report = to_enterprise_pdf_report(res, context, narrative=narrative)
+                html_report = to_enterprise_html_report(res, context, narrative=narrative, comp_results=_comp)
+                pdf_report = to_enterprise_pdf_report(res, context, narrative=narrative, comp_results=_comp)
                 st.session_state.report_bundle = {
                     "html": html_report,
                     "pdf": pdf_report,
+                    "run_id": st.session_state.current_run_id,
                     "generated_at": datetime.now().isoformat(timespec="seconds"),
                     "used_llm": bool(report_client),
+                    "with_lab": bool(_comp),
+                    "saved": False,
                 }
                 st.success("Final report generated.")
             except Exception as e:
@@ -2181,10 +2898,23 @@ if st.session_state.results:
                 with st.expander("Report error details"):
                     st.code(traceback.format_exc())
 
-        if st.session_state.report_bundle:
-            bundle = st.session_state.report_bundle
-            st.info(f"Report ready. Generated at {bundle.get('generated_at','')} · LLM narrative: {'yes' if bundle.get('used_llm') else 'no'}")
-            dl1, dl2 = st.columns(2)
+        bundle = st.session_state.report_bundle
+        if bundle and bundle.get("run_id") == st.session_state.current_run_id:
+            st.info(f"Report ready. Generated at {bundle.get('generated_at','')} · "
+                    f"LLM narrative: {'yes' if bundle.get('used_llm') else 'no'} · "
+                    f"Lab section: {'yes' if bundle.get('with_lab') else 'no'}")
+            sv_col, dl1, dl2 = st.columns(3)
+            with sv_col:
+                if st.button("Save to project", key="save_final_report", type="primary",
+                             disabled=not st.session_state.current_run_id,
+                             help="Stores this report in the project folder and database, replacing the automatic one for this run."):
+                    try:
+                        project_store.save_report(st.session_state.current_project_id,
+                                                  st.session_state.current_run_id,
+                                                  bundle["html"], bundle["pdf"])
+                        bundle["saved"] = True
+                    except Exception as e:
+                        st.error(f"Could not save the report: {e}")
             with dl1:
                 st.download_button("Download HTML Report",
                                    data=bundle["html"].encode("utf-8"),
@@ -2195,6 +2925,8 @@ if st.session_state.results:
                                    data=bundle["pdf"],
                                    file_name="research_gap_final_report.pdf",
                                    mime="application/pdf")
+            if bundle.get("saved"):
+                st.success("Saved to the project. Find it any time under Project view → Files.")
 
         st.markdown("---")
         ex1,ex2,ex3 = st.columns(3)
