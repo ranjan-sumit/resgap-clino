@@ -212,7 +212,65 @@ def run_full_pipeline(
 
     `papers` is a list of (filename, pdf_bytes). `progress(msg, pct)`,
     `trace(stage, inputs, outputs)` and `warn(msg)` are optional callbacks.
+
+    Every model call and every warning is recorded for the run (llm_calls.jsonl
+    and the manifest). If the run dies midway, the call log is still written
+    to the project's runs/_failed/ folder before the error propagates.
     """
+    from utils.call_log import CallLog
+    from utils.azure_client import AzureOpenAIClient
+    from utils.model_router import ModelRouter
+    secrets: list = []
+    if isinstance(client, ModelRouter):
+        secrets = list(client.keys.values())
+    elif isinstance(client, AzureOpenAIClient):
+        secrets = [client.api_key]
+    call_log = CallLog(secrets=secrets)
+    if isinstance(client, ModelRouter):
+        client.call_log = call_log
+    audit = {"call_log": call_log, "warnings": []}
+
+    def _warn(msg: str) -> None:
+        stage = client.current_stage if isinstance(client, ModelRouter) else None
+        audit["warnings"].append({"stage": stage, "message": call_log.redact(msg)})
+        warn(msg)
+
+    try:
+        return _run_full_pipeline(papers, context, client, options, name, progress=progress,
+                                  trace=trace, warn=_warn, token_meter=token_meter, _audit=audit)
+    except BaseException as e:
+        _dump_failed_run_log(options, call_log, e)
+        raise
+
+
+def _dump_failed_run_log(options, call_log, exc) -> None:
+    """Best effort: a crash must not lose the record of what was called."""
+    try:
+        if not call_log.records:
+            return
+        folder = project_store.project_dir(options.project_id or DEFAULT_PROJECT_ID) / "runs" / "_failed"
+        folder.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        (folder / f"{stamp}-llm_calls.jsonl").write_text(call_log.to_jsonl(), encoding="utf-8")
+        (folder / f"{stamp}-error.txt").write_text(
+            call_log.redact(f"{type(exc).__name__}: {exc}"), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _run_full_pipeline(
+    papers: list[tuple[str, bytes]],
+    context: dict,
+    client,
+    options: RunOptions,
+    name: str = "",
+    *,
+    progress: Callable[[str, int], None] = _noop,
+    trace: Callable[[str, str, str], None] = _noop,
+    warn: Callable[[str], None] = _noop,
+    token_meter=None,
+    _audit: dict,
+) -> RunOutcome:
     if len(papers) < MIN_PAPERS:
         raise PipelineInputError(
             f"Upload at least {MIN_PAPERS} papers (got {len(papers)}) -- gap detection "
@@ -811,7 +869,11 @@ def run_full_pipeline(
                 },
                 "gate_blocked": gate_blocked,
                 "duration_seconds": round(time.time() - run_start, 1),
+                "llm_call_summary": _audit["call_log"].summary(),
+                "llm_call_errors": _audit["call_log"].failures()[:100],
+                "warnings": _audit["warnings"],
             },
+            call_log_jsonl=_audit["call_log"].to_jsonl(),
         )
     except Exception as e:
         warn(f"Run artifacts were not written to the project folder (run itself completed normally): {e}")

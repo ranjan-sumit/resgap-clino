@@ -222,6 +222,7 @@ class ModelRouter:
         self._role = ROLE_ANALYSIS
         self.current_stage = None
         self.fallback_events: list = []
+        self.call_log = None            # a utils.call_log.CallLog, set by the pipeline
 
     # -- clients ---------------------------------------------------------------
     def client_for(self, spec: ModelSpec):
@@ -280,9 +281,12 @@ class ModelRouter:
                 continue
             tried.add(spec.provider)
             client.set_stage(self.current_stage)
+            started = time.time()
             result = client.vision(system, user_text, image_bytes, max_tokens=max_tokens)
             if not isinstance(result, Failure):
+                self._log(spec, "vision", system, user_text, started, True)
                 return result
+            self._log(spec, "vision", system, user_text, started, False, result.error.kind, result.error.detail)
             if result.error.kind == "timeout":
                 hung.add(spec.provider)
             last = result
@@ -295,7 +299,24 @@ class ModelRouter:
         kwargs = dict(kwargs)
         kwargs["max_tokens"] = int(kwargs["max_tokens"] * token_boost(spec.model))
         client.set_stage(self.current_stage)
-        return getattr(client, method)(system, user, **kwargs)
+        started = time.time()
+        try:
+            result = getattr(client, method)(system, user, **kwargs)
+        except Exception as e:
+            self._log(spec, method, system, user, started, False, "exception", f"{type(e).__name__}: {e}")
+            raise
+        if isinstance(result, Success):
+            self._log(spec, method, system, user, started, True, response_chars=len(str(result.value or "")))
+        else:
+            self._log(spec, method, system, user, started, False, result.error.kind, result.error.detail)
+        return result
+
+    def _log(self, spec, method, system, user, started, ok, kind="", detail="", response_chars=0):
+        log = self.call_log
+        if log is not None:
+            log.record(stage=self.current_stage, provider=spec.provider, model=spec.model, method=method,
+                       system=system, user=user, started=started, ok=ok, error_kind=kind,
+                       error_detail=detail, response_chars=response_chars)
 
     def _call(self, role: str, method: str, system: str, user: str, **kwargs):
         spec = self.config.spec_for(role)

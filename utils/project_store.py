@@ -147,7 +147,7 @@ def save_papers(project_id: str, papers: list[tuple[str, bytes]]) -> list[int]:
 
 def write_run_artifacts(project_id: str, run_id: str, results: dict, context: dict, *,
                         paper_file_ids: list[int] = (), manifest: dict | None = None,
-                        make_reports: bool = True) -> list[dict]:
+                        make_reports: bool = True, call_log_jsonl: str | None = None) -> list[dict]:
     """Writes a finished run's artifacts into runs/<run_id>/ and records each
     one (linking the run to them and to the papers it used). The reports are
     best-effort: a report failure is noted in the manifest and never loses the
@@ -178,6 +178,10 @@ def write_run_artifacts(project_id: str, run_id: str, results: dict, context: di
                 report_status["pdf"] = f"failed: {type(e).__name__}: {e}"
         except Exception as e:
             report_status["html"] = f"failed: {type(e).__name__}: {e}"
+
+    if call_log_jsonl:
+        written.append(_write_file(project_id, folder, f"{base}/llm_calls.jsonl",
+                                   call_log_jsonl.encode("utf-8"), "other"))
 
     manifest_doc = {
         "run_id": run_id, "project_id": project_id,
