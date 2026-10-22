@@ -10,3 +10,18 @@ venv/
 evals/benchmarks/seed-papers/*.pdf
 Data-17072026/
 *.pdf
+
+# Project folders: uploaded papers, results and reports (user data)
+data/projects/
+
+# Tooling and scratch (kept locally, not versioned)
+.claude/
+_bmad/
+_bmad-output/
+evals/**/screenshots/
+*.db
+*.sqlite
+data/projects/
+.env.*
+!.env.example
+scratch/
