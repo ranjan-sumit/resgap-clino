@@ -369,6 +369,53 @@ def generate_report_narrative(results: dict, context: dict, client=None) -> dict
     return fallback
 
 
+# The report's sections, in order. The checklist in the app, the HTML filter and the PDF builder all use these ids.
+REPORT_SECTIONS = [
+    ("summary", "Executive summary and objective"),
+    ("corpus", "Corpus overview and papers"),
+    ("evidence", "Evidence"),
+    ("references", "References"),
+    ("graph", "Knowledge graph"),
+    ("gaps", "Research gaps and validation"),
+    ("proposals", "Research proposals"),
+    ("lab", "Computational Lab"),
+    ("risks", "Risks and limitations"),
+    ("appendices", "Appendices"),
+]
+ALL_SECTION_IDS = [sid for sid, _ in REPORT_SECTIONS]
+
+_HTML_TITLE_TO_SECTION = {
+    "Executive Summary": "summary", "Research Objective": "summary",
+    "Corpus Overview": "corpus", "Papers Analyzed": "corpus",
+    "Evidence": "evidence", "Reference Corpus Summary": "references",
+    "Knowledge Graph Summary": "graph",
+    "Key Research Gaps": "gaps", "Validation Evidence": "gaps",
+    "Recommended Research Proposals": "proposals", "Computational Lab": "lab",
+    "Risks and Limitations": "risks",
+    "Appendix: Extracted References": "appendices", "Appendix: Graph Entities and Relationships": "appendices",
+    "Appendix: Pipeline Audit": "appendices",
+}
+
+
+def filter_html_sections(html_text: str, include) -> str:
+    """The HTML report with the unchecked sections removed (the cover page always stays).
+    `include` is a collection of section ids; None keeps everything."""
+    if include is None:
+        return html_text
+    import re
+    keep = set(include)
+
+    def decide(match) -> str:
+        block = match.group(0)
+        title = re.search(r"<h2>(.*?)</h2>", block, re.S)
+        if not title:
+            return block                                  # the cover has no h2
+        sid = _HTML_TITLE_TO_SECTION.get(html.unescape(re.sub(r"<[^>]+>", "", title.group(1))).strip())
+        return block if sid is None or sid in keep else ""
+
+    return re.sub(r"<section\b.*?</section>", decide, html_text, flags=re.S)
+
+
 def _esc(value) -> str:
     return html.escape(str(value or ""))
 
@@ -384,6 +431,35 @@ def _status_class(status: str) -> str:
         "solved": "bad",
         "pending": "muted",
     }.get(str(status or "").lower(), "muted")
+
+
+def _author_list(value) -> list:
+    if isinstance(value, list):
+        return [str(a) for a in value if a]
+    if isinstance(value, str) and value.startswith("["):
+        import ast
+        try:
+            return [str(a) for a in ast.literal_eval(value) if a]
+        except (ValueError, SyntaxError):
+            return []
+    return [value] if isinstance(value, str) and value else []
+
+
+def _reference_cell(ref: dict) -> str:
+    """Authors, title and venue, from the reference's stored metadata (whatever of it exists)."""
+    authors = _author_list(ref.get("authors"))
+    who = (", ".join(authors[:3]) + (" et al." if len(authors) > 3 else "")) if authors else ""
+    parts = [f"<strong>{_esc(ref.get('title'))}</strong>"]
+    if who:
+        parts.insert(0, f"{_esc(who)}. ")
+    if ref.get("venue"):
+        parts.append(f" <em>{_esc(ref.get('venue'))}</em>")
+    return "".join(parts)
+
+
+def _doi_cell(ref: dict) -> str:
+    doi = str(ref.get("doi") or "").strip()
+    return f"<a href='https://doi.org/{_esc(doi)}'>{_esc(doi)}</a>" if doi else _esc(ref.get("url") or "")
 
 
 def _evidence_rows(evidence_by_paper: dict) -> str:
@@ -491,9 +567,15 @@ def _lab_html(comp: dict | None) -> str:
 
 
 def to_enterprise_html_report(results: dict, context: dict, narrative: dict | None = None,
-                              comp_results: dict | None = None) -> str:
+                              comp_results: dict | None = None, sections=None) -> str:
     """Build a polished standalone HTML report. When `comp_results` (the
-    Computational Lab output) is given, the report includes its section."""
+    Computational Lab output) is given, the report includes its section. `sections` is a
+    collection of REPORT_SECTIONS ids to include (None: all)."""
+    return filter_html_sections(_enterprise_html(results, context, narrative, comp_results), sections)
+
+
+def _enterprise_html(results: dict, context: dict, narrative: dict | None = None,
+                     comp_results: dict | None = None) -> str:
     narrative = narrative or generate_report_narrative(results, context)
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     papers = results.get("papers", [])
@@ -513,8 +595,8 @@ def to_enterprise_html_report(results: dict, context: dict, narrative: dict | No
         for i, p in enumerate(papers, 1)
     )
     ref_rows = "".join(
-        f"<tr><td>{i}</td><td>{_esc(r.get('title'))}</td><td>{_esc(r.get('year'))}</td>"
-        f"<td>{_esc(r.get('doi'))}</td><td>{_esc(r.get('source'))}</td><td>{_esc(r.get('citations', 0))}</td></tr>"
+        f"<tr><td>{i}</td><td>{_reference_cell(r)}</td><td>{_esc(r.get('year'))}</td>"
+        f"<td>{_doi_cell(r)}</td><td>{_esc(r.get('source'))}</td><td>{_esc(r.get('citations', 0))}</td></tr>"
         for i, r in enumerate(refs[:80], 1)
     )
     entity_rows = "".join(
@@ -684,8 +766,11 @@ def to_enterprise_html_report(results: dict, context: dict, narrative: dict | No
 
 
 def to_enterprise_pdf_report(results: dict, context: dict, narrative: dict | None = None,
-                             comp_results: dict | None = None) -> bytes:
-    """Generate a PDF with the same report sections as the HTML report."""
+                             comp_results: dict | None = None, sections=None) -> bytes:
+    """Generate a PDF with the same report sections as the HTML report (`sections`: ids to include, None for all)."""
+    def on(sid: str) -> bool:
+        return sections is None or sid in set(sections)
+
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -732,13 +817,16 @@ def to_enterprise_pdf_report(results: dict, context: dict, narrative: dict | Non
         para(f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}", "Small2"),
         para(f"Domain: {context.get('domain','')} | Gap focus: {context.get('gap_type','')}"),
         Spacer(1, 10),
-        Paragraph("Executive Summary", styles["Section2"]),
-        *bullet_list(narrative.get("executive_summary", [])),
-        Paragraph("Research Objective", styles["Section2"]),
-        para(narrative.get("research_objective", "")),
-        Paragraph("Corpus Overview", styles["Section2"]),
-        para(narrative.get("corpus_overview", "")),
     ]
+    if on("summary"):
+        story += [
+            Paragraph("Executive Summary", styles["Section2"]),
+            *bullet_list(narrative.get("executive_summary", [])),
+            Paragraph("Research Objective", styles["Section2"]),
+            para(narrative.get("research_objective", "")),
+        ]
+    if on("corpus"):
+        story += [Paragraph("Corpus Overview", styles["Section2"]), para(narrative.get("corpus_overview", ""))]
 
     metrics = [
         ["Metric", "Value"],
@@ -748,9 +836,11 @@ def to_enterprise_pdf_report(results: dict, context: dict, narrative: dict | Non
         ["Research gaps", str(len(gaps))],
         ["Proposals", str(len(proposals))],
     ]
-    story += [simple_table(metrics, [2.5*inch, 4.0*inch])]
+    if on("corpus"):
+        story += [simple_table(metrics, [2.5*inch, 4.0*inch])]
 
-    story.append(Paragraph("Papers Analyzed", styles["Section2"]))
+    if on("corpus"):
+        story.append(Paragraph("Papers Analyzed", styles["Section2"]))
     paper_rows = [["#", "Paper", "Limitations"]]
     for i, p in enumerate(papers[:12], 1):
         wiki = p.get("wiki", {})
@@ -759,45 +849,54 @@ def to_enterprise_pdf_report(results: dict, context: dict, narrative: dict | Non
             Paragraph(_esc(wiki.get("title") or p.get("filename")), styles["Small2"]),
             Paragraph(_esc("; ".join(_safe_list(wiki.get("limitations", []), 2))), styles["Small2"]),
         ])
-    story.append(simple_table(paper_rows, [0.35*inch, 3.2*inch, 3.0*inch]))
+    if on("corpus"):
+        story.append(simple_table(paper_rows, [0.35*inch, 3.2*inch, 3.0*inch]))
 
-    story.append(Paragraph("Reference Corpus Summary", styles["Section2"]))
-    story.append(para(
-        f"Raw citations: {ref_diag.get('raw_entries',0)}; LLM parsed: {ref_diag.get('structured_entries',0)}; "
-        f"fallback parsed: {ref_diag.get('fallback_entries',0)}."
-    ))
-    ref_rows = [["#", "Title", "Year", "Source"]]
-    for i, r in enumerate(refs[:35], 1):
-        ref_rows.append([str(i), Paragraph(_esc(r.get("title")), styles["Small2"]),
-                         _esc(r.get("year")), _esc(r.get("source"))])
-    story.append(simple_table(ref_rows, [0.35*inch, 4.3*inch, 0.7*inch, 1.2*inch]))
+    if on("references"):
+        story.append(Paragraph("Reference Corpus Summary", styles["Section2"]))
+        story.append(para(
+            f"Raw citations: {ref_diag.get('raw_entries',0)}; LLM parsed: {ref_diag.get('structured_entries',0)}; "
+            f"fallback parsed: {ref_diag.get('fallback_entries',0)}."
+        ))
+        ref_rows = [["#", "Reference", "Year", "Source"]]
+        for i, r in enumerate(refs[:35], 1):
+            authors = _author_list(r.get("authors"))
+            who = (", ".join(authors[:3]) + (" et al." if len(authors) > 3 else "") + ". ") if authors else ""
+            venue = f" {r['venue']}." if r.get("venue") else ""
+            doi = f" doi:{r['doi']}" if r.get("doi") else ""
+            ref_rows.append([str(i), Paragraph(_esc(f"{who}{r.get('title') or ''}.{venue}{doi}"), styles["Small2"]),
+                             _esc(r.get("year")), _esc(r.get("source"))])
+        story.append(simple_table(ref_rows, [0.35*inch, 4.3*inch, 0.7*inch, 1.2*inch]))
 
-    story.append(PageBreak())
-    story.append(Paragraph("Knowledge Graph Summary", styles["Section2"]))
-    story.append(para(narrative.get("knowledge_graph_summary", "")))
-    story.append(para(
-        f"Entities: {graph.get('stats',{}).get('entity_count',0)}; relationships: {graph.get('stats',{}).get('relationship_count',0)}; communities: {graph.get('stats',{}).get('community_count',0)}."
-    ))
+    if on("graph"):
+        story.append(PageBreak())
+        story.append(Paragraph("Knowledge Graph Summary", styles["Section2"]))
+        story.append(para(narrative.get("knowledge_graph_summary", "")))
+        story.append(para(
+            f"Entities: {graph.get('stats',{}).get('entity_count',0)}; relationships: {graph.get('stats',{}).get('relationship_count',0)}; communities: {graph.get('stats',{}).get('community_count',0)}."
+        ))
 
-    story.append(Paragraph("Key Research Gaps", styles["Section2"]))
-    for i, g in enumerate(gaps, 1):
-        story.append(para(f"{i}. {g.get('title','Untitled')} ({g.get('validation_status','')}, {g.get('confidence','')} confidence)", "Heading4"))
-        story.append(para(g.get("description", "")))
-        story.append(para(f"Validation: {g.get('validation_reasoning','')}", "Small2"))
+    if on("gaps"):
+        story.append(Paragraph("Key Research Gaps", styles["Section2"]))
+        for i, g in enumerate(gaps, 1):
+            story.append(para(f"{i}. {g.get('title','Untitled')} ({g.get('validation_status','')}, {g.get('confidence','')} confidence)", "Heading4"))
+            story.append(para(g.get("description", "")))
+            story.append(para(f"Validation: {g.get('validation_reasoning','')}", "Small2"))
 
-    story.append(Paragraph("Validation Evidence", styles["Section2"]))
-    for g in gaps:
-        story.append(para(g.get("title", ""), "Heading4"))
-        for p in g.get("existing_papers", [])[:3]:
-            story.append(para(f"{p.get('title','')} ({p.get('year','')}) - {p.get('source','')}", "Small2"))
+        story.append(Paragraph("Validation Evidence", styles["Section2"]))
+        for g in gaps:
+            story.append(para(g.get("title", ""), "Heading4"))
+            for p in g.get("existing_papers", [])[:3]:
+                story.append(para(f"{p.get('title','')} ({p.get('year','')}) - {p.get('source','')}", "Small2"))
 
-    story.append(Paragraph("Recommended Research Proposals", styles["Section2"]))
-    for i, p in enumerate(proposals, 1):
-        story.append(para(f"{i}. {p.get('title','Untitled')}", "Heading4"))
-        story.append(para(p.get("problem_statement", "")))
-        story.append(para(f"Methodology: {p.get('methodology','')}", "Small2"))
+    if on("proposals"):
+        story.append(Paragraph("Recommended Research Proposals", styles["Section2"]))
+        for i, p in enumerate(proposals, 1):
+            story.append(para(f"{i}. {p.get('title','Untitled')}", "Heading4"))
+            story.append(para(p.get("problem_statement", "")))
+            story.append(para(f"Methodology: {p.get('methodology','')}", "Small2"))
 
-    if comp_results:
+    if comp_results and on("lab"):
         lab = _lab_summary(comp_results)
         story.append(Paragraph("Computational Lab", styles["Section2"]))
         story.append(para(f"Data coverage: {lab['coverage']}/10 ({lab['recommendation']}). {lab['why']}"))
@@ -824,22 +923,24 @@ def to_enterprise_pdf_report(results: dict, context: dict, narrative: dict | Non
                 story.append(para(title, "Heading4"))
                 story.extend(bullet_list(items))
 
-    story.append(Paragraph("Risks and Limitations", styles["Section2"]))
-    story.extend(bullet_list(narrative.get("risk_and_limitations", [])))
+    if on("risks"):
+        story.append(Paragraph("Risks and Limitations", styles["Section2"]))
+        story.extend(bullet_list(narrative.get("risk_and_limitations", [])))
 
-    story.append(PageBreak())
-    story.append(Paragraph("Appendix: Graph Entities and Relationships", styles["Section2"]))
-    entity_rows = [["Name", "Type", "Importance"]]
-    for e in graph.get("entities", [])[:50]:
-        entity_rows.append([Paragraph(_esc(e.get("name")), styles["Small2"]), _esc(e.get("type")), _esc(e.get("importance"))])
-    story.append(simple_table(entity_rows, [4.2*inch, 1.2*inch, 1.1*inch]))
+    if on("appendices"):
+        story.append(PageBreak())
+        story.append(Paragraph("Appendix: Graph Entities and Relationships", styles["Section2"]))
+        entity_rows = [["Name", "Type", "Importance"]]
+        for e in graph.get("entities", [])[:50]:
+            entity_rows.append([Paragraph(_esc(e.get("name")), styles["Small2"]), _esc(e.get("type")), _esc(e.get("importance"))])
+        story.append(simple_table(entity_rows, [4.2*inch, 1.2*inch, 1.1*inch]))
 
-    story.append(Paragraph("Appendix: Pipeline Audit", styles["Section2"]))
-    trace_rows = [["#", "Stage", "Output"]]
-    for i, t in enumerate(results.get("pipeline_trace", []), 1):
-        trace_rows.append([str(i), Paragraph(_esc(t.get("stage")), styles["Small2"]),
-                           Paragraph(_esc(t.get("outputs")), styles["Small2"])])
-    story.append(simple_table(trace_rows, [0.35*inch, 2.4*inch, 3.8*inch]))
+        story.append(Paragraph("Appendix: Pipeline Audit", styles["Section2"]))
+        trace_rows = [["#", "Stage", "Output"]]
+        for i, t in enumerate(results.get("pipeline_trace", []), 1):
+            trace_rows.append([str(i), Paragraph(_esc(t.get("stage")), styles["Small2"]),
+                               Paragraph(_esc(t.get("outputs")), styles["Small2"])])
+        story.append(simple_table(trace_rows, [0.35*inch, 2.4*inch, 3.8*inch]))
 
     doc.build(story)
     buf.seek(0)

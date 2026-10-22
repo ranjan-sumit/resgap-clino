@@ -188,6 +188,7 @@ from ui.viewmodels import (keys_line, off_note, overview, run_header, saved_trac
                            trace_rows, stage_status)
 from ui.compat import plotly_full_width, table_full_width
 from ui.run_board import board_rows
+from utils.export import ALL_SECTION_IDS, REPORT_SECTIONS
 from ui.lab_view import kind_badge, lab_verdict, parameters_by_paper
 from ui.graph_view import filter_relations, grounding_summary, orphan_explanation, relation_rows
 from ui.gaps_view import (SORTS as GAP_SORTS, compare_proposals, filter_gaps, gap_rows, proposal_rows,
@@ -2940,9 +2941,16 @@ if st.session_state.results:
         st.caption("Includes the Computational Lab results." if _lab_in_report else
                    "The Computational Lab has not been run for this run, so the report will not have a Lab section. "
                    "Run it in the Computational Lab tab first if you want it included.")
+        _section_titles = dict(REPORT_SECTIONS)
+        report_sections = st.multiselect(
+            "Sections to include", ALL_SECTION_IDS,
+            default=[sid for sid in ALL_SECTION_IDS if sid != "lab" or _lab_in_report],
+            format_func=_section_titles.get, key="report_sections",
+            help="Untick what you do not want in the report. The cover page is always included.")
         gen_col, mode_col = st.columns([1, 2])
         with gen_col:
-            generate_report = st.button("Generate final report", key="generate_final_report")
+            generate_report = st.button("Generate final report", key="generate_final_report",
+                                        disabled=not report_sections)
         with mode_col:
             use_llm_report = st.checkbox("Use LLM narrative polish", value=True,
                                          help="Uses the Analysis model to write a concise report narrative from existing structured results only.")
@@ -2956,15 +2964,18 @@ if st.session_state.results:
                 )
                 _comp = st.session_state.comp_results
                 narrative = generate_report_narrative(res, context, client=report_client)
-                html_report = to_enterprise_html_report(res, context, narrative=narrative, comp_results=_comp)
-                pdf_report = to_enterprise_pdf_report(res, context, narrative=narrative, comp_results=_comp)
+                html_report = to_enterprise_html_report(res, context, narrative=narrative, comp_results=_comp,
+                                                        sections=report_sections)
+                pdf_report = to_enterprise_pdf_report(res, context, narrative=narrative, comp_results=_comp,
+                                                      sections=report_sections)
                 st.session_state.report_bundle = {
                     "html": html_report,
                     "pdf": pdf_report,
                     "run_id": st.session_state.current_run_id,
                     "generated_at": datetime.now().isoformat(timespec="seconds"),
                     "used_llm": bool(report_client),
-                    "with_lab": bool(_comp),
+                    "with_lab": bool(_comp) and "lab" in report_sections,
+                    "sections": list(report_sections),
                     "saved": False,
                 }
                 st.success("Final report generated.")
@@ -3002,6 +3013,10 @@ if st.session_state.results:
                                    mime="application/pdf")
             if bundle.get("saved"):
                 st.success("Saved to the project. Find it any time under Project view → Files.")
+            with st.expander("Preview the report", expanded=False):
+                st.caption("Exactly what the HTML download and the saved report contain.")
+                import streamlit.components.v1 as _components
+                _components.html(bundle["html"], height=720, scrolling=True)
 
         st.markdown("---")
         ex1,ex2,ex3 = st.columns(3)
