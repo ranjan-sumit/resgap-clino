@@ -53,9 +53,14 @@ def _texts(at):
     return " ".join(str(getattr(e, "value", "")) for e in (*at.markdown, *at.caption, *at.info, *at.warning))
 
 
+def _open_section(at, name):
+    at.session_state["result_tab"] = name
+    return at.run()
+
+
 def test_trace_tab_shows_the_stored_trace_for_a_saved_run(app_test, isolated_env):
     seed_run(golden_results())
-    at = app_test(timeout=90)
+    at = _open_section(app_test(timeout=90), "Trace")
     text = _texts(at)
     assert "STAGE 1" in text and "PDF Parse" in text
     assert "Run the main analysis to see the pipeline trace" not in text
@@ -63,7 +68,7 @@ def test_trace_tab_shows_the_stored_trace_for_a_saved_run(app_test, isolated_env
 
 def test_trace_tab_says_so_for_a_legacy_run(app_test, isolated_env):
     seed_run(legacy_results())
-    text = _texts(app_test(timeout=90))
+    text = _texts(_open_section(app_test(timeout=90), "Trace"))
     assert "no stage trace stored" in text and "Run the main analysis" not in text
 
 

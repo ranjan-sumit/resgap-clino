@@ -187,6 +187,8 @@ for _k, _v in _DEFAULTS.items():
 from ui.viewmodels import (keys_line, off_note, overview, run_header, saved_trace, trace_summary,
                            trace_rows, stage_status)
 from ui.compat import plotly_full_width, table_full_width
+from ui.evidence_view import (citation, evidence_rows, filter_evidence, match_evidence, paper_titles,
+                              quality_chips, study_type_label, top_gaps, top_proposal, warnings_summary)
 import hashlib
 from utils.run_storage import to_local_display
 from utils.database import with_sections, cache_stats as db_cache_stats, clear_cache as db_clear_cache, _db_path as db_path_for_display
@@ -1654,6 +1656,138 @@ if run_btn and _papers:
     finally:
         st.session_state.running = False
 
+# ── Result screens: Overview, Evidence, and quote-linked Wiki facts ──────────────────────────
+def _render_overview(res: dict) -> None:
+    c_stats, ref_sum = res.get("corpus_stats", {}), res.get("ref_summary", {})
+    cols = st.columns(5)
+    for col, (val, lbl) in zip(cols, overview(res)):
+        with col:
+            st.markdown(f'<div class="stat-box"><span class="stat-number">{val}</span>'
+                        f'<span class="stat-label">{lbl}</span></div>', unsafe_allow_html=True)
+    chips = quality_chips(res)
+    if chips:
+        st.caption(" · ".join(chips))
+
+    _note = off_note(res)
+    if c_stats and _note is None:
+        t1, t2, t3, t4 = st.columns(4)
+        for col, (val, lbl, color) in zip([t1, t2, t3, t4], [
+            (c_stats.get("tier1", 0), "Uploaded PDFs", "#0066cc"),
+            (c_stats.get("tier2", 0), "Cited (w/ abstract)", "#087f5b"),
+            (c_stats.get("tier3", 0), "Distant refs", "#55708f"),
+            (ref_sum.get("total", 0), "Total corpus", "#b7791f"),
+        ]):
+            with col:
+                st.markdown(f'<div class="stat-box"><span class="stat-number" style="color:{color};">{val}</span>'
+                            f'<span class="stat-label">{lbl}</span></div>', unsafe_allow_html=True)
+    elif c_stats:
+        st.caption(_note)
+
+    warnings = warnings_summary(res)
+    if warnings:
+        with st.expander(f"⚠️ {len(warnings)} thing(s) to know about this run", expanded=len(warnings) <= 3):
+            for w in warnings:
+                st.markdown(f"- {html.escape(w)}")
+
+    top = top_gaps(res)
+    left, right = st.columns([3, 2])
+    with left:
+        st.markdown("#### Top gaps")
+        if not top:
+            st.caption("No gaps were found in this run." if not res.get("gate_blocked")
+                       else "Gap analysis was skipped (quality gate).")
+        for g in top:
+            status = f" · {html.escape(g['status'].replace('_', ' '))}" if g["status"] else ""
+            st.markdown(f"**{g['rank'] or '–'}. {html.escape(g['title'])}**  \n"
+                        f"<span style='color:#55708f;font-size:0.82rem;'>{g['papers']} supporting paper(s)"
+                        f"{status}</span>", unsafe_allow_html=True)
+        if top:
+            st.button("See all gaps", key="ov_all_gaps", on_click=_set_tab, args=("Gaps",))
+    with right:
+        st.markdown("#### Leading proposal")
+        prop = top_proposal(res)
+        if prop is None:
+            st.caption("No proposals in this run.")
+        else:
+            st.markdown(f"**{html.escape(prop['title'])}**")
+            st.caption((prop["problem"] or "")[:300])
+            st.button("See all proposals", key="ov_all_props", on_click=_set_tab, args=("Proposals",))
+
+    # One row per paper, so a paper that silently contributed nothing is visible.
+    _cov = paper_coverage(res)
+    if _cov:
+        import pandas as pd
+        _bad = [r for r in _cov if r["status"] != "ok"]
+        with st.expander(f"Paper coverage — {len(_cov) - len(_bad)} of {len(_cov)} papers fully processed"
+                         + (" · ⚠️ check" if _bad else ""), expanded=bool(_bad)):
+            _table(pd.DataFrame([{
+                "Paper": r["title"][:44] + ("…" if len(r["title"]) > 44 else ""),
+                "Type": study_type_label(r["study_type"]).replace("systematic or narrative ", "")
+                                                         .replace(" or questionnaire", "").replace(" or lab", ""),
+                "Wiki": r["wiki_items"], "Evid.": r["evidence"], "Quoted": r["quoted"],
+                "Entities": r["entities"], "Gaps": r["gaps"], "Props": r["proposals"],
+                "OK": "✅" if r["status"] == "ok" else "⚠️ " + "; ".join(r["problems"]),
+            } for r in _cov]), hide_index=True)
+            st.caption("Wiki = facts compiled from the paper · Evid. = evidence items · Quoted = items with a verified "
+                       "quote and page · Entities = knowledge-graph entities · Gaps / Props = gaps and proposals "
+                       "that rest on the paper.")
+
+
+def _set_tab(name: str) -> None:
+    st.session_state["result_tab"] = name
+
+
+def _render_evidence(res: dict) -> None:
+    rows = evidence_rows(res)
+    st.markdown("### Evidence")
+    if not rows:
+        st.info("This run has no stored evidence items.")
+        return
+    st.caption("Every item the reader extracted from the papers, with the passage it rests on. "
+               "Filter, then read the quote in context.")
+    c1, c2, c3 = st.columns([2, 2, 1])
+    papers = sorted({r["paper"] for r in rows})
+    titles = paper_titles(res)
+    paper = c1.selectbox("Paper", ["All papers", *papers], key="ev_paper",
+                         format_func=lambda p: p if p == "All papers" else titles.get(p, p)[:60])
+    types = c2.multiselect("Type", sorted({r["type"] for r in rows}), key="ev_types")
+    only_cited = c3.checkbox("Cited by a gap", key="ev_cited")
+    d1, d2, d3 = st.columns([1, 1, 2])
+    page_only = d1.checkbox("Has a page number", key="ev_page")
+    quote_only = d2.checkbox("Has a quote", key="ev_quote")
+    query = d3.text_input("Search the text", key="ev_query", placeholder="e.g., FEV1")
+    shown = filter_evidence(rows, paper=None if paper == "All papers" else paper, types=tuple(types),
+                            has_page=True if page_only else None, has_quote=True if quote_only else None,
+                            cited_only=only_cited, query=query)
+    st.caption(f"{len(shown)} of {len(rows)} items")
+    for r in shown[:60]:
+        where = citation(r)
+        cited = ("  \n<span style='color:#087f5b;font-size:0.8rem;'>Cited by: "
+                 + "; ".join(f"#{g['rank'] or '–'} {html.escape(g['title'][:70])}" for g in r["cited_by"])
+                 + "</span>") if r["cited_by"] else ""
+        quote = (f"  \n<span style='color:#55708f;font-size:0.82rem;'>“{html.escape(r['quote'])}”</span>"
+                 if r["quote"] else "  \n<span style='color:#b7791f;font-size:0.8rem;'>no verified quote</span>")
+        st.markdown(
+            f"**{html.escape(r['type'])}** · {html.escape(titles.get(r['paper'], r['paper'])[:50])}"
+            f"{' · ' + html.escape(where) if where else ''} · {html.escape(r['confidence'])}  \n"
+            f"{html.escape(r['text'])}{quote}{cited}", unsafe_allow_html=True)
+        st.markdown("---")
+    if len(shown) > 60:
+        st.caption(f"Showing the first 60 of {len(shown)}; narrow the filters to see the rest.")
+
+
+def _fact(text: str, evidence: list, color: str = "#0b1f3a") -> None:
+    """A wiki fact, with the page and quote it rests on when the evidence contains it."""
+    hit = match_evidence(str(text), evidence)
+    extra = ""
+    if hit:
+        where = citation(hit)
+        extra = (f"<br><span style='color:#55708f;font-size:0.76rem;'>{html.escape(where) + ' · ' if where else ''}"
+                 f"{('“' + html.escape(hit['quote'][:160]) + '”') if hit['quote'] else 'evidence item'}</span>")
+    st.markdown(f'<div class="wiki-item" style="color:{color};margin-bottom:0.3rem;">• {html.escape(str(text))}{extra}</div>',
+                unsafe_allow_html=True)
+
+
 # ── Results ────────────────────────────────────────────────────────────────────
 if st.session_state.results:
     res        = st.session_state.results
@@ -1699,72 +1833,22 @@ if st.session_state.results:
             "Re-run with the sidebar override checked to force gap analysis anyway."
         )
 
-    # Corpus stats bar
-    c_stats = res.get("corpus_stats", {})
-    ref_sum = res.get("ref_summary", {})
-    if c_stats:
-        # No reference diagnostics means the reference stage never ran (it is
-        # off by default); "Off" is honest where "0" reads like a failure.
-        _note = off_note(res)
-        if _note is None:
-            t1,t2,t3,t4 = st.columns(4)
-            for col,(val,lbl,color) in zip([t1,t2,t3,t4],[
-                (c_stats.get("tier1",0), "Uploaded PDFs", "#0066cc"),
-                (c_stats.get("tier2",0), "Cited (w/ abstract)", "#087f5b"),
-                (c_stats.get("tier3",0), "Distant refs", "#55708f"),
-                (ref_sum.get("total",0), "Total corpus", "#b7791f"),
-            ]):
-                with col:
-                    st.markdown(f'<div class="stat-box"><span class="stat-number" '
-                                f'style="color:{color};">{val}</span>'
-                                f'<span class="stat-label">{lbl}</span></div>',
-                                unsafe_allow_html=True)
-        else:
-            st.caption(_note)
-        st.markdown("")
+    _TABS = ["Overview", "Evidence", "Wiki", "References", "Graph", "Gaps", "Proposals", "Lab", "Trace", "Export"]
+    if st.session_state.get("result_tab") not in _TABS:
+        st.session_state["result_tab"] = "Overview"
+    _tab = st.segmented_control("Section", _TABS, key="result_tab", label_visibility="collapsed") or "Overview"
 
-    # Summary row
-    m1,m2,m3,m4,m5 = st.columns(5)
-    for col,(val,lbl) in zip([m1,m2,m3,m4,m5], overview(res)):
-        with col:
-            st.markdown(f'<div class="stat-box"><span class="stat-number">{val}</span>'
-                        f'<span class="stat-label">{lbl}</span></div>', unsafe_allow_html=True)
+    # Only the section on screen is built: the other nine cost nothing until opened.
+    if _tab == "Overview":
+        _render_overview(res)
 
-    # One row per paper, so a paper that silently contributed nothing is visible.
-    _cov = paper_coverage(res)
-    if _cov:
-        import pandas as pd
-        _bad = [r for r in _cov if r["status"] != "ok"]
-        with st.expander(f"Paper coverage — {len(_cov) - len(_bad)} of {len(_cov)} papers fully processed"
-                         + (" · ⚠️ check" if _bad else ""), expanded=bool(_bad)):
-            _table(pd.DataFrame([{
-                "Paper": r["title"][:44] + ("…" if len(r["title"]) > 44 else ""),
-                "Type": (r["study_type"] or "—").replace("_", " ").replace("systematic or narrative ", "")
-                                                .replace(" or questionnaire", "").replace(" or lab", ""),
-                "Wiki": r["wiki_items"], "Evid.": r["evidence"], "Quoted": r["quoted"],
-                "Entities": r["entities"], "Gaps": r["gaps"], "Props": r["proposals"],
-                "OK": "✅" if r["status"] == "ok" else "⚠️ " + "; ".join(r["problems"]),
-            } for r in _cov]), hide_index=True)
-            st.caption("Wiki = facts compiled from the paper · Evid. = evidence items · Quoted = items with a verified "
-                       "quote and page · Entities = knowledge-graph entities · Gaps / Props = gaps and proposals "
-                       "that rest on the paper.")
-
-    st.markdown("")
-
-    tab1,tab2,tab3,tab4,tab5,tab6,tab7,tab8 = st.tabs([
-        "📄 Wiki Pages",
-        "📚 Reference Corpus",
-        "🕸️ Knowledge Graph",
-        "🔍 Research Gaps",
-        "💡 Proposals",
-        "📊 Computational Lab",
-        "🔎 Pipeline Trace",
-        "📦 Export",
-    ])
+    if _tab == "Evidence":
+        _render_evidence(res)
 
     # ── Tab 1: Wiki Pages ──────────────────────────────────────────────────────
-    with tab1:
+    if _tab == "Wiki":
         st.markdown("### Compiled Wiki Pages")
+        _wiki_evidence = evidence_rows(res)
         for i, paper_res in enumerate(res.get("papers",[])):
             page  = paper_res.get("wiki", {})
             title = page.get("title", paper_res.get("filename", f"Paper {i+1}"))
@@ -1774,19 +1858,23 @@ if st.session_state.results:
                     f'<span style="font-weight:700;color:#004b93;">{html.escape(str(title))}</span>',
                     unsafe_allow_html=True,
                 )
+                _ev = [r for r in _wiki_evidence if r["paper"] == paper_res.get("filename")]
+                _stype = (res.get("paper_profiles") or {}).get(paper_res.get("filename"), {}).get("study_type")
+                if _stype:
+                    st.caption(f"Study type: {study_type_label(_stype)} · {len(_ev)} evidence item(s)")
                 c1,c2 = st.columns(2)
                 with c1:
                     _section_label("Contributions")
-                    for c in page.get("contributions",[])[:5]: _item(f"• {c}")
+                    for c in page.get("contributions",[])[:5]: _fact(c, _ev)
                     st.markdown("")
                     _section_label("Methods")
-                    for m in page.get("methods",[])[:5]: _item(f"• {m}")
+                    for m in page.get("methods",[])[:5]: _fact(m, _ev)
                 with c2:
                     _section_label("Limitations ⚠️")
-                    for lim in page.get("limitations",[])[:4]: _item(f"• {lim}","#c81e1e")
+                    for lim in page.get("limitations",[])[:4]: _fact(lim, _ev, "#c81e1e")
                     st.markdown("")
                     _section_label("Future Work 🔭")
-                    for fw in page.get("future_work",[])[:4]: _item(f"• {fw}","#087f5b")
+                    for fw in page.get("future_work",[])[:4]: _fact(fw, _ev, "#087f5b")
                 tree_sum = paper_res.get("tree_summary","")
                 if tree_sum:
                     with st.expander("🌲 PageIndex Tree"):
@@ -1811,7 +1899,7 @@ if st.session_state.results:
                 ), unsafe_allow_html=True)
 
     # ── Tab 2: Reference Corpus ────────────────────────────────────────────────
-    with tab2:
+    if _tab == "References":
         st.markdown("### Reference Corpus")
         if ref_diagnostics:
             d1,d2,d3,d4 = st.columns(4)
@@ -1960,7 +2048,7 @@ if st.session_state.results:
                     _render_ref(ref, idx=i)
 
     # ── Tab 3: Knowledge Graph ─────────────────────────────────────────────────
-    with tab3:
+    if _tab == "Graph":
         st.markdown("### Knowledge Graph (LazyGraphRAG)")
         stats = graph.get("stats",{})
         graph_diag = graph.get("diagnostics", {})
@@ -2097,7 +2185,7 @@ if st.session_state.results:
                     unsafe_allow_html=True)
 
     # ── Tab 4: Research Gaps ───────────────────────────────────────────────────
-    with tab4:
+    if _tab == "Gaps":
         st.markdown("### Identified Research Gaps")
         open_n    = sum(1 for g in gaps if g.get("validation_status")=="open")
         partial_n = sum(1 for g in gaps if g.get("validation_status")=="partial")
@@ -2219,7 +2307,7 @@ if st.session_state.results:
                     _item(f"{g.get('title', 'Untitled')}: {g.get('description', '')}")
 
     # ── Tab 5: Proposals ───────────────────────────────────────────────────────
-    with tab5:
+    if _tab == "Proposals":
         st.markdown("### Research Proposals")
         _open_gaps = [g for g in res.get("gaps", []) if g.get("validation_status") in ("open", "partial")]
         if not proposals and _open_gaps:
@@ -2282,7 +2370,7 @@ if st.session_state.results:
                     for src in proposal.get("builds_on",[]): _item(f"📎 {src}")
 
     # ── Tab 6: Computational Lab ───────────────────────────────────────────────
-    with tab6:
+    if _tab == "Lab":
         st.markdown("### 📊 Computational Lab")
         st.markdown(
             '<div style="font-size:0.82rem;color:#55708f;margin-bottom:1.5rem;">'
@@ -2603,7 +2691,7 @@ if st.session_state.results:
                                mime="application/zip")
 
     # ── Tab 7: Pipeline Trace ──────────────────────────────────────────────────
-    with tab7:
+    if _tab == "Trace":
         st.markdown("### 🔎 Pipeline Trace — Explainability View")
         trace = saved_trace(res, st.session_state.pipeline_trace)
         _ts = trace_summary(res, get_run_manifest(st.session_state.current_run_id)
@@ -2646,7 +2734,7 @@ if st.session_state.results:
             st.code(GAP_DETECTION_PROMPT, language=None)
 
     # ── Tab 8: Export ──────────────────────────────────────────────────────────
-    with tab8:
+    if _tab == "Export":
         st.markdown("### Export Results")
         st.markdown(
             '<div class="stage-card"><div class="stage-title">Polished Final Report</div>'
