@@ -1,147 +1,129 @@
 """
-Tests for Clinova Phase 1 Story 1.1.1a/1.1.2: pipeline/docling_parser.py
-checks the docling_extractions cache before running a real conversion, and
-saves a genuine result after one. Docling conversion itself is mocked --
-it is measured at ~1.1GB RSS / ~86s/paper on CPU
-(evals/benchmarks/baseline/docling-resource-measurement.md), which is why
-caching is a binding requirement this test suite must enforce, not just
-document.
+Tests for pipeline/docling_parser.py (Clinova Phase 1 Story 1.1.1a/1.1.2,
+engine swapped Docling -> PyMuPDF).
+
+Cache behaviour is still enforced (content-addressed, stage-versioned, a
+cache-write failure never discards a fresh result). The extraction itself is
+now tested against REAL PDFs generated in-process with PyMuPDF -- no mocks of
+the parser engine -- so heading/header/table/page-number logic is exercised
+end to end.
 """
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+try:
+    import pymupdf
+except ImportError:
+    import fitz as pymupdf
+
 from pipeline.docling_parser import extract_with_docling, DOCLING_STAGE_VERSION
 
+BODY = "This is a body paragraph that describes the experimental setup in plain words."
 
-class DoclingCacheTests(unittest.TestCase):
+
+def _make_pdf(path: str, pages: int = 3, with_table: bool = False) -> None:
+    doc = pymupdf.open()
+    for i in range(1, pages + 1):
+        page = doc.new_page()
+        page.insert_text((72, 30), "Journal of Testing 2026", fontsize=9)           # running header
+        page.insert_text((72, 100), "Methods" if i == 2 else "Introduction", fontsize=18)
+        page.insert_text((72, 140), BODY + f" (page {i})", fontsize=11)
+        page.insert_text((72, 160), BODY, fontsize=11)
+        page.insert_text((300, 820), str(i), fontsize=9)                              # page number
+        if with_table and i == 1:
+            x0, y0, cw, rh = 72, 300, 100, 24
+            for r in range(4):
+                page.draw_line((x0, y0 + r * rh), (x0 + 3 * cw, y0 + r * rh))
+            for c in range(4):
+                page.draw_line((x0 + c * cw, y0), (x0 + c * cw, y0 + 3 * rh))
+            for r in range(3):
+                for c in range(3):
+                    page.insert_text((x0 + c * cw + 5, y0 + r * rh + 16), f"r{r}c{c}", fontsize=10)
+    doc.save(path)
+    doc.close()
+
+
+class StructuralParserTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
-        self.tmp.write(b"%PDF-1.4 fake content for hashing purposes")
         self.tmp.close()
 
     def tearDown(self):
         Path(self.tmp.name).unlink(missing_ok=True)
 
-    @patch("pipeline.docling_parser.get_cached_docling_extraction")
-    def test_cache_hit_never_imports_or_runs_docling(self, mock_get_cached):
-        mock_get_cached.return_value = {
-            "filename": "p.pdf", "source": "docling", "full_text": "cached text",
-            "char_count": 11, "tables": [],
-        }
+    def _run(self, **make_kwargs):
+        _make_pdf(self.tmp.name, **make_kwargs)
+        with patch("pipeline.docling_parser.get_cached_docling_extraction", return_value=None), \
+             patch("pipeline.docling_parser.save_cached_docling_extraction") as save:
+            return extract_with_docling(self.tmp.name, "p.pdf"), save
 
-        with patch.dict("sys.modules", {"docling.document_converter": MagicMock()}):
+    def test_labels_and_real_page_numbers(self):
+        result, save = self._run()
+        segs = result["text_segments"]
+
+        headings = [s for s in segs if s["label"] == "section_header"]
+        self.assertEqual([(h["text"], h["page"]) for h in headings],
+                         [("Introduction", 1), ("Methods", 2), ("Introduction", 3)])
+
+        self.assertTrue(any(s["label"] == "page_header" and s["page"] == 2 for s in segs))
+        self.assertEqual(sorted(s["page"] for s in segs if s["label"] == "page_number"), [1, 2, 3])
+
+        body = [s for s in segs if s["label"] == "text"]
+        self.assertTrue(body)
+        self.assertTrue(all(BODY[:30] in s["text"] for s in body))
+        self.assertIn("(page 2)", next(s["text"] for s in body if s["page"] == 2 and "(page" in s["text"]))
+        save.assert_called_once()
+
+    def test_full_text_marks_headings_and_excludes_running_headers(self):
+        result, _ = self._run()
+        self.assertIn("## Methods", result["full_text"])
+        self.assertNotIn("Journal of Testing", result["full_text"])
+        self.assertEqual(result["char_count"], len(result["full_text"]))
+        self.assertEqual(result["source"], "docling")
+        self.assertFalse(result["from_cache"])
+
+    def test_tables_extracted_and_cells_not_duplicated_as_prose(self):
+        result, _ = self._run(with_table=True)
+        self.assertEqual(len(result["tables"]), 1)
+        t = result["tables"][0]
+        self.assertEqual((t["page"], t["rows"], t["cols"]), (1, 3, 3))
+        self.assertIn("r1c1", t["content"])
+        self.assertFalse(any("r1c1" in s["text"] for s in result["text_segments"]))
+
+    def test_cache_hit_skips_extraction(self):
+        _make_pdf(self.tmp.name)
+        cached = {"filename": "p.pdf", "source": "docling", "full_text": "cached text",
+                  "char_count": 11, "tables": []}
+        with patch("pipeline.docling_parser.get_cached_docling_extraction", return_value=cached), \
+             patch("pipeline.docling_parser.pymupdf.open") as opener:
             result = extract_with_docling(self.tmp.name, "p.pdf")
-
         self.assertTrue(result["from_cache"])
         self.assertEqual(result["full_text"], "cached text")
+        opener.assert_not_called()
 
-    @patch("pipeline.docling_parser.save_cached_docling_extraction")
-    @patch("pipeline.docling_parser.get_cached_docling_extraction")
-    def test_cache_miss_runs_conversion_and_saves_result(self, mock_get_cached, mock_save_cached):
-        mock_get_cached.return_value = None
-
-        fake_doc = MagicMock()
-        fake_doc.export_to_markdown.return_value = "extracted markdown text"
-        fake_doc.tables = []
-        fake_doc.texts = []
-        fake_converter = MagicMock()
-        fake_converter.convert.return_value = MagicMock(document=fake_doc)
-
-        fake_module = MagicMock()
-        fake_module.DocumentConverter.return_value = fake_converter
-
-        with patch.dict("sys.modules", {"docling.document_converter": fake_module}):
-            result = extract_with_docling(self.tmp.name, "p.pdf")
-
-        self.assertFalse(result["from_cache"])
-        self.assertEqual(result["full_text"], "extracted markdown text")
-        self.assertEqual(result["char_count"], len("extracted markdown text"))
-        self.assertEqual(result["text_segments"], [])
-        mock_save_cached.assert_called_once()
-        # cache_key format: content_hash:none:stage_version (domain-invariant, AD-3)
-        saved_cache_key = mock_save_cached.call_args[0][0]
-        self.assertTrue(saved_cache_key.endswith(f":none:{DOCLING_STAGE_VERSION}"))
-
-    @patch("pipeline.docling_parser.save_cached_docling_extraction")
-    @patch("pipeline.docling_parser.get_cached_docling_extraction")
-    def test_same_file_content_produces_same_cache_key(self, mock_get_cached, mock_save_cached):
-        mock_get_cached.return_value = None
-        fake_doc = MagicMock()
-        fake_doc.export_to_markdown.return_value = "text"
-        fake_doc.tables = []
-        fake_doc.texts = []
-        fake_module = MagicMock()
-        fake_module.DocumentConverter.return_value.convert.return_value = MagicMock(document=fake_doc)
-
-        with patch.dict("sys.modules", {"docling.document_converter": fake_module}):
+    def test_same_content_same_cache_key_and_versioned(self):
+        _make_pdf(self.tmp.name)
+        with patch("pipeline.docling_parser.get_cached_docling_extraction", return_value=None), \
+             patch("pipeline.docling_parser.save_cached_docling_extraction") as save:
             extract_with_docling(self.tmp.name, "p.pdf")
-            extract_with_docling(self.tmp.name, "p_renamed.pdf")  # same bytes, different filename
+            extract_with_docling(self.tmp.name, "p_renamed.pdf")
+        k1, k2 = (c[0][0] for c in save.call_args_list)
+        self.assertEqual(k1, k2)
+        self.assertTrue(k1.endswith(f":none:{DOCLING_STAGE_VERSION}"))
+        self.assertGreaterEqual(DOCLING_STAGE_VERSION, 3)  # v2 rows hold Docling output
 
-        key1 = mock_save_cached.call_args_list[0][0][0]
-        key2 = mock_save_cached.call_args_list[1][0][0]
-        self.assertEqual(key1, key2)  # content-addressed, not filename-addressed
-
-    @patch("pipeline.docling_parser.save_cached_docling_extraction")
-    @patch("pipeline.docling_parser.get_cached_docling_extraction")
-    def test_text_segments_capture_real_page_and_label(self, mock_get_cached, mock_save_cached):
-        mock_get_cached.return_value = None
-
-        def _fake_text_item(text, page, label):
-            item = MagicMock()
-            item.text = text
-            item.label = label
-            prov = MagicMock()
-            prov.page_no = page
-            item.prov = [prov]
-            return item
-
-        fake_doc = MagicMock()
-        fake_doc.export_to_markdown.return_value = "full markdown"
-        fake_doc.tables = []
-        fake_doc.texts = [
-            _fake_text_item("www.nature.com/scientificreports", 1, "page_header"),
-            _fake_text_item("Neurodiversity and mental health in adulthood", 1, "section_header"),
-            _fake_text_item("   ", 2, "text"),  # whitespace-only -- must be filtered
-            _fake_text_item("A real body paragraph.", 2, "text"),
-        ]
-        fake_module = MagicMock()
-        fake_module.DocumentConverter.return_value.convert.return_value = MagicMock(document=fake_doc)
-
-        with patch.dict("sys.modules", {"docling.document_converter": fake_module}):
+    def test_cache_write_failure_does_not_discard_result(self):
+        _make_pdf(self.tmp.name)
+        with patch("pipeline.docling_parser.get_cached_docling_extraction", return_value=None), \
+             patch("pipeline.docling_parser.save_cached_docling_extraction", side_effect=Exception("db locked")):
             result = extract_with_docling(self.tmp.name, "p.pdf")
-
-        segments = result["text_segments"]
-        self.assertEqual(len(segments), 3)  # whitespace-only segment dropped
-        self.assertEqual(segments[0], {"text": "www.nature.com/scientificreports", "page": 1, "label": "page_header"})
-        self.assertEqual(segments[2], {"text": "A real body paragraph.", "page": 2, "label": "text"})
-
-    @patch("pipeline.docling_parser.save_cached_docling_extraction")
-    @patch("pipeline.docling_parser.get_cached_docling_extraction")
-    def test_cache_write_failure_does_not_discard_conversion_result(self, mock_get_cached, mock_save_cached):
-        # A docling conversion takes ~90s on this machine -- a cache-write
-        # error after all that work must not throw away the real result
-        # (mirrors pipeline/reference_extractor.py's save guard).
-        mock_get_cached.return_value = None
-        mock_save_cached.side_effect = Exception("db locked")
-
-        fake_doc = MagicMock()
-        fake_doc.export_to_markdown.return_value = "extracted markdown text"
-        fake_doc.tables = []
-        fake_doc.texts = []
-        fake_module = MagicMock()
-        fake_module.DocumentConverter.return_value = fake_converter = MagicMock()
-        fake_converter.convert.return_value = MagicMock(document=fake_doc)
-
-        with patch.dict("sys.modules", {"docling.document_converter": fake_module}):
-            result = extract_with_docling(self.tmp.name, "p.pdf")
-
         self.assertFalse(result["from_cache"])
-        self.assertEqual(result["full_text"], "extracted markdown text")
+        self.assertIn("Introduction", result["full_text"])
 
 
 if __name__ == "__main__":
