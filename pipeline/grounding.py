@@ -44,19 +44,74 @@ def unsupported_numbers(text: str, known: set) -> list:
     return out
 
 
-def annotate_claims(items: list, fields: tuple, known: set) -> int:
-    """Adds `unsupported_numbers` (a list) to every dict in `items` whose `fields` text contains
-    ungrounded effect-size numbers, and lowers a "high" confidence to "medium" for them.
-    Returns how many items were flagged."""
+# ── named entities ────────────────────────────────────────────────────────────────────────
+# A claim can name a gene, drug or marker that no paper mentions (a model's own knowledge slipping in
+# as if it were a finding). Two shapes are checked, because they are what such names look like:
+# acronyms and gene symbols (CFTR, IL-8, FEV1) and drug-style names (ivacaftor, adalimumab).
+_ACRONYM_RE = re.compile(r"\b[A-Z][A-Z0-9]{1,}(?:-[A-Z0-9]+)?\b")
+_DRUG_RE = re.compile(r"\b[a-z]{3,}(?:mab|nib|caftor|cept|tide|vir|stat|olol|pril|sartan|azole|mycin|cillin|gliptin|glutide)\b")
+_COMMON_ACRONYMS = frozenset({
+    "DNA", "RNA", "MRNA", "PCR", "ICU", "USA", "UK", "EU", "WHO", "FDA", "EMA", "NHS", "CI", "OR", "RR", "HR", "SD",
+    "AI", "ML", "CT", "MRI", "ECG", "BMI", "II", "III", "IV", "PDF", "AND", "NOT", "THE", "FOR", "ALL", "NO", "VS",
+    "IL", "TNF", "ID", "OK", "PH", "UV", "CO2", "O2", "ATP", "GDP", "QOL",
+})
+_WORD_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+
+
+def corpus_words(*sources) -> set:
+    """Every lower-case word (and hyphenated term) in the given sources: what the papers actually say."""
+    text = " ".join(s if isinstance(s, str) else json.dumps(s, ensure_ascii=False, default=str) for s in sources)
+    low = text.lower()
+    words = set(_WORD_RE.findall(low))
+    words |= {w.replace("-", "") for w in words if "-" in w}
+    return words
+
+
+def entity_candidates(text: str) -> list:
+    """Acronym-style and drug-style names in `text`, as written, in order, without repeats."""
+    out = []
+    for m in _ACRONYM_RE.finditer(text or ""):
+        tok = m.group(0)
+        if tok.upper() in _COMMON_ACRONYMS or (len(tok) < 3 and not any(c.isdigit() for c in tok)):
+            continue
+        if tok not in out:
+            out.append(tok)
+    for m in _DRUG_RE.finditer(text or ""):
+        if m.group(0) not in out:
+            out.append(m.group(0))
+    return out
+
+
+def unsupported_entities(text: str, known_words: set) -> list:
+    """Named entities in `text` that appear in none of the papers (compared case-insensitively, hyphens ignored)."""
+    out = []
+    for ent in entity_candidates(text):
+        low = ent.lower()
+        if low not in known_words and low.replace("-", "") not in known_words:
+            out.append(ent)
+    return out
+
+
+def annotate_claims(items: list, fields: tuple, known: set, known_words: set | None = None) -> int:
+    """Adds `unsupported_numbers` to every dict in `items` whose `fields` text contains ungrounded
+    effect-size numbers and, when `known_words` is given, `unsupported_entities` for named entities
+    no paper mentions; lowers a "high" confidence to "medium" for either. Returns how many were flagged."""
     flagged = 0
     for it in items or []:
         if not isinstance(it, dict):
             continue
-        found = []
+        found, ents = [], []
         for f in fields:
-            found += unsupported_numbers(str(it.get(f) or ""), known)
+            text = str(it.get(f) or "")
+            found += unsupported_numbers(text, known)
+            if known_words is not None:
+                ents += unsupported_entities(text, known_words)
         if found:
             it["unsupported_numbers"] = sorted(set(found))
+        if ents:
+            it["unsupported_entities"] = sorted(set(ents))
+        if found or ents:
+            it["speculative"] = True            # rests on something the papers do not contain
             if it.get("confidence") == "high":
                 it["confidence"] = "medium"
             flagged += 1

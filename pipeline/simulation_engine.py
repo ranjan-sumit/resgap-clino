@@ -12,6 +12,7 @@ Algorithms:
 Auto-selector runs ALL applicable algorithms based on available data.
 """
 import numpy as np
+from pipeline.param_quality import is_modelling_input
 from pipeline.pooling import pool_risk_ratios, sample_pooled_risk
 
 # NEVER set np.random.seed() at module level — it runs once at import and
@@ -25,6 +26,90 @@ N_YEARS = 10
 def _seed_rng() -> None:
     """Reset numpy random state before each simulation run for reproducibility."""
     np.random.seed(GLOBAL_SEED)
+
+
+
+# ── Input requirements (audit) ─────────────────────────────────────────────────────────────────
+# Each algorithm was checked for what it really needs. Before this audit several ran on whatever
+# was at hand and printed numbers that looked like findings:
+#   Monte Carlo     fell back to the first five parameters of ANY kind (mixing percentages and ratios)
+#   Markov chain    used a fixed generic five-state matrix; a paper's parameters only replace a cell when
+#                   the parameter's name happens to contain two state names, so the output was a demo
+#   Survival        fell back to arbitrary parameters, and with hazard ratios alone started from 100%
+#   Conditional risk invented a 15% baseline when no prevalence was found
+#   Bootstrap       resampled values of different units together (a prevalence, an odds ratio, a cost)
+# Now each refuses, with a reason, unless its real inputs are present.
+_OUTCOME_CATS = ("prevalence", "incidence", "proportion", "rate", "survival")
+_STATE_NAMES = ("healthy", "at_risk", "diseased", "recovered", "death")
+MIN_BOOTSTRAP_VALUES = 5
+
+
+def _numeric(params: list) -> list:
+    return [p for p in params if isinstance(p.get("value"), (int, float)) and not isinstance(p.get("value"), bool)]
+
+
+def _markov_cells(params: list) -> int:
+    """How many transition cells the parameters would actually set (a name must mention two states)."""
+    n = 0
+    for p in _by_cat(params, "transition_probability"):
+        name = str(p.get("name", "")).lower().replace(" ", "_")
+        n += 1 if sum(1 for st in _STATE_NAMES if st in name) >= 2 else 0
+    return n
+
+
+def bootstrap_group(params: list) -> list:
+    """The largest set of parameters that share a category AND a unit (the only values it is
+    meaningful to average together)."""
+    groups: dict = {}
+    for p in _numeric(params):
+        groups.setdefault((p.get("category"), p.get("unit")), []).append(p)
+    return max(groups.values(), key=len) if groups else []
+
+
+def check_inputs(model_key: str, params: list) -> tuple[bool, str]:
+    """(ok, reason_if_not): does this algorithm have the inputs it is built for?"""
+    if model_key == "tornado":
+        n = sum(1 for p in _numeric(params) if p["value"] != 0)
+        return (n >= 1, "" if n >= 1 else "no non-zero numeric parameter to vary")
+    if model_key == "monte_carlo":
+        n = len([p for p in _by_cat(_numeric(params), *_OUTCOME_CATS)])
+        return (n >= 2, "" if n >= 2 else f"needs at least 2 outcome parameters (prevalence, incidence, "
+                                          f"proportion, rate or survival); found {n}")
+    if model_key == "markov_chain":
+        n = _markov_cells(params)
+        return (n >= 2, "" if n >= 2 else f"needs at least 2 transition probabilities between named disease "
+                                          f"states; found {n}. Without them it would show a generic default matrix "
+                                          "that says nothing about these papers")
+    if model_key == "survival_analysis":
+        n = len([p for p in _by_cat(_numeric(params), "survival") if 0 < p["value"] <= 100])
+        return (n >= 1, "" if n >= 1 else "needs a survival probability (0-100%) from a paper; "
+                                          "hazard ratios alone have no baseline to scale")
+    if model_key == "bayesian_network":
+        prev = [p for p in _by_cat(_numeric(params), "prevalence", "incidence")]
+        risk = _by_cat(_numeric(params), "odds_ratio", "relative_risk")
+        ok = bool(prev) and bool(risk)
+        return (ok, "" if ok else "needs a baseline prevalence or incidence AND at least one odds ratio or "
+                                  "relative risk; the model would otherwise invent a 15% baseline")
+    if model_key == "bootstrap":
+        n = len(bootstrap_group(params))
+        return (n >= MIN_BOOTSTRAP_VALUES,
+                "" if n >= MIN_BOOTSTRAP_VALUES else f"needs at least {MIN_BOOTSTRAP_VALUES} values of one "
+                                                      f"category and unit; the largest such group has {n}")
+    if model_key == "hybrid":
+        ok1, r1 = check_inputs("monte_carlo", params)
+        ok2, r2 = check_inputs("markov_chain", params)
+        return (ok1 and ok2, "" if ok1 and ok2 else "; ".join(r for r in (r1, r2) if r))
+    return True, ""
+
+
+def _unit_to_probability(p: dict) -> float:
+    """A prevalence/incidence value as a probability, honouring its unit."""
+    v, unit = float(p.get("value", 0)), str(p.get("unit") or "")
+    if unit == "per_1000":
+        return v / 1000.0
+    if unit == "percent" or v > 1:
+        return v / 100.0
+    return v
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
@@ -41,8 +126,8 @@ def filter_confident_params(params: list) -> tuple[list, list]:
     statistic. Returns (usable, excluded) -- excluded is surfaced in the
     results dict, never silently dropped or silently included."""
     params   = list(params)  # guard against a one-shot iterator being consumed twice
-    usable   = [p for p in params if p.get("confidence") in ("medium", "high")]
-    excluded = [p for p in params if p.get("confidence") not in ("medium", "high")]
+    usable   = [p for p in params if p.get("confidence") in ("medium", "high") and is_modelling_input(p)]
+    excluded = [p for p in params if not (p.get("confidence") in ("medium", "high") and is_modelling_input(p))]
     return usable, excluded
 
 
@@ -103,9 +188,6 @@ def run_monte_carlo(params: list, scenarios: list) -> dict:
     outcome_p  = _by_cat(params, "prevalence", "incidence", "proportion", "rate", "survival")
     risk_p     = _by_cat(params, "odds_ratio", "relative_risk", "hazard_ratio")
     efficacy_p = _by_cat(params, "efficacy")
-
-    if not outcome_p:
-        outcome_p = [p for p in params if p.get("value") is not None][:5]
 
     sensitivity = {}
     scenario_results = {}
@@ -286,9 +368,6 @@ def run_survival_analysis(params: list, scenarios: list) -> dict:
     _seed_rng()   # B1 fix
     survival_p = _by_cat(params, "survival")
     hazard_p   = _by_cat(params, "hazard_ratio")
-    if not survival_p and not hazard_p:
-        survival_p = [p for p in params if p.get("value") is not None][:3]
-
     time_points = list(range(0, N_YEARS + 1))
     scenario_results = {}
 
@@ -357,10 +436,7 @@ def run_bayesian_network(params: list, scenarios: list) -> dict:
     risk_p   = _by_cat(params, "odds_ratio", "relative_risk")
     prev_p   = _by_cat(params, "prevalence", "incidence")
 
-    if prev_p:
-        baseline = min(max(float(prev_p[0].get("value", 15)) / 100.0, 1e-6), 1 - 1e-6)
-    else:
-        baseline = 0.15
+    baseline = min(max(_unit_to_probability(prev_p[0]), 1e-6), 1 - 1e-6) if prev_p else 0.15   # check_inputs() requires prev_p
     scenario_results = {}
 
     for scenario in scenarios:
@@ -414,7 +490,7 @@ def run_bayesian_network(params: list, scenarios: list) -> dict:
 
 def run_bootstrap(params: list, scenarios: list, n_boot: int = 5000) -> dict:
     _seed_rng()   # B1 fix
-    numeric = [p for p in params if p.get("value") is not None]
+    numeric = bootstrap_group(params)         # values of one category and unit only
     if not numeric:
         return {
             "model_used": "Bootstrap Resampling",
@@ -496,8 +572,9 @@ def run_tornado(params: list, scenarios: list) -> dict:
         # <float or null> -- an explicit None must fall back like a missing key.
         lo = float(p.get("ci_lower") or central * 0.80)
         hi = float(p.get("ci_upper") or central * 1.20)
+        from_ci = p.get("ci_lower") is not None and p.get("ci_upper") is not None
         if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
-            lo, hi = central * 0.80, central * 1.20
+            lo, hi, from_ci = central * 0.80, central * 1.20, False
 
         # B4 FIX: swing expressed as % of central value (normalised, unit-free)
         swing_lo  = abs(central - lo) / abs(central) * 100  # % below central
@@ -516,6 +593,7 @@ def run_tornado(params: list, scenarios: list) -> dict:
             "swing_total":  round(swing_tot, 2),
             "importance":   round(swing_tot / 100, 4),   # normalised 0-1
             "source_paper": p.get("source_paper", ""),
+            "range_source": "the paper's confidence interval" if from_ci else "assumed ±20% (no interval reported)",
         })
 
     swings.sort(key=lambda x: x["swing_total"], reverse=True)
@@ -622,6 +700,11 @@ def resolve_models_to_run(params: list, council_decision: dict, sufficiency: dic
     return models_to_run
 
 
+def runnable_models(params: list, council_decision: dict, sufficiency: dict) -> list:
+    """What will really run: the selected algorithms minus those whose inputs are missing."""
+    return [m for m in resolve_models_to_run(params, council_decision, sufficiency) if check_inputs(m, params)[0]]
+
+
 def run_all_applicable(params: list, council_decision: dict, sufficiency: dict) -> dict:
     """
     Run all algorithms the data supports.
@@ -646,15 +729,21 @@ def run_all_applicable(params: list, council_decision: dict, sufficiency: dict) 
     all_headlines = {}
     primary_result = None
 
+    skipped = {}
     for model_key in models_to_run:
         runner = runners.get(model_key)
         if not runner:
+            continue
+        ok, why = check_inputs(model_key, params)
+        if not ok:
+            skipped[model_key] = why
+            all_results[model_key] = {"model_used": model_key, "skipped": why}
             continue
         try:
             result = runner()
             all_results[model_key]   = result
             all_headlines.update(result.get("headline_numbers", {}))
-            if primary_result is None:
+            if primary_result is None and result.get("scenario_results"):
                 primary_result = result
         except Exception as e:
             all_results[model_key] = {"model_used": model_key, "error": str(e)}
@@ -682,8 +771,9 @@ def run_all_applicable(params: list, council_decision: dict, sufficiency: dict) 
     combined_sens = sorted(all_sens.items(), key=lambda x: x[1], reverse=True)
 
     return {
-        "model_used":         f"Multi-Algorithm ({', '.join(all_results.keys())})",
-        "models_run":         list(all_results.keys()),
+        "model_used":         f"Multi-Algorithm ({', '.join(k for k in all_results if k not in skipped)})",
+        "models_run":         [k for k in all_results if k not in skipped],
+        "models_skipped":     skipped,
         "scenarios_run":      scenarios,
         "algorithm_results":  all_results,
         "headline_numbers":   all_headlines,
@@ -692,8 +782,8 @@ def run_all_applicable(params: list, council_decision: dict, sufficiency: dict) 
         ],
         "scenario_results":   primary_result.get("scenario_results", {}) if primary_result else {},
         "summary": {
-            "models_run":    list(all_results.keys()),
-            "total_results": len(all_results),
+            "models_run":    [k for k in all_results if k not in skipped],
+            "total_results": len(all_results) - len(skipped),
         },
     }
 

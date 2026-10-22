@@ -83,6 +83,11 @@ def _group_items(items: list, n_runs: int, threshold: float = 0.30) -> list:
                 "variants":       [text],
             })
 
+    # A group's frequency is the number of DIFFERENT runs that said it: one run repeating itself is
+    # not agreement ("3/2 runs" used to be possible).
+    for g in groups:
+        g["count"] = len(set(g["runs"]))
+
     # Sort: consensus first, then by count, then alphabetically
     groups.sort(key=lambda g: (-g["count"], g["representative"]))
 
@@ -93,6 +98,23 @@ def _group_items(items: list, n_runs: int, threshold: float = 0.30) -> list:
         g["frequency"]        = f"{g['count']}/{n_runs} runs"
 
     return groups
+
+
+CROSS_LIST_DUPLICATE = 0.5
+
+
+def drop_cross_list_duplicates(primary: list, secondary: list, threshold: float = CROSS_LIST_DUPLICATE) -> tuple[list, int]:
+    """Groups in `secondary` that restate a group already in `primary` (the same insight filed under
+    both clinical and research) are folded into it. Returns (remaining secondary groups, folded count)."""
+    kept, folded = [], 0
+    for g in secondary:
+        twin = next((p for p in primary if _similarity(g["representative"], p["representative"]) >= threshold), None)
+        if twin is None:
+            kept.append(g)
+            continue
+        folded += 1
+        twin.setdefault("also_in_research", True)
+    return kept, folded
 
 
 def _group_novel_findings(findings: list, n_runs: int) -> list:
@@ -248,6 +270,8 @@ def merge_council_runs(runs: list) -> dict:
     limits_groups   = _group_items(raw_limits, n_runs)
     uncert_groups   = _group_items(raw_uncerts, n_runs)
 
+    research_groups, duplicates_folded = drop_cross_list_duplicates(clinical_groups, research_groups)
+
     # Build summary stats
     consensus_count = sum(1 for g in novel_groups if g["confidence"] == "Consensus")
     unique_count    = sum(1 for g in novel_groups if g["confidence"] == "Unique")
@@ -283,5 +307,6 @@ def merge_council_runs(runs: list) -> dict:
             "total_clinical_insights":  len(clinical_groups),
             "total_research_insights":  len(research_groups),
             "total_next_steps":         len(steps_groups),
+            "duplicate_insights_merged": duplicates_folded,
         },
     }

@@ -187,6 +187,7 @@ for _k, _v in _DEFAULTS.items():
 from ui.viewmodels import (keys_line, off_note, overview, run_header, saved_trace, trace_summary,
                            trace_rows, stage_status)
 from ui.compat import plotly_full_width, table_full_width
+from ui.lab_view import kind_badge, lab_verdict, parameters_by_paper
 from ui.graph_view import filter_relations, grounding_summary, orphan_explanation, relation_rows
 from ui.gaps_view import (SORTS as GAP_SORTS, compare_proposals, filter_gaps, gap_rows, proposal_rows,
                           sort_gaps)
@@ -2554,6 +2555,24 @@ if st.session_state.results:
 
             st.markdown("---")
 
+            # The verdict comes first: did the Lab simulate anything, and why (not)?
+            _v = lab_verdict(cr)
+            _vc = {"simulated": "#087f5b", "skipped": "#b7791f"}[_v["state"]]
+            st.markdown(
+                f'<div style="border:1px solid {_vc};background:{_vc}12;border-radius:8px;padding:0.9rem 1.2rem;'
+                f'margin-bottom:1rem;"><div style="font-weight:700;color:{_vc};">'
+                f'{"Simulated" if _v["state"] == "simulated" else "Not simulated"}</div>'
+                f'<div style="color:#0b1f3a;">{html.escape(_v["headline"])}</div></div>', unsafe_allow_html=True)
+            for _why in _v["reasons"]:
+                st.caption(f"• {_why}")
+            if _v["algorithms"]:
+                with st.expander("Algorithms: what ran and what was refused", expanded=_v["state"] == "skipped"):
+                    for _a in _v["algorithms"]:
+                        if _a["state"] == "ran":
+                            st.markdown(f"✅ **{_a['name']}**")
+                        else:
+                            st.markdown(f"⛔ **{_a['name']}** refused: {html.escape(_a['reason'])}")
+
             # Data availability
             score      = sufficiency.get("coverage_score",0)
             sc         = "#087f5b" if score>=7 else "#b7791f" if score>=4 else "#c81e1e"
@@ -2574,18 +2593,16 @@ if st.session_state.results:
               </div>
             </div>""", unsafe_allow_html=True)
 
-            # Per-paper coverage: a paper with no stated numbers (results shown
-            # only in figures, or a narrative review) must be visible, not silent.
+            # Per-paper coverage: a paper with no stated numbers (results shown only in figures, or a
+            # narrative review) must be visible, not silent.
             _papers = res.get("papers", [])
             if _papers:
-                _per = {}
-                for _p in params:
-                    if not _p.get("is_derived") and _p.get("paper_index") is not None:
-                        _per[_p["paper_index"]] = _per.get(_p["paper_index"], 0) + 1
-                st.caption("Parameters per paper: " + " · ".join(
-                    f"{pp.get('filename', f'Paper {i + 1}')}: {_per.get(i, 0)}"
-                    for i, pp in enumerate(_papers)))
-                _none = [pp.get("filename", f"Paper {i + 1}") for i, pp in enumerate(_papers) if not _per.get(i)]
+                import pandas as pd
+                _rows = parameters_by_paper(cr, _papers)
+                _table(pd.DataFrame([{"Paper": r["paper"][:48], "Parameters": r["total"], "Measured": r["measured"],
+                                      "Opinions": r["opinion"], "Impossible": r["flagged"]} for r in _rows]),
+                       hide_index=True)
+                _none = [r["paper"] for r in _rows if not r["total"]]
                 if _none:
                     st.caption("No parameters were found in " + ", ".join(_none) +
                                ": the paper may report its results in figures or prose rather than as stated numbers.")
@@ -2603,7 +2620,8 @@ if st.session_state.results:
                         ci = (f" (CI: {p['ci_lower']}–{p['ci_upper']})"
                               if p.get("ci_lower") is not None else "")
                         tier_t = p.get("tier",1)
-                        derived_t = " 🔀" if p.get("is_derived") else ""
+                        derived_t = (" 🔀" if p.get("is_derived") else "") + (
+                            f" · <em>{kind_badge(p)}</em>" if kind_badge(p) else "")
                         conf_c = {"high":"#087f5b","medium":"#b7791f","low":"#c81e1e"}.get(
                             p.get("confidence","medium"),"#55708f")
                         st.markdown(

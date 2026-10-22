@@ -153,7 +153,7 @@ class OrchestrationTests(unittest.TestCase):
              patch.object(run_lab, "council_select_model", side_effect=lambda *a, **k: calls.append("council") or
                           {"final_decision": {"selected_model": "m"}}), \
              patch.object(run_lab, "filter_confident_params", return_value=(params, [])), \
-             patch.object(run_lab, "resolve_models_to_run", return_value=["monte_carlo"]), \
+             patch.object(run_lab, "runnable_models", return_value=["monte_carlo"]), \
              patch.object(run_lab, "run_simulation", side_effect=lambda *a, **k: calls.append("sim") or
                           {"models_run": ["monte_carlo"], "headline_numbers": {"x": 1}}), \
              patch.object(run_lab, "run_multi_council", side_effect=lambda **k: calls.append("insights") or {"final_decision": {}}), \

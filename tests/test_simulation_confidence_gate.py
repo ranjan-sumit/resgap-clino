@@ -15,6 +15,7 @@ from pipeline.simulation_engine import (
     _sample,
     run_simulation,
     resolve_models_to_run,
+    runnable_models,
     auto_select_models,
 )
 
@@ -94,6 +95,7 @@ class RunSimulationConfidenceGateTests(unittest.TestCase):
         # ever added when risk_p is non-empty) must not appear at all.
         params_low_only = [
             _param("prev", "high", value=20.0, category="prevalence"),
+            _param("inc", "high", value=5.0, category="incidence"),
             _param("bad_or", "low", value=50.0, category="odds_ratio"),
         ]
         result_low_only = run_simulation(params_low_only, {}, {})
@@ -104,6 +106,7 @@ class RunSimulationConfidenceGateTests(unittest.TestCase):
         # risk_p is non-empty and the key must appear.
         params_high = [
             _param("prev", "high", value=20.0, category="prevalence"),
+            _param("inc", "high", value=5.0, category="incidence"),
             _param("good_or", "high", value=2.0, category="odds_ratio"),
         ]
         result_high = run_simulation(params_high, {}, {})
@@ -117,6 +120,7 @@ class RunSimulationConfidenceGateTests(unittest.TestCase):
         params = [
             _param("prev", "high", value=20.0, category="prevalence",
                    ci_lower=18.0, ci_upper=22.0),
+            _param("inc", "high", value=5.0, category="incidence"),
             _param("or1", "high", value=1.5, category="odds_ratio",
                    ci_lower=1.3, ci_upper=1.7),
             _param("or2", "high", value=4.0, category="relative_risk",
@@ -137,6 +141,7 @@ class RunSimulationConfidenceGateTests(unittest.TestCase):
         # only the risk-adjustment step should be skipped.
         params = [
             _param("prev", "high", value=20.0, category="prevalence"),
+            _param("inc", "high", value=5.0, category="incidence"),
             _param("bad_or", "high", value=-5.0, category="odds_ratio"),
         ]
         result = run_simulation(params, {}, {})
@@ -171,9 +176,12 @@ class ResolveModelsToRunConsistencyTests(unittest.TestCase):
         ]
         council_decision = {"final_decision": {"selected_model": "markov_chain"}}
         simulation_params, _ = filter_confident_params(params)
-        preview = resolve_models_to_run(simulation_params, council_decision, {})
+        # the preview lists what will REALLY run: algorithms without their inputs are refused
+        # (here: no transition probabilities for the Markov model the council picked)
+        preview = runnable_models(simulation_params, council_decision, {})
         result = run_simulation(params, council_decision, {})
         self.assertEqual(preview, result["models_run"])
+        self.assertIn("markov_chain", result["models_skipped"])
 
 
 class AutoSelectModelsOwnLogicTests(unittest.TestCase):
@@ -189,13 +197,15 @@ class AutoSelectModelsOwnLogicTests(unittest.TestCase):
         # any council override.
         self.assertEqual(auto_select_models([], {}), ["tornado", "bootstrap"])
 
-    def test_all_low_confidence_reduces_to_tornado_and_bootstrap_with_no_forcing_override(self):
+    def test_all_low_confidence_leaves_nothing_to_run_with_no_forcing_override(self):
         params = [_param("a", "low"), _param("b", "low")]
         # selected_model maps to nothing in model_map, so no override fires --
         # this exercises auto_select_models' own decision on empty input.
         council_decision = {"final_decision": {"selected_model": "nonexistent_model"}}
         result = run_simulation(params, council_decision, {})
-        self.assertEqual(result["models_run"], ["tornado", "bootstrap"])
+        # nothing usable is left, so every algorithm is refused rather than run on nothing
+        self.assertEqual(result["models_run"], [])
+        self.assertEqual(set(result["models_skipped"]), {"tornado", "bootstrap"})
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ import io
 import logging
 from utils.azure_client import unwrap, LLMCallError
 from utils.database import compute_cache_key, get_cached_parameters, save_cached_parameters
+from pipeline.param_quality import annotate_parameters
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,7 @@ logger = logging.getLogger(__name__)
 # don't silently keep serving stale-logic results (AD-3).
 # 2: the prompt now excludes laboratory protocol settings (a real run's parameters were mostly
 # coating and staining concentrations, which no model can use).
-PARAM_STAGE_VERSION = 2
+PARAM_STAGE_VERSION = 3   # 3: parameters carry evidence_kind (measured/opinion) and sanity checks
 
 PARAM_EXTRACTION_PROMPT = """You are a clinical biostatistician extracting quantitative parameters
 from healthcare research paper summaries.
@@ -57,9 +58,13 @@ Return ONLY a JSON array:
     "confidence": "high|medium|low",
     "is_derived": false,
     "derivation_note": "null or how this was computed",
+    "evidence_kind": "measured|opinion",
     "notes": "caveats"
   }
-]"""
+]
+evidence_kind: "measured" for what a study FOUND about patients, biology or an intervention (a rate, an effect, an outcome value);
+"opinion" for what respondents, experts or participants SAID they think, prefer, know or would do (e.g. "62% of respondents agree",
+survey awareness, willingness, response rates). Opinions are kept but never used to simulate disease or survival."""
 
 CROSS_PAPER_DERIVATION_PROMPT = """You are a biostatistician computing derived parameters
 from values extracted across multiple research papers.
@@ -131,9 +136,11 @@ def _robust_parse(raw: str, expected: type = list):
     return [] if expected == list else {}
 
 
-def extract_parameters(wiki: dict, papers: list, client) -> list:
-    """Extract all quantitative parameters including linguistic conversions."""
+def extract_parameters(wiki: dict, papers: list, client, study_types: dict | None = None) -> list:
+    """Extract all quantitative parameters including linguistic conversions. `study_types` maps a
+    paper (filename or title) to its study type, so a survey paper's answers are tagged as opinions."""
     all_params = []
+    study_types = dict(study_types or {})
     wiki_pages = list(wiki.get("pages", []))
 
     # B6 FIX: zip() silently truncates to the shorter list.
@@ -225,16 +232,21 @@ def extract_parameters(wiki: dict, papers: list, client) -> list:
                 # B16 fix: never cache this path.
                 params = []
 
+        stype = study_types.get(paper.get("filename")) or study_types.get(title)
         for p in params:
             if not isinstance(p, dict):
                 continue
             p["paper_index"]  = i
             p["source_paper"] = p.get("source_paper") or title
+            p["source_file"]  = paper.get("filename", "")
             p.setdefault("is_derived", False)
             p.setdefault("derivation_note", None)
+            if stype:
+                study_types.setdefault(p["source_paper"], stype)
 
         all_params.extend(params)
 
+    annotate_parameters(all_params, study_types)
     return all_params
 
 

@@ -208,8 +208,9 @@ def generate_novel_hypotheses(
     hypotheses = _robust_parse(raw, list)
     hypotheses = hypotheses if isinstance(hypotheses, list) else []
     # Belt and braces: whatever the prompt says, flag effect sizes that no paper reports.
-    from pipeline.grounding import annotate_claims, corpus_numbers
-    annotate_claims(hypotheses, ("title", "claim"), corpus_numbers(wiki, params, fingerprints))
+    from pipeline.grounding import annotate_claims, corpus_numbers, corpus_words
+    annotate_claims(hypotheses, ("title", "claim"), corpus_numbers(wiki, params, fingerprints),
+                    known_words=corpus_words(wiki, params, fingerprints))
     return hypotheses
 
 

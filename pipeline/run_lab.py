@@ -14,14 +14,15 @@ from typing import Callable
 
 from pipeline.discovery_engine import run_discovery_engine
 from pipeline.doc_generator import build_zip
-from pipeline.grounding import annotate_claims, corpus_numbers
+from pipeline.grounding import annotate_claims, corpus_numbers, corpus_words
 from pipeline.llm_council import council_select_model
 from pipeline.multi_run import run_multi_council
 from pipeline.paper_manager import extract_tier2_parameters
 from pipeline.param_extractor import (
     check_sufficiency, derive_cross_paper_parameters, extract_parameters, params_to_csv,
 )
-from pipeline.simulation_engine import filter_confident_params, resolve_models_to_run, run_simulation
+from pipeline.param_quality import annotate_parameters, is_modelling_input
+from pipeline.simulation_engine import filter_confident_params, run_simulation, runnable_models
 
 MIN_COVERAGE_TO_SIMULATE = 4        # sufficiency coverage_score (0-10) below this: do not simulate
 MIN_USABLE_PARAMS = 3               # numeric, directly extracted, not low-confidence
@@ -35,7 +36,7 @@ def usable_parameters(params: list) -> list:
     """Parameters a simulation can legitimately start from: a number, read from a paper (not
     derived from other parameters), and not flagged low-confidence."""
     return [p for p in params
-            if not p.get("is_derived") and p.get("confidence") != "low"
+            if not p.get("is_derived") and p.get("confidence") != "low" and is_modelling_input(p)
             and isinstance(p.get("value"), (int, float)) and not isinstance(p.get("value"), bool)]
 
 
@@ -100,7 +101,13 @@ def run_computational_lab(results: dict, context: dict, client, domain_config: d
     papers_raw = [{"sections": p.get("sections", {}), "tables": p.get("tables", []), "filename": p.get("filename", "")}
                   for p in results.get("papers", [])]
     progress("Stage 8A — Extracting Tier 1 parameters…", 8)
-    t1_params = extract_parameters(wiki, papers_raw, client)
+    study_types = {}
+    for fn, prof in (results.get("paper_profiles") or {}).items():
+        study_types[fn] = (prof or {}).get("study_type")
+    for pg in wiki.get("pages", []):
+        if pg.get("source_file") in study_types and pg.get("title"):
+            study_types[pg["title"]] = study_types[pg["source_file"]]
+    t1_params = extract_parameters(wiki, papers_raw, client, study_types)
 
     t2_params = []
     tier2_refs = [r for r in ref_papers if r.get("tier") == 2 and r.get("abstract")]
@@ -109,10 +116,18 @@ def run_computational_lab(results: dict, context: dict, client, domain_config: d
         t2_params = extract_tier2_parameters(tier2_refs, client)
 
     params = t1_params + t2_params
+    annotate_parameters(params, study_types)
+    modelling = [p for p in params if is_modelling_input(p)]       # opinions and impossible values never count
     progress("Stage 8A — Deriving cross-paper values…", 18)
-    derived = derive_cross_paper_parameters(params, client)
+    derived = derive_cross_paper_parameters(modelling, client)
+    for d in derived:
+        d.setdefault("evidence_kind", "measured")
     params += derived
-    sufficiency = check_sufficiency(params, client)
+    modelling += derived
+    sufficiency = check_sufficiency(modelling, client)
+    sufficiency["opinion_excluded"] = sum(1 for p in params if p.get("evidence_kind") == "opinion")
+    sufficiency["impossible_excluded"] = sum(1 for p in params if p.get("sanity_issues"))
+    sufficiency["parameter_count"] = len(modelling)
     csv_data = params_to_csv(params)
     trace("Stage 8A — Parameters", f"{len(papers_raw)} T1 papers + {len(tier2_refs)} T2 abstracts",
           f"{len(t1_params)} T1 + {len(t2_params)} T2 + {len(derived)} derived = {len(params)} total")
@@ -128,7 +143,7 @@ def run_computational_lab(results: dict, context: dict, client, domain_config: d
         progress(f"Stage 9 — LLM Council selecting model ({len(params)} params)…", 42)
         model_council = council_select_model(params, sufficiency, context, client)
         simulation_params, _ = filter_confident_params(params)
-        models_auto = resolve_models_to_run(simulation_params, model_council, sufficiency)
+        models_auto = runnable_models(simulation_params, model_council, sufficiency)
         progress(f"Stage 10 — Running {len(models_auto)} algorithms: {', '.join(models_auto)}…", 57)
         sim_results = run_simulation(params, model_council, sufficiency)
         trace("Stage 10 — Simulation", f"{len(models_auto)} algorithms selected",
@@ -154,7 +169,9 @@ def run_computational_lab(results: dict, context: dict, client, domain_config: d
     known = corpus_numbers(wiki, params, discovery, results.get("evidence_objects"), sim_results.get("headline_numbers"))
     novel = [(merged_council.get("final_decision") or {}).get("novel_finding")]
     novel += [g.get("best") for g in merged_council.get("novel_finding_groups", []) if isinstance(g, dict)]
-    annotate_claims([n for n in novel if isinstance(n, dict)], ("title", "claim"), known)
+    paper_text = [p.get("sections") for p in results.get("papers", [])]
+    annotate_claims([n for n in novel if isinstance(n, dict)], ("title", "claim"), known,
+                    known_words=corpus_words(wiki, params, results.get("evidence_objects"), paper_text))
 
     progress("Stage 12 — Building report package…", 90)
     zip_bytes = build_zip(params_csv=csv_data, sim_results=sim_results, model_council=model_council,

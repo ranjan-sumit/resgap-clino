@@ -100,9 +100,42 @@ def legacy_results() -> dict:
     return r
 
 
+def golden_comp(simulated: bool = False) -> dict:
+    """Computational Lab output for the golden run: measured, opinion and impossible parameters."""
+    from pipeline.multi_run import merge_council_runs
+    from pipeline.run_lab import skipped_model_council, skipped_simulation
+    params = [
+        {"name": "fev1_gain", "category": "mean", "value": 4.1, "unit": "absolute", "confidence": "high",
+         "source_paper": "Alpha trial of drug X", "source_file": "alpha.pdf", "paper_index": 0, "evidence_kind": "measured",
+         "tier": 1},
+        {"name": "share_agreeing", "category": "proportion", "value": 62, "unit": "percent", "confidence": "medium",
+         "source_paper": "Gamma review of drug X", "source_file": "gamma.pdf", "paper_index": 2, "evidence_kind": "opinion",
+         "tier": 1},
+        {"name": "bad_rate", "category": "prevalence", "value": 250, "unit": "percent", "confidence": "low",
+         "source_paper": "Beta cohort study of drug X", "source_file": "beta.pdf", "paper_index": 1,
+         "evidence_kind": "measured", "sanity_issues": ["250% is outside 0 to 100"], "tier": 1},
+    ]
+    if simulated:
+        sim = {"model_used": "Multi-Algorithm (tornado)", "models_run": ["tornado"], "models_skipped":
+               {"markov_chain": "needs at least 2 transition probabilities between named disease states; found 0"},
+               "scenarios_run": ["Base Case"], "algorithm_results": {}, "headline_numbers": {}, "sensitivity_ranking": [],
+               "scenario_results": {}, "summary": {}, "excluded_low_confidence": []}
+        reason, council = None, skipped_model_council("x")
+    else:
+        reason = "only 1 usable numeric parameters were found (needs at least 3)"
+        sim, council = skipped_simulation(reason), skipped_model_council(reason)
+    return {"params": params, "derived_count": 0, "t1_count": 3, "t2_count": 0,
+            "sufficiency": {"coverage_score": 3, "why_score_is_low": "Few measured numbers.", "recommendation": "insufficient",
+                            "opinion_excluded": 1, "impossible_excluded": 1, "parameter_count": 1},
+            "csv_data": "", "discovery": {"hypotheses": [], "fingerprints": [], "combinations": [], "stats": {}},
+            "model_council": council, "sim_results": sim,
+            "insight_council": merge_council_runs([{"run_index": 1, "final_decision": {}}]), "n_runs": 1,
+            "zip_bytes": b"", "simulation_skipped": reason, "council_error": None}
+
+
 def seed_run(results: dict | None = None, name: str = "Golden run",
-             project_id: str | None = None) -> str:
+             project_id: str | None = None, comp_results: dict | None = None) -> str:
     """Save a run into the (test) database and return its id."""
     db.init_db()
     return db.save_run(name, results if results is not None else golden_results(),
-                       project_id=project_id)
+                       comp_results=comp_results, project_id=project_id)
