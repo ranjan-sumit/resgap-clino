@@ -87,6 +87,9 @@ class GapDetectionFailureTests(unittest.TestCase):
         self.assertEqual(outcome.results["gaps"][0]["title"], "det gap")
         # Both papers survive to the saved results (no zip() truncation).
         self.assertEqual(len(outcome.results["papers"]), 2)
+        # every stored trace row says how long its step took
+        rows = outcome.results["pipeline_trace"]
+        self.assertTrue(rows and all(isinstance(r["duration_s"], float) and r["duration_s"] >= 0 for r in rows))
 
     def test_gap_detection_error_records_a_warning(self):
         warnings = []

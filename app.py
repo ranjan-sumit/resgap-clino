@@ -99,7 +99,8 @@ from utils.database import (
     DEFAULT_PROJECT_ID, list_projects, get_project, list_feedback, upsert_feedback,
     list_project_files, attach_comp_results, update_run_proposals,
 )
-from utils import project_store
+from utils import project_store, run_jobs
+from utils.run_jobs import start_job
 from pipeline.feedback_context import POSITIVE_REASONS, NEGATIVE_REASONS
 from pipeline.pdf_parser import parse_pdf
 from pipeline.page_index import build_tree, tree_to_summary
@@ -1216,6 +1217,86 @@ if st.session_state.current_run_id and st.session_state.results:
         '</div>',
         unsafe_allow_html=True)
 
+# ── Background run: live checklist ────────────────────────────────────────────
+def _fmt_secs(s) -> str:
+    s = int(s or 0)
+    return f"{s // 60} min {s % 60:02d} s" if s >= 60 else f"{s} s"
+
+
+def _render_checklist(cl: dict) -> None:
+    icons = {"done": "✅", "running": "⏳", "waiting": "⬜", "failed": "❌", "skipped": "➖"}
+    st.progress(min(max(cl["pct"], 0), 100) / 100)
+    lines = []
+    for r in cl["rows"]:
+        extra = f" — {_fmt_secs(r['elapsed'])}" if r["elapsed"] is not None and r["state"] in ("done", "running", "failed") else ""
+        if r["state"] == "running":
+            extra += f" (usually about {_fmt_secs(r['typical'])})"
+        weight = "**" if r["state"] == "running" else ""
+        lines.append(f"{icons[r['state']]} {weight}{r['label']}{weight}{extra}")
+    st.markdown("  \n".join(lines))
+    if cl["message"] and cl["status"] == "running":
+        st.caption(cl["message"])
+    if cl["notice"]:
+        st.info(cl["notice"])
+
+
+@st.fragment(run_every=2)
+def _running_job_panel(job_id: str) -> None:
+    job = run_jobs.get_job(job_id)
+    if job is None or job["status"] in ("done", "failed"):
+        if job and job["status"] == "done" and job.get("run_id"):
+            if _load_run_into_session(job["run_id"], (job.get("summary_json") or {}).get("name", "")):
+                st.session_state["_toast"] = "Analysis finished — results are open."
+        st.rerun()                      # full rerun: results (or the failure note) take over
+        return
+    st.markdown("**Analysis running in the background** — you can refresh or leave this page; it keeps going.")
+    _render_checklist(run_jobs.checklist(job))
+    if job["warnings_json"]:
+        with st.expander(f"{len(job['warnings_json'])} note(s) so far"):
+            for w in job["warnings_json"]:
+                st.caption(f"⚠️ {w}")
+
+
+def _finished_job_note(job: dict) -> None:
+    cl = run_jobs.checklist(job)
+    if job["status"] == "done":
+        s = job.get("summary_json") or {}
+        if s.get("gate_blocked"):
+            st.warning("⚠️ Quality gate FAILED — gap analysis skipped: " + "; ".join(s.get("gate_block_reasons", [])))
+        else:
+            st.success(f"✅ Done in {_fmt_secs(s.get('duration_seconds'))} — {s.get('n_gaps', 0)} gaps, "
+                       f"{s.get('n_proposals', 0)} proposals. Saved as '{s.get('name', '')}'.")
+    else:
+        st.error("The analysis stopped: " + (job["error"] or "unknown error").split("\n")[0])
+        with st.expander("Where it stopped and details"):
+            _render_checklist(cl)
+            st.code(job["error"] or "", language=None)
+    if job["warnings_json"]:
+        with st.expander(f"{len(job['warnings_json'])} note(s) from this run"):
+            for w in job["warnings_json"]:
+                st.caption(f"⚠️ {w}")
+    if st.button("Dismiss", key=f"dismiss_{job['id']}"):
+        run_jobs.dismiss_job(job["id"])
+        st.session_state["active_job_id"] = None
+        st.rerun()
+
+
+if not st.session_state.get("_orphans_checked"):
+    st.session_state["_orphans_checked"] = True
+    run_jobs.fail_orphans()
+if _t := st.session_state.pop("_toast", None):
+    st.toast(_t, icon="✅")
+_job = run_jobs.get_job(st.session_state["active_job_id"]) if st.session_state.get("active_job_id") else None
+if _job is None or _job["project_id"] != _cur_project["id"]:
+    _job = run_jobs.unacknowledged_job(_cur_project["id"])           # picked up again after a refresh
+    st.session_state["active_job_id"] = _job["id"] if _job else None
+if _job and not _job["dismissed"]:
+    _job_id = _job["id"]
+    if _job["status"] in ("queued", "running"):
+        _running_job_panel(_job_id)
+    else:
+        _finished_job_note(_job)
+
 # With a run on screen the form folds away so the results are the first thing seen.
 _has_run_on_screen = bool(st.session_state.results)
 with st.expander("New analysis", expanded=not _has_run_on_screen):
@@ -1268,12 +1349,17 @@ with st.expander("New analysis", expanded=not _has_run_on_screen):
     _model_issues = _render_model_picker()      # which model does which job, and a test, in the same step as Run
 
     _n_files = len(_papers)
+    _job_active = bool(run_jobs.list_jobs(project_id=_cur_project["id"], active_only=True, limit=1))
+    st.session_state.setdefault("bg_runs", True)
+    st.checkbox("Keep running in the background (safe to refresh the page)", key="bg_runs",
+                help="The analysis runs on the server and its progress is saved, so a refreshed or closed tab "
+                     "does not lose it. Turn off to run inside this page instead.")
     run_col, status_col = st.columns([1, 5], vertical_alignment="center")
     with run_col:
         run_btn = st.button("Run analysis", type="primary",
-                            disabled=st.session_state.running or _n_files < 2 or bool(_model_issues))
+                            disabled=st.session_state.running or _job_active or _n_files < 2 or bool(_model_issues))
     with status_col:
-        if st.session_state.running:
+        if st.session_state.running or _job_active:
             _status, _cls = "Analysis in progress…", ""
         elif _model_issues:
             _status, _cls = html.escape(_model_issues[0]), ""
@@ -1313,6 +1399,31 @@ if run_btn and _papers:
         "gap_type": gap_type,
     }
 
+    _run_options = RunOptions(
+        provider_key=_model_cfg.spec_for(ROLE_ANALYSIS).provider,
+        model=_model_cfg.spec_for(ROLE_ANALYSIS).model,
+        models=_model_cfg.to_dict(),
+        use_vision=use_vision,
+        extract_refs=extract_refs,
+        ref_limit=None if ref_limit == "All" else int(ref_limit),
+        enable_quality_engine=enable_quality_engine,
+        override_quality_gate=override_quality_gate,
+        enable_gap_challenger=enable_gap_challenger,
+        nvidia_api_key=api_key,
+        enable_graph_persistence=True,   # SQLite makes this free; no longer an opt-in
+        project_id=st.session_state.current_project_id,
+        ss_api_key=ss_api_key,
+        domain_config=domain_cfg,
+        git_commit=_GIT_COMMIT,
+    )
+
+    # In the background the run survives a refresh of this page; progress is polled from the database.
+    if st.session_state.get("bg_runs", True):
+        st.session_state.running = False
+        st.session_state["active_job_id"] = start_job(
+            papers=_papers, context=context, client=client, options=_run_options,
+            name=run_name, token_meter=token_meter)
+        st.rerun()
     prog = st.progress(0)
     stat = st.empty()
     def upd(msg, pct):
@@ -1330,23 +1441,7 @@ if run_btn and _papers:
             context=context,
             client=client,
             name=run_name,
-            options=RunOptions(
-                provider_key=_model_cfg.spec_for(ROLE_ANALYSIS).provider,
-                model=_model_cfg.spec_for(ROLE_ANALYSIS).model,
-                models=_model_cfg.to_dict(),
-                use_vision=use_vision,
-                extract_refs=extract_refs,
-                ref_limit=None if ref_limit == "All" else int(ref_limit),
-                enable_quality_engine=enable_quality_engine,
-                override_quality_gate=override_quality_gate,
-                enable_gap_challenger=enable_gap_challenger,
-                nvidia_api_key=api_key,
-                enable_graph_persistence=True,   # SQLite makes this free; no longer an opt-in
-                project_id=st.session_state.current_project_id,
-                ss_api_key=ss_api_key,
-                domain_config=domain_cfg,
-                git_commit=_GIT_COMMIT,
-            ),
+            options=_run_options,
             progress=upd,
             trace=_add_trace,
             warn=lambda m: st.warning(f"⚠️ {m}"),

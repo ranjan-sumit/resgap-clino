@@ -305,8 +305,13 @@ def _run_full_pipeline(
     # stage timeline. The callback is additionally invoked for live display.
     trace_rows: list[dict] = []
 
+    _last_trace_at = [run_start]
+
     def _trace(stage: str, inputs: str, outputs: str, status: str = "✅") -> None:
-        trace_rows.append({"stage": stage, "inputs": inputs, "outputs": outputs, "status": status})
+        now = time.time()
+        trace_rows.append({"stage": stage, "inputs": inputs, "outputs": outputs, "status": status,
+                           "duration_s": round(now - _last_trace_at[0], 1)})   # time since the previous row
+        _last_trace_at[0] = now
         trace(stage, inputs, outputs)
 
     all_papers, all_trees = [], []

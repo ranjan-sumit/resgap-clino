@@ -22,12 +22,12 @@ def _free_port() -> int:
 
 
 @contextmanager
-def running_app(data_dir: Path):
+def running_app(data_dir: Path, script: Path | None = None):
     port = _free_port()
     env = {**os.environ, "RESGAP_DB_PATH": str(data_dir / "ui.db"),
            "RESGAP_PROJECTS_DIR": str(data_dir / "projects")}
     proc = subprocess.Popen(
-        [sys.executable, "-m", "streamlit", "run", str(ROOT / "app.py"),
+        [sys.executable, "-m", "streamlit", "run", str(script or ROOT / "app.py"),
          "--server.port", str(port), "--server.headless", "true",
          "--browser.gatherUsageStats", "false"],
         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
