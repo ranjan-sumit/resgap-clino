@@ -7,14 +7,16 @@ from __future__ import annotations
 
 import html
 
+from utils.run_storage import to_local_display
+
 
 def run_header(run_meta: dict | None, fallback_name: str = "", res: dict | None = None,
-               manifest: dict | None = None) -> dict:
+               manifest: dict | None = None, tz_name: str | None = None) -> dict:
     """What the run header displays. `run_meta` is a list_runs() row; `res` and
     `manifest` (both optional) add the status chips. Missing pieces are left out."""
     run_meta = run_meta or {}
     name = html.escape(run_meta.get("name", "") or fallback_name or "Saved run")
-    when = (run_meta.get("created_at", "") or "")[:16].replace("T", " ")
+    when = to_local_display(run_meta.get("created_at", "") or "", tz_name)
     stats = (f" · {run_meta['n_papers']} papers · {run_meta['n_gaps']} gaps" if run_meta else "")
     chips: list[str] = []
     if res is not None:

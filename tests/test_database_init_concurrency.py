@@ -51,7 +51,7 @@ class InitDbConcurrencyTests(unittest.TestCase):
         db._INITIALIZED.discard(self.path)
         db.init_db()   # already-applied migrations must be skipped, not re-run or re-recorded
         conn = db._get_conn()
-        count = conn.execute("SELECT COUNT(*) AS c FROM schema_migrations").fetchone()["c"]
+        count = conn.execute("SELECT COUNT(*) AS c FROM schema_migrations WHERE version LIKE '%.sql'").fetchone()["c"]
         conn.close()
         self.assertEqual(count, len(list(db.MIGRATIONS_DIR.glob("*.sql"))))
 

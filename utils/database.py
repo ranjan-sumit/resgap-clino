@@ -27,6 +27,8 @@ import hashlib
 from datetime import datetime, date
 from pathlib import Path
 
+from utils.run_storage import restore_sections, split_for_storage, to_utc_iso, utc_now_iso
+
 MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
 DEFAULT_DB_PATH = Path(__file__).parent.parent / "data" / "run_history.db"
 
@@ -121,6 +123,53 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+_STORAGE_MIGRATION = "py-0007-slim-runs-and-utc"
+
+
+def _migrate_run_storage(conn: sqlite3.Connection, db_path: str) -> None:
+    """One-time, idempotent: runs saved before this change get their duplicate paper text
+    dropped, section text moved to run_blobs, and naive local timestamps converted to UTC.
+    The database file is copied first (<name>.bak-<time>) whenever anything is changed.
+    A run that cannot be converted is left exactly as it was."""
+    if conn.execute("SELECT 1 FROM schema_migrations WHERE version = ?", (_STORAGE_MIGRATION,)).fetchone():
+        return
+    rows = conn.execute("SELECT id, created_at, results_json FROM runs").fetchall()
+    todo = []
+    for r in rows:
+        stale_ts = bool(r["created_at"]) and not str(r["created_at"]).endswith("Z")
+        try:
+            blob = json.loads(r["results_json"])
+        except (TypeError, json.JSONDecodeError):
+            blob = None
+        results = blob.get("results") if isinstance(blob, dict) else None
+        heavy = isinstance(results, dict) and (
+            any(isinstance(c, dict) and ("full_text" in c or "text_segments" in c or "sections" in c)
+                for c in results.get("corpus") or [])
+            or any(isinstance(p, dict) and p.get("sections") for p in results.get("papers") or []))
+        if stale_ts or heavy:
+            todo.append((r["id"], r["created_at"], blob, stale_ts, heavy))
+    if todo and Path(db_path).exists():
+        import shutil
+        shutil.copy2(db_path, f"{db_path}.bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
+    for run_id, created_at, blob, stale_ts, heavy in todo:
+        try:
+            new_ts = to_utc_iso(created_at) if stale_ts else created_at
+            if heavy:
+                lean, side = split_for_storage(blob["results"])
+                blob = {**blob, "results": lean}
+                for name_, data_ in side.items():
+                    conn.execute("INSERT OR REPLACE INTO run_blobs (run_id, name, data) VALUES (?,?,?)",
+                                 (run_id, name_, _json_dumps(data_)))
+                conn.execute("UPDATE runs SET results_json = ? WHERE id = ?", (_json_dumps(blob), run_id))
+            if stale_ts:
+                conn.execute("UPDATE runs SET created_at = ? WHERE id = ?", (new_ts, run_id))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+    conn.execute("INSERT OR IGNORE INTO schema_migrations (version) VALUES (?)", (_STORAGE_MIGRATION,))
+    conn.commit()
+
+
 def init_db() -> None:
     """Create/upgrade tables if needed. Safe to call multiple times and from
     several threads at once (the pipeline's worker threads all reach this on a
@@ -135,6 +184,7 @@ def init_db() -> None:
         conn = _get_conn()
         try:
             _apply_migrations(conn)
+            _migrate_run_storage(conn, path)
         finally:
             conn.close()
         _INITIALIZED.add(path)
@@ -469,7 +519,7 @@ def save_run(
     Returns the run_id for later retrieval.
     """
     init_db()
-    ts  = datetime.now().isoformat(timespec="seconds")
+    ts  = utc_now_iso()          # stored in UTC; the UI converts to the viewer's time zone
     # Two runs with the same name started in the same second (API double
     # submit, two tabs) must never share a run_id -- the uuid makes the
     # hash input unique while the 12-hex-char output format is unchanged.
@@ -480,8 +530,10 @@ def save_run(
     proposals   = results.get("proposals", [])
     papers_list = results.get("papers", [])
 
-    # Pack everything into one JSON text value (see migrations/0001).
-    blob_data = {"results": results}
+    # Pack everything into one JSON text value (see migrations/0001). Duplicate paper text is
+    # dropped and the section text goes to run_blobs (see utils/run_storage.py).
+    lean_results, side_blobs = split_for_storage(results)
+    blob_data = {"results": lean_results}
     if comp_results:
         blob_data["comp_results"] = comp_results
 
@@ -514,6 +566,9 @@ def save_run(
         # Idempotent re-save (same run_id): clear any prior papers rows
         # before re-inserting.
         cur.execute("DELETE FROM papers WHERE run_id = ?", (rid,))
+        cur.execute("DELETE FROM run_blobs WHERE run_id = ?", (rid,))
+        for name_, data_ in side_blobs.items():
+            cur.execute("INSERT INTO run_blobs (run_id, name, data) VALUES (?,?,?)", (rid, name_, _json_dumps(data_)))
         for p in papers_list:
             wiki  = p.get("wiki", {})
             title = wiki.get("title") or p.get("filename", "")
@@ -606,10 +661,12 @@ def get_run_row(run_id: str) -> dict | None:
     return dict(row) if row else None
 
 
-def load_run(run_id: str) -> dict:
+def load_run(run_id: str, sections: bool = True) -> dict:
     """
     Load full results for one run.
     Returns {'results': {...}, 'comp_results': {...} | None}
+    `sections=False` leaves the per-paper section text out (only the Computational Lab
+    needs it; use `load_paper_sections` / `with_sections` to add it later).
     """
     init_db()
     conn = _get_conn()
@@ -619,7 +676,27 @@ def load_run(run_id: str) -> dict:
     conn.close()
     if not row:
         return {}
-    return json.loads(row["results_json"])
+    blob = json.loads(row["results_json"])
+    if sections and isinstance(blob.get("results"), dict):
+        blob["results"] = restore_sections(blob["results"], load_paper_sections(run_id))
+    return blob
+
+
+def load_paper_sections(run_id: str) -> dict:
+    """{filename: sections} stored beside the run ({} for runs saved with the text inline)."""
+    init_db()
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT data FROM run_blobs WHERE run_id = ? AND name = 'paper_sections'",
+                           (run_id,)).fetchone()
+    finally:
+        conn.close()
+    return json.loads(row["data"]) if row else {}
+
+
+def with_sections(run_id: str, results: dict) -> dict:
+    """`results` (loaded without sections) with each paper's section text restored."""
+    return restore_sections(results, load_paper_sections(run_id))
 
 
 def load_run_gate_fields_bulk(run_ids: list[str]) -> dict[str, dict]:

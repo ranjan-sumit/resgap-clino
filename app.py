@@ -187,6 +187,14 @@ for _k, _v in _DEFAULTS.items():
 from ui.viewmodels import (keys_line, off_note, overview, run_header, saved_trace, trace_summary,
                            trace_rows, stage_status)
 from ui.compat import plotly_full_width, table_full_width
+from utils.run_storage import to_local_display
+from utils.database import with_sections
+
+
+def _local_time(ts: str) -> str:
+    """A stored UTC timestamp in the viewer's own time zone (the browser's, when Streamlit knows it)."""
+    return to_local_display(ts, getattr(st.context, "timezone", None))
+
 from ui.components import (badge as _badge, tier_badge as _tier_badge, card as _card,
                            section_label as _section_label, item as _item, skeleton as _skeleton)
 
@@ -194,7 +202,7 @@ from ui.components import (badge as _badge, tier_badge as _tier_badge, card as _
 def _load_run_into_session(run_id: str, run_name: str) -> bool:
     """Make a saved run the one on screen. Returns False if it has no results
     (nothing is changed in that case)."""
-    loaded = load_run(run_id)
+    loaded = load_run(run_id, sections=False)      # section text is only needed by the Lab; added then
     if not loaded.get("results"):
         return False
     st.session_state.results      = loaded["results"]
@@ -629,7 +637,7 @@ with st.sidebar:
         st.caption("No saved runs in this project yet.")
     else:
         for run in runs:
-            ts_short = run["created_at"][:16].replace("T", " ")
+            ts_short = _local_time(run["created_at"])
             on_screen = "● " if run["id"] == st.session_state.current_run_id else ""
             if st.button(
                 f"{on_screen}{run['name'][:30]}",
@@ -1024,7 +1032,7 @@ def _render_project_view(project: dict, runs: list[dict]) -> None:
         fb_rows = list_feedback(project_id=pid)
         fb_by_run = Counter(f["run_id"] for f in fb_rows)
         df = pd.DataFrame([{
-            "Run": r["name"], "Created": r["created_at"][:16].replace("T", " "),
+            "Run": r["name"], "Created": _local_time(r["created_at"]),
             "Papers": r["n_papers"], "Gaps": r["n_gaps"], "Proposals": r["n_proposals"],
             "Feedback": fb_by_run.get(r["id"], 0), "ID": r["id"][:8],
         } for r in runs])
@@ -1036,7 +1044,7 @@ def _render_project_view(project: dict, runs: list[dict]) -> None:
 
     if len(selected) == 1:
         run = selected[0]
-        st.markdown(f"**{html.escape(run['name'])}** · {run['created_at'][:16].replace('T', ' ')}")
+        st.markdown(f"**{html.escape(run['name'])}** · {_local_time(run['created_at'])}")
         if st.button("Open in Analysis view", key=f"open_{run['id']}", type="primary"):
             if _load_run_into_session(run["id"], run["name"]):
                 st.session_state["_pending_view"] = "Analysis"
@@ -1199,7 +1207,8 @@ if st.session_state.current_run_id and st.session_state.results:
     runs_meta = {r["id"]: r for r in list_runs()}
     run_meta  = runs_meta.get(st.session_state.current_run_id, {})
     _hdr = run_header(run_meta, st.session_state.current_run_name, st.session_state.results,
-                      get_run_manifest(st.session_state.current_run_id))
+                      get_run_manifest(st.session_state.current_run_id),
+                      getattr(st.context, "timezone", None))
     _rm_name, _rm_when, _rm_stats = _hdr["name"], _hdr["when"], _hdr["stats"]
     _chips = "".join(
         f'<span style="font-size:0.72rem;color:#004b93;background:#e5f2ff;border:1px solid #7ab8f5;'
@@ -2150,8 +2159,10 @@ if st.session_state.results:
                 # come from the Council rows under "Models for this run". The stages
                 # (and the data-sufficiency gate on the simulation) live in pipeline/run_lab.py.
                 client = ModelRouter(st.session_state["model_config"], _keys)
+                _lab_results = (with_sections(st.session_state.current_run_id, res)
+                                if st.session_state.current_run_id else res)    # runs load without section text
                 st.session_state.comp_results = run_computational_lab(
-                    res, context, client, domain_config=domain_cfg, n_council_runs=n_council_runs,
+                    _lab_results, context, client, domain_config=domain_cfg, n_council_runs=n_council_runs,
                     progress=cupd, trace=_add_trace)
                 comp_prog.progress(100)
                 # The Lab output belongs to the run it was computed from: attach it
