@@ -33,7 +33,8 @@ def golden_results() -> dict:
         "papers": papers,
         "gaps": gaps,
         "proposals": proposals,
-        "paper_profiles": [{"paper": t, "study_type": "rct"} for t, _ in _PAPERS],
+        "paper_profiles": {f: {"study_type": "rct"} for _, f in _PAPERS},
+        "evidence_objects": {f: [] for _, f in _PAPERS},
         "supplementary_gaps": [],
         "trace": [{"stage": "evidence", "status": "ok"}],
     }
