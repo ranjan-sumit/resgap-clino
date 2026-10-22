@@ -144,7 +144,9 @@ protobuf==7.36.2
     #   onnxruntime
     #   streamlit
 psutil==7.2.2
-    # via pymupdf
+    # via
+    #   -r requirements-dev.txt
+    #   pymupdf
 py-serializable==2.1.0
     # via cyclonedx-python-lib
 pyarrow==26.0.0
