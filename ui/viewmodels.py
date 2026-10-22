@@ -48,7 +48,7 @@ def off_note(res: dict) -> str | None:
     if res.get("ref_diagnostics"):
         return None
     return ("Cited references were not fetched for this run, so the corpus is the uploaded papers only. "
-            "Turn on “Include cited references” in the sidebar under Analysis to widen it.")
+            "Tick “Include cited references” in the New analysis options to widen it.")
 
 
 def saved_trace(res: dict, session_trace: list | None = None) -> list[dict]:
