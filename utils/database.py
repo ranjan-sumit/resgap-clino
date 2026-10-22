@@ -624,22 +624,53 @@ def update_run_proposals(run_id: str, proposals: list) -> bool:
         conn.close()
 
 
-def list_runs(limit: int = 20, project_id: str | None = None) -> list[dict]:
+def list_runs(limit: int = 20, project_id: str | None = None, include_archived: bool = False) -> list[dict]:
     """Return recent runs (metadata only, no blob), newest first. With
-    `project_id`, only that project's runs."""
+    `project_id`, only that project's runs. Archived runs are hidden unless asked for."""
     init_db()
     conn = _get_conn()
     cur = conn.cursor()
-    where, params = ("WHERE project_id = ?", [project_id]) if project_id else ("", [])
+    clauses, params = [], []
+    if project_id:
+        clauses.append("project_id = ?"); params.append(project_id)
+    if not include_archived:
+        clauses.append("archived = 0")
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     cur.execute(
         f"""SELECT id, name, created_at, domain, n_papers, n_gaps,
-                   n_proposals, has_comp, project_id
+                   n_proposals, has_comp, project_id, archived
             FROM runs {where} ORDER BY created_at DESC, rowid DESC LIMIT ?""",
         (*params, limit),
     )
     rows = cur.fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def rename_run(run_id: str, name: str) -> bool:
+    """Gives a run a new name. False if the run does not exist or the name is empty."""
+    name = (name or "").strip()
+    if not name:
+        return False
+    init_db()
+    conn = _get_conn()
+    try:
+        n = conn.execute("UPDATE runs SET name = ? WHERE id = ?", (name[:200], run_id)).rowcount
+        conn.commit()
+        return n > 0
+    finally:
+        conn.close()
+
+
+def set_run_archived(run_id: str, archived: bool) -> bool:
+    init_db()
+    conn = _get_conn()
+    try:
+        n = conn.execute("UPDATE runs SET archived = ? WHERE id = ?", (1 if archived else 0, run_id)).rowcount
+        conn.commit()
+        return n > 0
+    finally:
+        conn.close()
 
 
 def get_run_row(run_id: str) -> dict | None:
@@ -652,7 +683,7 @@ def get_run_row(run_id: str) -> dict | None:
     cur = conn.cursor()
     cur.execute(
         """SELECT id, name, created_at, domain, n_papers, n_gaps,
-                  n_proposals, has_comp, project_id
+                  n_proposals, has_comp, project_id, archived
            FROM runs WHERE id = ?""",
         (run_id,),
     )
@@ -1035,6 +1066,47 @@ def clear_cache(table: str) -> int:
         conn.close()
 
 
+def update_project(project_id: str, name: str, description: str = "", domain: str = "", interest: str = "") -> dict:
+    """Edits a project's name, description and research setup."""
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("A project needs a name.")
+    init_db()
+    conn = _get_conn()
+    try:
+        conn.execute("UPDATE projects SET name = ?, description = ?, domain = ?, interest = ? WHERE id = ?",
+                     (name, (description or "").strip(), domain or "", (interest or "").strip(), project_id))
+        conn.commit()
+    finally:
+        conn.close()
+    return get_project(project_id)
+
+
+def delete_project_rows(project_id: str) -> dict:
+    """Removes a project and everything the database holds for it (runs, files, feedback, jobs).
+    The default project cannot be deleted. Returns what was removed. The folder on disk is the
+    caller's business (utils/run_management.delete_project moves it aside)."""
+    if project_id == DEFAULT_PROJECT_ID:
+        raise ValueError("The default project cannot be deleted.")
+    init_db()
+    conn = _get_conn()
+    try:
+        run_ids = [r["id"] for r in conn.execute("SELECT id FROM runs WHERE project_id = ?", (project_id,))]
+        for rid in run_ids:
+            conn.execute("DELETE FROM papers WHERE run_id = ?", (rid,))
+            conn.execute("DELETE FROM feedback WHERE run_id = ?", (rid,))
+            conn.execute("DELETE FROM run_files WHERE run_id = ?", (rid,))
+        n_runs = conn.execute("DELETE FROM runs WHERE project_id = ?", (project_id,)).rowcount
+        conn.execute("DELETE FROM feedback WHERE project_id = ?", (project_id,))
+        n_files = conn.execute("DELETE FROM project_files WHERE project_id = ?", (project_id,)).rowcount
+        conn.execute("DELETE FROM run_jobs WHERE project_id = ?", (project_id,))
+        conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        conn.commit()
+        return {"runs": n_runs, "files": n_files}
+    finally:
+        conn.close()
+
+
 def get_project(project_id: str) -> dict | None:
     init_db()
     conn = _get_conn()
@@ -1050,7 +1122,7 @@ def list_projects(include_archived: bool = False) -> list[dict]:
     conn = _get_conn()
     rows = conn.execute(
         f"""SELECT p.*,
-                   (SELECT COUNT(*) FROM runs r WHERE r.project_id = p.id)          AS run_count,
+                   (SELECT COUNT(*) FROM runs r WHERE r.project_id = p.id AND r.archived = 0) AS run_count,
                    (SELECT COUNT(*) FROM project_files f WHERE f.project_id = p.id
                                                         AND f.kind = 'paper')       AS paper_count
             FROM projects p

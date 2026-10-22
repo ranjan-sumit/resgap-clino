@@ -187,6 +187,7 @@ for _k, _v in _DEFAULTS.items():
 from ui.viewmodels import (keys_line, off_note, overview, run_header, saved_trace, trace_summary,
                            trace_rows, stage_status)
 from ui.compat import plotly_full_width, table_full_width
+from ui.run_board import board_rows
 from ui.lab_view import kind_badge, lab_verdict, parameters_by_paper
 from ui.graph_view import filter_relations, grounding_summary, orphan_explanation, relation_rows
 from ui.gaps_view import (SORTS as GAP_SORTS, compare_proposals, filter_gaps, gap_rows, proposal_rows,
@@ -196,6 +197,11 @@ from ui.evidence_view import (citation, evidence_rows, filter_evidence, match_ev
 import hashlib
 from utils.run_storage import to_local_display
 from utils.database import with_sections, cache_stats as db_cache_stats, clear_cache as db_clear_cache, _db_path as db_path_for_display
+from utils.database import get_run_manifests_bulk, load_run_gate_fields_bulk, set_run_archived
+from utils.run_management import (best_to_keep, delete_project as delete_project_everywhere,
+                                  delete_run as delete_run_everywhere, find_duplicate_groups, merge_runs,
+                                  project_footprint, rename_run, run_footprint,
+                                  update_project as update_project_settings)
 from utils.cost_guard import DEFAULT_CAP_TOKENS, describe_estimate, estimate_cost, estimate_run
 
 
@@ -731,7 +737,7 @@ if _show_hero:
 # The run-comparison tools used to live in the sidebar. They are in the Project
 # view now, where a project's runs are listed and can be selected together.
 
-def _render_run_comparison(id_a: str, id_b: str) -> None:
+def _render_run_comparison(id_a: str, id_b: str, name_a: str = "the older run", name_b: str = "the newer run") -> None:
     """Diffs two saved runs directly, in full: papers, evidence counts, graph
     entities/relationships, gaps (with confidence changes), proposals, and the
     model/pipeline version each run used. Reads only already-saved data
@@ -755,9 +761,17 @@ def _render_run_comparison(id_a: str, id_b: str) -> None:
         )
         st.markdown("")
         p = cmp["papers"]
+        e = cmp["evidence"]
+        gp0, pr0 = cmp["gaps"], cmp["proposals"]
+        _cards = [("Papers in common", p["common_count"]), ("Evidence items", f"{e['count_a']} → {e['count_b']}"),
+                  ("Gaps in common", gp0["common_count"]), ("New gaps", len(gp0["added"])),
+                  ("Proposals in common", pr0["common_count"])]
+        for col, (lbl, val) in zip(st.columns(len(_cards)), _cards):
+            with col:
+                st.markdown(f'<div class="stat-box"><span class="stat-number" style="font-size:1.4rem;">{val}</span>'
+                            f'<span class="stat-label">{lbl}</span></div>', unsafe_allow_html=True)
         st.markdown(f"**Papers:** {p['common_count']} common · "
                     f"{len(p['added'])} added · {len(p['removed'])} removed")
-        e = cmp["evidence"]
         st.markdown(f"**Evidence objects:** {e['count_a']} → {e['count_b']} "
                     f"({'+' if e['delta'] >= 0 else ''}{e['delta']})")
         g = cmp["graph"]
@@ -778,12 +792,12 @@ def _render_run_comparison(id_a: str, id_b: str) -> None:
                     f"{pr['added_count']} added · {pr['removed_count']} removed")
         if gp["added"]:
             st.markdown("")
-            _section_label(f"New gaps in the newer run ({id_b[:8]})")
+            _section_label(f"New gaps in the newer run ({html.escape(name_b)})")
             for t in gp["added"][:15]:
                 _item(f"🆕 {t}")
         if gp["removed"]:
             st.markdown("")
-            _section_label(f"Gaps no longer generated (in the older run, {id_a[:8]}, only)")
+            _section_label(f"Gaps no longer generated (only in the older run, {html.escape(name_a)})")
             for t in gp["removed"][:15]:
                 _item(f"➖ {t}")
         if gp["confidence_changes"]:
@@ -800,6 +814,7 @@ def _render_repeatability(selected_ids: list[str]) -> None:
     corpus/context (pipeline/repeatability_score.py). Unrelated runs just give
     a low, honestly-meaningless score, not an error."""
     gap_sets = [load_run(rid).get("results", {}).get("gaps", []) for rid in selected_ids]
+    _names = {r["id"]: r["name"] for r in list_runs(limit=100000, include_archived=True)}
     try:
         report = compute_repeatability_score(gap_sets, run_ids=selected_ids)
         st.markdown(
@@ -819,7 +834,7 @@ def _render_repeatability(selected_ids: list[str]) -> None:
         for p in report["pairs"]:
             dup = " ⚠️ likely duplicate (excluded above)" if p["likely_duplicate_run"] else ""
             st.markdown(
-                f"`{p['run_a'][:8]}` vs `{p['run_b'][:8]}`{dup} — "
+                f"**{html.escape(_names.get(p['run_a'], 'run'))}** vs **{html.escape(_names.get(p['run_b'], 'run'))}**{dup} — "
                 f"overlap {p['gap_overlap']}, stability {p['claim_stability']}, "
                 f"ranking corr {p['ranking_correlation']}, drift {p['confidence_drift']} "
                 f"({p['n_common_gaps']} common gaps)"
@@ -884,7 +899,7 @@ def _render_graph_history(project_run_ids: set) -> None:
         st.caption("No saved graphs for this project yet. Run an analysis first.")
         return
     graph_options = {
-        f"{g['name'][:30]} ({g['run_id'][:8]}, {g['entity_count']}e/{g['relationship_count']}r"
+        f"{g['name'][:30]} ({g['entity_count']}e/{g['relationship_count']}r"
         + (f", {g['build_status']} {g['quality_score']:.2f})" if g.get("build_status") else ")"): g["run_id"]
         for g in graph_runs
     }
@@ -896,18 +911,18 @@ def _render_graph_history(project_run_ids: set) -> None:
             diff = diff_graph_snapshots(id_a, id_b)
             st.markdown(
                 f"**Entities:** {len(diff['entities_common'])} common · "
-                f"{len(diff['entities_only_in_a'])} only in `{id_a[:8]}` · "
-                f"{len(diff['entities_only_in_b'])} only in `{id_b[:8]}`"
+                f"{len(diff['entities_only_in_a'])} only in the first · "
+                f"{len(diff['entities_only_in_b'])} only in the second"
             )
             st.markdown(
                 f"**Relationships:** {len(diff['relationships_common'])} common · "
-                f"{len(diff['relationships_only_in_a'])} only in `{id_a[:8]}` · "
-                f"{len(diff['relationships_only_in_b'])} only in `{id_b[:8]}`"
+                f"{len(diff['relationships_only_in_a'])} only in the first · "
+                f"{len(diff['relationships_only_in_b'])} only in the second"
             )
             for key, rid in (("entities_only_in_a", id_a), ("entities_only_in_b", id_b)):
                 if diff[key]:
                     st.markdown("")
-                    _section_label(f"Entities only in {rid[:8]}")
+                    _section_label("Entities only in the " + ("first" if rid == id_a else "second") + " graph")
                     for name_ in diff[key][:15]:
                         _item(f"🔹 {name_}")
         except Exception as e:
@@ -954,8 +969,11 @@ def _render_project_view(project: dict, runs: list[dict]) -> None:
     if not hide_paths():                      # a server's folder names mean nothing on a hosted deployment
         st.caption(f"Folder: `{project_store.project_path(pid)}`")
 
-    # ── Runs ─────────────────────────────────────────────────────────────────
+    # ── Runs: the board ──────────────────────────────────────────────────────
     st.markdown("#### Runs")
+    show_archived = st.checkbox("Show archived runs", key=f"show_archived_{pid}")
+    if show_archived:
+        runs = list_runs(limit=100000, project_id=pid, include_archived=True)
     selected: list[dict] = []
     if not runs:
         st.info("No analyses in this project yet. Switch to **Analysis**, add papers and run one. "
@@ -963,20 +981,52 @@ def _render_project_view(project: dict, runs: list[dict]) -> None:
     else:
         fb_rows = list_feedback(project_id=pid)
         fb_by_run = Counter(f["run_id"] for f in fb_rows)
-        df = pd.DataFrame([{
-            "Run": r["name"], "Created": _local_time(r["created_at"]),
-            "Papers": r["n_papers"], "Gaps": r["n_gaps"], "Proposals": r["n_proposals"],
-            "Feedback": fb_by_run.get(r["id"], 0), "ID": r["id"][:8],
-        } for r in runs])
-        st.caption("Select one run to open or download it, two to compare them, "
+        _ids = [r["id"] for r in runs]
+        df = pd.DataFrame(board_rows(
+            runs, get_run_manifests_bulk(_ids), fb_by_run,
+            {k: v.get("gate_blocked") for k, v in load_run_gate_fields_bulk(_ids).items()},
+            getattr(st.context, "timezone", None)))
+        st.caption("Select one run to open, rename, archive or download it; two to compare them; "
                    "two or more to check how repeatable the results are.")
         event = _table(df, hide_index=True, on_select="rerun",
-                             selection_mode="multi-row", key=f"project_runs_{pid}")
+                       selection_mode="multi-row", key=f"project_runs_{pid}")
         selected = [runs[i] for i in event.selection.rows if i < len(runs)]
+
+        _dups = find_duplicate_groups(pid)
+        if _dups:
+            with st.expander(f"{len(_dups)} set(s) of duplicate runs"):
+                st.caption("Runs with the same papers and the same gaps. Merging keeps one (the one with Lab results, "
+                           "else the newest), moves the others' feedback and Lab results to it, and archives the "
+                           "rest. Nothing is deleted.")
+                for _gi, _grp in enumerate(_dups):
+                    _keep = best_to_keep(_grp)
+                    st.markdown(f"- Keep **{html.escape(_keep['name'])}**, archive "
+                                + ", ".join(f"**{html.escape(r['name'])}**" for r in _grp if r["id"] != _keep["id"]))
+                    if st.button(f"Merge these {len(_grp)}", key=f"merge_{pid}_{_gi}"):
+                        merge_runs(_keep["id"], [r["id"] for r in _grp if r["id"] != _keep["id"]])
+                        st.toast("Duplicates merged and archived.")
+                        st.rerun()
 
     if len(selected) == 1:
         run = selected[0]
-        st.markdown(f"**{html.escape(run['name'])}** · {_local_time(run['created_at'])}")
+        st.markdown(f"**{html.escape(run['name'])}** · {_local_time(run['created_at'])}"
+                    + (" · archived" if run.get("archived") else ""))
+        _c1, _c2, _c3 = st.columns([3, 1, 1], vertical_alignment="bottom")
+        _new_name = _c1.text_input("Rename", value=run["name"], key=f"rename_{run['id']}", label_visibility="collapsed")
+        if _c2.button("Rename", key=f"rename_btn_{run['id']}", disabled=not _new_name.strip() or _new_name.strip() == run["name"]):
+            rename_run(pid, run["id"], _new_name)
+            if st.session_state.current_run_id == run["id"]:
+                st.session_state.current_run_name = _new_name.strip()
+            st.rerun()
+        if run.get("archived"):
+            if _c3.button("Restore", key=f"unarchive_{run['id']}"):
+                set_run_archived(run["id"], False)
+                st.rerun()
+        elif _c3.button("Archive", key=f"archive_{run['id']}", help="Hide it from lists. Nothing is deleted."):
+            set_run_archived(run["id"], True)
+            if st.session_state.current_run_id == run["id"]:
+                _clear_results()
+            st.rerun()
         if st.button("Open in Analysis view", key=f"open_{run['id']}", type="primary"):
             if _load_run_into_session(run["id"], run["name"]):
                 st.session_state["_pending_view"] = "Analysis"
@@ -988,7 +1038,7 @@ def _render_project_view(project: dict, runs: list[dict]) -> None:
         newer, older = sorted(selected, key=lambda r: (r["created_at"], r["id"]), reverse=True)
         st.markdown(f"#### Compare: {html.escape(older['name'])} → {html.escape(newer['name'])}")
         st.caption("Older run on the left of the arrow, newer on the right.")
-        _render_run_comparison(older["id"], newer["id"])
+        _render_run_comparison(older["id"], newer["id"], older["name"], newer["name"])
     elif len(selected) > 2:
         st.caption(f"{len(selected)} runs selected. Select exactly two to compare them directly.")
     if len(selected) >= 2:
@@ -997,12 +1047,18 @@ def _render_project_view(project: dict, runs: list[dict]) -> None:
                 _render_repeatability([r["id"] for r in selected])
     if selected:
         with st.expander("Delete selected runs"):
-            st.caption("Removes the runs and their feedback from the database. "
-                       "Files already saved in the project folder are kept.")
+            st.caption("Removes the runs, their feedback and their saved-file records from the database. "
+                       "Prefer **Archive** if you might want them back.")
+            for r in selected:
+                _fp = run_footprint(pid, r["id"])
+                st.markdown(f"- **{html.escape(r['name'])}**: {len(_fp['files'])} saved file(s)"
+                            + (f" ({', '.join(_fp['files'][:4])})" if _fp["files"] else "")
+                            + f", {_fp['feedback']} feedback item(s)")
+            _also_files = st.checkbox("Also delete the saved files from the project folder", key="delete_files_too")
             if (st.checkbox("I understand this cannot be undone", key="confirm_delete_runs")
                     and st.button(f"Delete {len(selected)} run(s)", key="delete_runs_btn")):
                 for r in selected:
-                    delete_run(r["id"])
+                    delete_run_everywhere(pid, r["id"], remove_files=_also_files)
                 st.session_state["confirm_delete_runs"] = False
                 if st.session_state.current_run_id in {r["id"] for r in selected}:
                     _clear_results()
@@ -1043,6 +1099,41 @@ def _render_project_view(project: dict, runs: list[dict]) -> None:
             st.caption("No files saved for this project yet.")
     with st.expander("Knowledge graph history"):
         _render_graph_history({r["id"] for r in runs})
+
+    # ── Project settings ─────────────────────────────────────────────────────
+    st.markdown("#### Project settings")
+    with st.expander("Name, description and research setup"):
+        _choices = dict(get_ui_domain_choices())
+        _labels = list(_choices)
+        _cur = next((l for l, k in _choices.items() if k == project.get("domain")), _labels[0])
+        with st.form(key=f"project_settings_{pid}", border=False):
+            _pname = st.text_input("Project name", value=project["name"])
+            _pdesc = st.text_area("Description", value=project.get("description") or "", height=70)
+            _pdom = st.selectbox("Default domain", _labels, index=_labels.index(_cur))
+            _pint = st.text_area("Default research interest", value=project.get("interest") or "", height=70)
+            if st.form_submit_button("Save settings", type="primary"):
+                try:
+                    update_project_settings(pid, _pname, _pdesc, _choices[_pdom], _pint)
+                    st.toast("Project settings saved.")
+                    st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
+    if pid != DEFAULT_PROJECT_ID:
+        with st.expander("Delete this project"):
+            _fp = project_footprint(pid)
+            st.warning(f"This removes {len(_fp['runs'])} run(s) and {_fp['n_files']} file record(s) "
+                       f"({_fp['n_papers']} paper(s)) from the database"
+                       + (": " + ", ".join(_fp["runs"][:6]) + ("…" if len(_fp["runs"]) > 6 else "") if _fp["runs"] else "")
+                       + ". The project folder is moved to a _deleted folder, not erased.")
+            if (st.checkbox("I understand this deletes the project and its runs", key=f"confirm_delete_project_{pid}")
+                    and st.button("Delete project", key=f"delete_project_btn_{pid}")):
+                delete_project_everywhere(pid)
+                _clear_results()
+                st.session_state["_pending_project"] = DEFAULT_PROJECT_ID     # applied to the picker on the next run
+                st.session_state.current_project_id = DEFAULT_PROJECT_ID
+                st.session_state["view"] = "main"
+                st.session_state["main_view"] = "Analysis"
+                st.rerun()
 
     zip_key = f"project_zip_{pid}"
     if st.button("Prepare project download", key=f"prep_zip_{pid}"):
