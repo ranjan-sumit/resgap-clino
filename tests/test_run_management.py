@@ -181,7 +181,7 @@ def test_board_rows_show_status_model_duration_tokens_and_lab_without_ids():
 
 def test_gate_failures_and_missing_manifests_are_named():
     run = {"id": "x", "name": "n", "created_at": "", "n_papers": 1, "n_gaps": 0, "n_proposals": 0, "has_comp": 0, "archived": 0}
-    assert rb.status_chip(run, {"warnings": []}, gate_blocked=True) == "Quality gate failed"
+    assert rb.status_chip(run, {"warnings": []}, gate_blocked=True) == "Quality check failed"
     assert rb.status_chip(run, None) == "No manifest"
     assert rb.status_chip(run, {}) == "Completed"
     assert "x" not in rb.run_label({"name": "My run", "created_at": "2026-10-22T04:00:00Z"}, "UTC").replace("My run", "")

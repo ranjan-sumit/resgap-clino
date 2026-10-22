@@ -43,7 +43,7 @@ CSS_BASE = """
   .sub-header {
     font-family: 'DM Sans', sans-serif;
     font-size: 0.95rem;
-    color: #55708f;
+    color: #4a6580;
     font-weight: 300;
     letter-spacing: 0.02em;
     margin-bottom: 2rem;
@@ -77,9 +77,9 @@ CSS_BASE = """
     margin-bottom: 1rem;
   }
   .gap-card.open { border-left-color: #087f5b; }
-  .gap-card.partial { border-left-color: #b7791f; }
+  .gap-card.partial { border-left-color: #8a5a00; }
   .gap-card.solved { border-left-color: #c81e1e; }
-  .gap-card.pending { border-left-color: #55708f; }
+  .gap-card.pending { border-left-color: #4a6580; }
   .gap-title {
     font-family: 'DM Serif Display', serif;
     font-size: 1.1rem;
@@ -89,7 +89,7 @@ CSS_BASE = """
   .gap-meta {
     font-family: 'DM Mono', monospace;
     font-size: 0.7rem;
-    color: #55708f;
+    color: #4a6580;
     margin-bottom: 0.6rem;
   }
   .gap-desc { font-size: 0.88rem; color: #0b1f3a; line-height: 1.6; }
@@ -130,11 +130,11 @@ CSS_BASE = """
     margin-right: 0.4rem;
   }
   .badge-open { background: #e7f8f1; color: #087f5b; border: 1px solid #83d7b1; }
-  .badge-partial { background: #fff7e6; color: #b7791f; border: 1px solid #f0c36a; }
+  .badge-partial { background: #fff7e6; color: #8a5a00; border: 1px solid #f0c36a; }
   .badge-solved { background: #fff1f1; color: #c81e1e; border: 1px solid #f0a0a0; }
   .badge-high { background: #e5f2ff; color: #004b93; border: 1px solid #7ab8f5; }
-  .badge-medium { background: #fff7e6; color: #b7791f; border: 1px solid #f0c36a; }
-  .badge-low { background: #f2f5f8; color: #55708f; border: 1px solid #c9dff5; }
+  .badge-medium { background: #fff7e6; color: #8a5a00; border: 1px solid #f0c36a; }
+  .badge-low { background: #f2f5f8; color: #4a6580; border: 1px solid #c9dff5; }
 
   /* ── Wiki card ── */
   .wiki-card {
@@ -176,7 +176,7 @@ CSS_BASE = """
   .stat-label {
     font-family: 'DM Sans', sans-serif;
     font-size: 0.75rem;
-    color: #55708f;
+    color: #4a6580;
     text-transform: uppercase;
     letter-spacing: 0.08em;
   }
@@ -232,7 +232,7 @@ CSS_BASE = """
     font-family: 'DM Mono', monospace !important;
     font-size: 0.78rem !important;
     letter-spacing: 0.05em !important;
-    color: #55708f !important;
+    color: #4a6580 !important;
     padding: 0.7rem 1.2rem !important;
     text-transform: uppercase !important;
   }
@@ -288,12 +288,12 @@ CSS_ENTERPRISE = """
     --surface-muted: #edf6ff;
     --border: #c9dff5;
     --text: #0b1f3a;
-    --muted: #55708f;
+    --muted: #4a6580;
     --accent: #0066cc;
     --accent-strong: #004b93;
     --accent-soft: #e5f2ff;
     --success: #087f5b;
-    --warning: #b7791f;
+    --warning: #8a5a00;
     --danger: #c81e1e;
   }
   html, body, [class*="css"], .stApp {
@@ -409,9 +409,9 @@ CSS_ENTERPRISE = """
   }
   .tier-1 { background:#e5f2ff !important; color:#004b93 !important; border:1px solid #7ab8f5 !important; }
   .tier-2 { background:#e7f8f1 !important; color:#087f5b !important; border:1px solid #83d7b1 !important; }
-  .tier-3 { background:#f2f5f8 !important; color:#55708f !important; border:1px solid #c9d6e2 !important; }
+  .tier-3 { background:#f2f5f8 !important; color:#4a6580 !important; border:1px solid #c9d6e2 !important; }
   .badge-high, .badge-open { background:#e7f8f1 !important; color:#087f5b !important; border-color:#83d7b1 !important; }
-  .badge-medium, .badge-partial { background:#fff7e6 !important; color:#b7791f !important; border-color:#f0c36a !important; }
+  .badge-medium, .badge-partial { background:#fff7e6 !important; color:#8a5a00 !important; border-color:#f0c36a !important; }
   .badge-low, .badge-solved { background:#fff1f1 !important; color:#c81e1e !important; border-color:#f0a0a0 !important; }
 </style>
 """
@@ -442,7 +442,7 @@ CSS_EXTRA = """
   /* Tier badges */
   .tier-1 { background:#e5f2ff; color:#0066cc; border:1px solid #7ab8f5; }
   .tier-2 { background:#e7f8f1; color:#087f5b; border:1px solid #83d7b1; }
-  .tier-3 { background:#f2f5f8; color:#55708f; border:1px solid #c9dff5; }
+  .tier-3 { background:#f2f5f8; color:#4a6580; border:1px solid #c9dff5; }
   .tier-badge {
     display:inline-block; padding:0.15rem 0.55rem; border-radius:10px;
     font-family:'DM Mono',monospace; font-size:0.65rem; font-weight:500;
@@ -460,7 +460,7 @@ CSS_EXTRA = """
     font-size:0.82rem; color:#0b1f3a; font-weight:500; margin-bottom:0.2rem;
   }
   .run-card-meta {
-    font-family:'DM Mono',monospace; font-size:0.65rem; color:#55708f;
+    font-family:'DM Mono',monospace; font-size:0.65rem; color:#4a6580;
   }
 
   /* Reference paper list */
@@ -469,14 +469,32 @@ CSS_EXTRA = """
     border-radius:5px; padding:0.6rem 0.9rem; margin-bottom:0.3rem;
   }
   .ref-card.tier-2-card { border-left-color:#087f5b; }
-  .ref-card.tier-3-card { border-left-color:#55708f; }
+  .ref-card.tier-3-card { border-left-color:#4a6580; }
   .ref-title { font-size:0.85rem; color:#0b1f3a; }
-  .ref-meta  { font-family:'DM Mono',monospace; font-size:0.68rem; color:#55708f; margin-top:0.2rem; }
+  .ref-meta  { font-family:'DM Mono',monospace; font-size:0.68rem; color:#4a6580; margin-top:0.2rem; }
 </style>
 """
 
 
 
+# Accessibility: AA text contrast for the colours the framework derives (captions, the selected section),
+# and a visible keyboard focus ring everywhere. The values come from ui/tokens.py.
+CSS_A11Y = """
+<style>
+  [data-testid="stCaptionContainer"] { opacity: 1 !important; }      /* the framework fades captions to 60%: below AA */
+  [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p, .stCaption, small { color: #4a6580 !important; }
+  button[role="radio"][aria-checked="true"], button[role="radio"][aria-checked="true"] * { color: #004b93 !important; }   /* selected section */
+  [data-testid="stFileUploaderDropzoneInstructions"], [data-testid="stFileUploaderDropzoneInstructions"] * { color: #4a6580 !important; opacity: 1 !important; }
+  :focus-visible { outline: 3px solid #0066cc !important; outline-offset: 2px !important; border-radius: 4px; }
+  [data-testid="stSidebar"] :focus-visible { outline-color: #004b93 !important; }
+  @media (max-width: 640px) {
+    .main .block-container, [data-testid="stMainBlockContainer"] { padding-left: 1rem !important; padding-right: 1rem !important; }
+    .stat-box .stat-number { font-size: 1.6rem !important; }
+  }
+</style>
+"""
+
+
 def apply_theme() -> None:
-    for css in (CSS_BASE, CSS_ENTERPRISE, CSS_EXTRA):
+    for css in (CSS_BASE, CSS_ENTERPRISE, CSS_EXTRA, CSS_A11Y):
         st.markdown(css, unsafe_allow_html=True)

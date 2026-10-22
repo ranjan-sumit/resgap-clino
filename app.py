@@ -69,7 +69,7 @@ st.set_page_config(
                 if _BRANDING["tagline"] else _BRANDING["product_name"]),
     page_icon="🔬",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="auto",        # open on wide screens, collapsed on phones (an open sidebar covers the page)
 )
 
 # ── Theme (stylesheet lives in ui/theme.py) ─────────────────────────────────
@@ -221,7 +221,9 @@ def _local_time(ts: str) -> str:
     """A stored UTC timestamp in the viewer's own time zone (the browser's, when Streamlit knows it)."""
     return to_local_display(ts, getattr(st.context, "timezone", None))
 
-from ui.components import (badge as _badge, tier_badge as _tier_badge, card as _card,
+from ui.glossary import lookup as glossary_lookup
+from ui.messages import show_error, show_info, show_warning
+from ui.components import (collapse_sidebar_on_phones, empty_state, error_state, loading_state, badge as _badge, tier_badge as _tier_badge, card as _card,
                            section_label as _section_label, item as _item, skeleton as _skeleton)
 
 
@@ -292,7 +294,7 @@ def _new_project_dialog() -> None:
         try:
             project = project_store.create_project(name, description)
         except ValueError as e:
-            st.error(str(e))
+            show_error(str(e))
             return
         _clear_results()                          # a new project starts empty
         st.session_state.current_project_id = project["id"]
@@ -477,11 +479,11 @@ def _render_model_picker() -> list:
                     json_note = (" · <b>replies, but not in strict JSON</b>" if not r.get("json_note")
                                  else f" · <b>JSON check failed:</b> {html.escape(r['json_note'])}")
                 st.markdown(f'<span style="color:#087f5b;font-weight:700;">✓</span> {html.escape(r["label"])} '
-                            f'— {r["latency_s"]} s{json_note} <span style="color:#55708f;">({html.escape(roles)})</span>',
+                            f'— {r["latency_s"]} s{json_note} <span style="color:#4a6580;">({html.escape(roles)})</span>',
                             unsafe_allow_html=True)
             else:
                 st.markdown(f'<span style="color:#c81e1e;font-weight:700;">✗</span> {html.escape(r["label"])} '
-                            f'<span style="color:#55708f;">({html.escape(roles)})</span><br>'
+                            f'<span style="color:#4a6580;">({html.escape(roles)})</span><br>'
                             f'<span style="color:#c81e1e;font-size:0.82rem;">{html.escape(r["error"])}</span>',
                             unsafe_allow_html=True)
 
@@ -542,6 +544,7 @@ st.session_state.setdefault("view", "main")   # main | new_analysis | settings |
 
 def _go(view: str) -> None:
     st.session_state["view"] = view
+    st.session_state["_collapse_sidebar"] = True      # on a phone the open sidebar would cover the page just chosen
 
 
 def _model_issues() -> list:
@@ -582,6 +585,7 @@ with st.sidebar:
         rid = st.session_state.get("run_select")
         if rid in _run_by_id and _load_run_into_session(rid, _run_by_id[rid]["name"]):
             st.session_state["view"] = "main"
+            st.session_state["_collapse_sidebar"] = True
 
     if not runs:
         st.caption("No saved runs in this project yet.")
@@ -593,6 +597,10 @@ with st.sidebar:
                      on_change=_on_run_select, index=None, placeholder="Select a run",
                      label_visibility="collapsed")
         st.caption("All runs, comparison, files and feedback: Project view.")
+
+# On narrow screens, close the sidebar once the user has picked something in it (a no-op on wide screens).
+if st.session_state.pop("_collapse_sidebar", False):
+    collapse_sidebar_on_phones()
 
 # ── Main header (hero) ────────────────────────────────────────────────────────
 st.markdown("""
@@ -807,7 +815,7 @@ def _render_run_comparison(id_a: str, id_b: str, name_a: str = "the older run", 
             for c in gp["confidence_changes"][:15]:
                 _item(f"🔀 {c['title']}: {c['confidence_a']} → {c['confidence_b']}")
     except ValueError as e:
-        st.error(str(e))
+        show_error(str(e))
 
 
 def _render_repeatability(selected_ids: list[str]) -> None:
@@ -825,8 +833,8 @@ def _render_repeatability(selected_ids: list[str]) -> None:
             f"**Confidence drift:** {report['confidence_drift_mean']}"
         )
         if report.get("duplicate_run_note"):
-            st.warning(
-                f"⚠️ {report['n_duplicate_pairs_excluded']} pair(s) excluded from the "
+            show_warning(
+                f"{report['n_duplicate_pairs_excluded']} pair(s) excluded from the "
                 f"averages above -- {report['duplicate_run_note']}"
             )
         st.caption(report["ranking_proxy_note"])
@@ -841,7 +849,7 @@ def _render_repeatability(selected_ids: list[str]) -> None:
                 f"({p['n_common_gaps']} common gaps)"
             )
     except ValueError as e:
-        st.error(str(e))
+        show_error(str(e))
 
 
 def _render_lineage(run_id: str) -> None:
@@ -860,7 +868,7 @@ def _render_lineage(run_id: str) -> None:
             if tech["fan_in_edges"]:
                 st.caption(f"{len(tech['fan_in_edges'])} fan-in edge(s) (e.g. N papers → 1 evidence set)")
             if tech["orphans"]:
-                st.warning(f"⚠️ {len(tech['orphans'])} artifact(s) with an unresolved parent.")
+                show_warning(f"{len(tech['orphans'])} artifact(s) with an unresolved parent.")
 
         sci = get_scientific_lineage(run_id)
         st.markdown("")
@@ -882,7 +890,7 @@ def _render_lineage(run_id: str) -> None:
                 + (f" · ⚠️ {n_unresolved} unresolved id(s)" if n_unresolved else "")
             )
     except ValueError as e:
-        st.error(str(e))
+        show_error(str(e))
 
 
 def _render_graph_history(project_run_ids: set) -> None:
@@ -894,7 +902,7 @@ def _render_graph_history(project_run_ids: set) -> None:
     try:
         graph_runs = [g for g in list_graph_snapshots() if g["run_id"] in project_run_ids]
     except Exception as e:
-        st.error(f"Could not list saved graphs: {e}")
+        show_error("Could not list saved graphs", exc=e)
         return
     if not graph_runs:
         st.caption("No saved graphs for this project yet. Run an analysis first.")
@@ -927,7 +935,7 @@ def _render_graph_history(project_run_ids: set) -> None:
                     for name_ in diff[key][:15]:
                         _item(f"🔹 {name_}")
         except Exception as e:
-            st.error(f"Diff failed: {e}")
+            show_error("Diff failed", exc=e)
 
 
 _FILE_MIME = {"results": "application/json", "manifest": "application/json",
@@ -977,7 +985,7 @@ def _render_project_view(project: dict, runs: list[dict]) -> None:
         runs = list_runs(limit=100000, project_id=pid, include_archived=True)
     selected: list[dict] = []
     if not runs:
-        st.info("No analyses in this project yet. Switch to **Analysis**, add papers and run one. "
+        show_info("No analyses in this project yet. Switch to **Analysis**, add papers and run one. "
                 "Run it again with different settings to compare the results here.")
     else:
         fb_rows = list_feedback(project_id=pid)
@@ -1118,11 +1126,11 @@ def _render_project_view(project: dict, runs: list[dict]) -> None:
                     st.toast("Project settings saved.")
                     st.rerun()
                 except ValueError as e:
-                    st.error(str(e))
+                    show_error(str(e))
     if pid != DEFAULT_PROJECT_ID:
         with st.expander("Delete this project"):
             _fp = project_footprint(pid)
-            st.warning(f"This removes {len(_fp['runs'])} run(s) and {_fp['n_files']} file record(s) "
+            show_warning(f"This removes {len(_fp['runs'])} run(s) and {_fp['n_files']} file record(s) "
                        f"({_fp['n_papers']} paper(s)) from the database"
                        + (": " + ", ".join(_fp["runs"][:6]) + ("…" if len(_fp["runs"]) > 6 else "") if _fp["runs"] else "")
                        + ". The project folder is moved to a _deleted folder, not erased.")
@@ -1325,7 +1333,7 @@ def _render_new_project() -> None:
         try:
             _project = project_store.create_project(_name, _desc, _choices[_label], _interest)
         except ValueError as e:
-            st.error(str(e))
+            show_error(str(e))
             return
         _ids = []
         if _files:
@@ -1417,7 +1425,7 @@ def _render_new_analysis() -> None:
         papers, notices = _selection()          # the ticks above changed the selection
         papers_ok = 2 <= len(papers) <= 5
         for n in notices:
-            st.warning(n)
+            show_warning(n)
         st.caption(f"{len(papers)} paper(s) selected." + ("" if papers_ok else " Choose between 2 and 5."))
 
     elif step == 2:
@@ -1446,7 +1454,7 @@ def _render_new_analysis() -> None:
         st.caption("Models: " + " · ".join(f"{ROLE_LABELS[r]}: {_cfg.spec_for(r).model}" for r in MAIN_ROLES))
         st.button("Change models or keys", key="wiz_to_settings", on_click=_go, args=("settings",))
         for msg in _issues:
-            st.error(msg)
+            show_error(msg)
         if papers:
             _est = estimate_run([_pdf_text_chars(hashlib.sha256(d).hexdigest(), d) for _, d in papers],
                                 extract_refs=w["opts"]["extract_refs"], gap_challenger=w["opts"]["enable_gap_challenger"])
@@ -1458,7 +1466,7 @@ def _render_new_analysis() -> None:
                               key="wiz_bg")
         _busy = bool(run_jobs.list_jobs(project_id=_proj["id"], active_only=True, limit=1))
         if _busy:
-            st.info("An analysis is already running in this project. Wait for it to finish.")
+            show_info("An analysis is already running in this project. Wait for it to finish.")
 
     # navigation
     cb, cn, cc = st.columns([1, 1, 4])
@@ -1489,9 +1497,9 @@ st.markdown(
     '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:0.3rem 1rem;'
     'font-family:Inter,Segoe UI,system-ui,sans-serif;margin:0 0 0.5rem;">'
     '<span style="font-size:0.72rem;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;'
-    'color:#55708f;">Project</span>'
+    'color:#4a6580;">Project</span>'
     f'<span style="font-size:1rem;font-weight:600;color:#0b1f3a;">{html.escape(_cur_project["name"])}</span>'
-    f'<span style="font-size:0.82rem;color:#55708f;">{len(_proj_runs)} run(s) · '
+    f'<span style="font-size:0.82rem;color:#4a6580;">{len(_proj_runs)} run(s) · '
     f'{_cur_project_stats.get("paper_count", 0)} paper(s) saved</span>'
     '</div>', unsafe_allow_html=True)
 
@@ -1534,7 +1542,7 @@ if st.session_state.current_run_id and st.session_state.results:
         '<span style="font-size:0.72rem;font-weight:600;letter-spacing:0.08em;'
         'text-transform:uppercase;color:#004b93;">Run</span>'
         f'<span style="font-size:0.9rem;font-weight:600;color:#0b1f3a;">{_rm_name}</span>'
-        f'<span style="font-size:0.82rem;color:#55708f;">{_rm_when}{_rm_stats}</span>'
+        f'<span style="font-size:0.82rem;color:#4a6580;">{_rm_when}{_rm_stats}</span>'
         f'<span style="display:flex;gap:0.4rem;margin-left:auto;">{_chips}</span>'
         '</div>',
         unsafe_allow_html=True)
@@ -1559,7 +1567,7 @@ def _render_checklist(cl: dict) -> None:
     if cl["message"] and cl["status"] == "running":
         st.caption(cl["message"])
     if cl["notice"]:
-        st.info(cl["notice"])
+        show_info(cl["notice"])
 
 
 @st.fragment(run_every=2)
@@ -1584,12 +1592,12 @@ def _finished_job_note(job: dict) -> None:
     if job["status"] == "done":
         s = job.get("summary_json") or {}
         if s.get("gate_blocked"):
-            st.warning("⚠️ Quality gate FAILED — gap analysis skipped: " + "; ".join(s.get("gate_block_reasons", [])))
+            show_warning("The quality check failed, so gap analysis was skipped: " + "; ".join(s.get("gate_block_reasons", [])))
         else:
             st.success(f"✅ Done in {_fmt_secs(s.get('duration_seconds'))} — {s.get('n_gaps', 0)} gaps, "
                        f"{s.get('n_proposals', 0)} proposals. Saved as '{s.get('name', '')}'.")
     else:
-        st.error("The analysis stopped: " + (job["error"] or "unknown error").split("\n")[0])
+        show_error("The analysis stopped: " + (job["error"] or "unknown error").split("\n")[0])
         with st.expander("Where it stopped and details"):
             _render_checklist(cl)
             st.code(job["error"] or "", language=None)
@@ -1648,10 +1656,10 @@ if _req:
 # ── Main Pipeline ─────────────────────────────────────────────────────────────
 if run_btn and _papers:
     if _model_issues_now:
-        st.error(" ".join(_model_issues_now))
+        show_error(" ".join(_model_issues_now))
         st.stop()
     if len(_papers) < 2:
-        st.warning("Choose at least 2 papers.")
+        show_warning("Choose at least 2 papers.")
         st.stop()
 
     st.session_state.running        = True
@@ -1701,7 +1709,8 @@ if run_btn and _papers:
     stat = st.empty()
     def upd(msg, pct):
         prog.progress(pct)
-        stat.markdown(_card("Pipeline Running", f"⟳ {msg}"), unsafe_allow_html=True)
+        with stat.container():
+            loading_state(f"Analysis running: {msg}")
 
     try:
         # Clinova Phase 5, Epic 5.6: the Stage 1-6 orchestration that used to
@@ -1717,7 +1726,7 @@ if run_btn and _papers:
             options=_run_options,
             progress=upd,
             trace=_add_trace,
-            warn=lambda m: st.warning(f"⚠️ {m}"),
+            warn=lambda m: show_warning(f"{m}"),
             token_meter=token_meter,
         )
 
@@ -1734,13 +1743,13 @@ if run_btn and _papers:
         prog.progress(80)
         prog.empty(); stat.empty()
         if outcome.gate_blocked:
-            st.warning(
-                f"⚠️ Quality gate FAILED — gap analysis skipped: "
+            show_warning(
+                f"The quality check failed, so gap analysis was skipped: "
                 f"{'; '.join(outcome.gate_block_reasons)}. "
                 f"Fetched data ({outcome.n_papers} papers, {outcome.n_refs} refs, "
                 f"{outcome.n_evidence} evidence objects) was saved as "
                 f"'{outcome.name}' ({outcome.run_id[:8]}…). "
-                "Re-run with the sidebar override checked to force gap analysis anyway."
+                "Run it again with “Continue even if the quality check fails” ticked in the New analysis options to force it."
             )
         else:
             st.success(f"✅ Done — {outcome.n_gaps} gaps, {outcome.n_proposals} proposals. "
@@ -1750,12 +1759,10 @@ if run_btn and _papers:
         # A caller-input problem (too few papers), not a crash -- reported
         # the same way the old inline `len(uploaded_files) < 2` check was.
         prog.empty(); stat.empty()
-        st.warning(str(e))
+        show_warning(str(e))
     except Exception as e:
         prog.empty(); stat.empty()
-        st.error(f"Pipeline error: {e}")
-        with st.expander("Error details"):
-            st.code(traceback.format_exc())
+        show_error("The analysis hit an error", exc=e, details=traceback.format_exc())
     finally:
         st.session_state.running = False
 
@@ -1777,8 +1784,8 @@ def _render_overview(res: dict) -> None:
         for col, (val, lbl, color) in zip([t1, t2, t3, t4], [
             (c_stats.get("tier1", 0), "Uploaded PDFs", "#0066cc"),
             (c_stats.get("tier2", 0), "Cited (w/ abstract)", "#087f5b"),
-            (c_stats.get("tier3", 0), "Distant refs", "#55708f"),
-            (ref_sum.get("total", 0), "Total corpus", "#b7791f"),
+            (c_stats.get("tier3", 0), "Distant refs", "#4a6580"),
+            (ref_sum.get("total", 0), "Total corpus", "#8a5a00"),
         ]):
             with col:
                 st.markdown(f'<div class="stat-box"><span class="stat-number" style="color:{color};">{val}</span>'
@@ -1802,7 +1809,7 @@ def _render_overview(res: dict) -> None:
         for g in top:
             status = f" · {html.escape(g['status'].replace('_', ' '))}" if g["status"] else ""
             st.markdown(f"**{g['rank'] or '–'}. {html.escape(g['title'])}**  \n"
-                        f"<span style='color:#55708f;font-size:0.82rem;'>{g['papers']} supporting paper(s)"
+                        f"<span style='color:#4a6580;font-size:0.82rem;'>{g['papers']} supporting paper(s)"
                         f"{status}</span>", unsafe_allow_html=True)
         if top:
             st.button("See all gaps", key="ov_all_gaps", on_click=_set_tab, args=("Gaps",))
@@ -1815,6 +1822,11 @@ def _render_overview(res: dict) -> None:
             st.markdown(f"**{html.escape(prop['title'])}**")
             st.caption((prop["problem"] or "")[:300])
             st.button("See all proposals", key="ov_all_props", on_click=_set_tab, args=("Proposals",))
+
+    with st.expander("Glossary: what the labels mean"):
+        for _term in ("open", "partial", "solved", "unverified", "evidence item", "verified quote", "quote rate",
+                      "paper coverage", "orphan signals", "communities", "measured", "opinion", "simulation skipped"):
+            st.markdown(f"**{_term.title()}** — {glossary_lookup(_term)}")
 
     # One row per paper, so a paper that silently contributed nothing is visible.
     _cov = paper_coverage(res)
@@ -1844,7 +1856,7 @@ def _render_evidence(res: dict) -> None:
     rows = evidence_rows(res)
     st.markdown("### Evidence")
     if not rows:
-        st.info("This run has no stored evidence items.")
+        empty_state("No stored evidence items", "Runs saved before evidence was kept do not have any; run the analysis again to get them.")
         return
     st.caption("Every item the reader extracted from the papers, with the passage it rests on. "
                "Filter, then read the quote in context.")
@@ -1868,8 +1880,8 @@ def _render_evidence(res: dict) -> None:
         cited = ("  \n<span style='color:#087f5b;font-size:0.8rem;'>Cited by: "
                  + "; ".join(f"#{g['rank'] or '–'} {html.escape(g['title'][:70])}" for g in r["cited_by"])
                  + "</span>") if r["cited_by"] else ""
-        quote = (f"  \n<span style='color:#55708f;font-size:0.82rem;'>“{html.escape(r['quote'])}”</span>"
-                 if r["quote"] else "  \n<span style='color:#b7791f;font-size:0.8rem;'>no verified quote</span>")
+        quote = (f"  \n<span style='color:#4a6580;font-size:0.82rem;'>“{html.escape(r['quote'])}”</span>"
+                 if r["quote"] else "  \n<span style='color:#8a5a00;font-size:0.8rem;'>no verified quote</span>")
         st.markdown(
             f"**{html.escape(r['type'])}** · {html.escape(titles.get(r['paper'], r['paper'])[:50])}"
             f"{' · ' + html.escape(where) if where else ''} · {html.escape(r['confidence'])}  \n"
@@ -1885,7 +1897,7 @@ def _fact(text: str, evidence: list, color: str = "#0b1f3a") -> None:
     extra = ""
     if hit:
         where = citation(hit)
-        extra = (f"<br><span style='color:#55708f;font-size:0.76rem;'>{html.escape(where) + ' · ' if where else ''}"
+        extra = (f"<br><span style='color:#4a6580;font-size:0.76rem;'>{html.escape(where) + ' · ' if where else ''}"
                  f"{('“' + html.escape(hit['quote'][:160]) + '”') if hit['quote'] else 'evidence item'}</span>")
     st.markdown(f'<div class="wiki-item" style="color:{color};margin-bottom:0.3rem;">• {html.escape(str(text))}{extra}</div>',
                 unsafe_allow_html=True)
@@ -1893,14 +1905,14 @@ def _fact(text: str, evidence: list, color: str = "#0b1f3a") -> None:
 
 # ── Gaps and Proposals screens ──────────────────────────────────────────────────────────────────
 _STATUS_BADGES = {
-    "open": ("Open", "#087f5b", "#e7f8f1", "#83d7b1"), "partial": ("Partial", "#b7791f", "#fff7e6", "#f0c36a"),
-    "solved": ("Solved", "#c81e1e", "#fff1f1", "#f0a0a0"), "pending": ("Pending", "#55708f", "#f2f5f8", "#c9dff5"),
+    "open": ("Open", "#087f5b", "#e7f8f1", "#83d7b1"), "partial": ("Partial", "#8a5a00", "#fff7e6", "#f0c36a"),
+    "solved": ("Solved", "#c81e1e", "#fff1f1", "#f0a0a0"), "pending": ("Pending", "#4a6580", "#f2f5f8", "#c9dff5"),
     "unverified": ("Not checked", "#8a5a00", "#fff4d6", "#e8c66a"),
 }
 _CHALLENGER_BADGES = {
-    "INSUFFICIENT_EVIDENCE": ("Insufficient evidence", "#55708f", "#f2f5f8", "#c9dff5"),
+    "INSUFFICIENT_EVIDENCE": ("Insufficient evidence", "#4a6580", "#f2f5f8", "#c9dff5"),
     "OPEN": ("Challenger: open", "#087f5b", "#e7f8f1", "#83d7b1"),
-    "PARTIALLY_OPEN": ("Partially open", "#b7791f", "#fff7e6", "#f0c36a"),
+    "PARTIALLY_OPEN": ("Partially open", "#8a5a00", "#fff7e6", "#f0c36a"),
     "CONTESTED": ("Contested", "#a94ba0", "#f9edf8", "#dcaad9"),
     "LIKELY_CLOSED": ("Likely closed", "#c8681e", "#fff1e6", "#f0b380"),
     "CLOSED": ("Closed", "#c81e1e", "#fff1f1", "#f0a0a0"),
@@ -1926,7 +1938,9 @@ def _render_gaps(res: dict) -> None:
     rows = gap_rows(res)
     st.markdown("### Research gaps")
     if not rows:
-        st.info("This run has no gaps." if not res.get("gate_blocked") else "Gap analysis was skipped (quality gate).")
+        empty_state("No gaps in this run" if not res.get("gate_blocked") else "Gap analysis was skipped",
+                    "Add more papers or a sharper research interest and run again." if not res.get("gate_blocked")
+                    else "The quality check failed; see the Overview for the reasons.")
     else:
         counts = {s: sum(1 for r in rows if r["status"] == s) for s in ("open", "partial", "solved")}
         st.caption(f"{len(rows)} gaps · {counts['open']} open · {counts['partial']} partial · {counts['solved']} solved. "
@@ -1949,16 +1963,17 @@ def _render_gaps(res: dict) -> None:
         _fb_existing = ({f["target_id"]: f for f in list_feedback(run_id=_fb_run, target_type="gap")} if _fb_run else {})
         for r in shown[:40]:
             g = r["gap"]
-            label, color, bg, border = _STATUS_BADGES.get(r["status"], (r["status"].title() or "—", "#55708f", "#f2f5f8", "#c9dff5"))
+            label, color, bg, border = _STATUS_BADGES.get(r["status"], (r["status"].title() or "—", "#4a6580", "#f2f5f8", "#c9dff5"))
+            _def = glossary_lookup(label)
             chips = "".join(_badge(html.escape(str(p)[:28]), "#004b93", "#e5f2ff", "#7ab8f5") for p in r["papers"][:4])
             score = f" · {r['score']}/5" if r["score"] is not None else ""
             ch = _CHALLENGER_BADGES.get(g.get("challenger_status"))
             st.markdown(
                 f'<div class="gap-card {r["status"]}"><div class="gap-title">'
                 f'{("#" + str(r["rank"]) + " ") if r["rank"] else ""}{html.escape(r["title"])}</div>'
-                f'<div class="gap-meta">{_badge(label, color, bg, border)}'
-                f'{_badge(html.escape(r["finder"]) + score, "#55708f", "#f2f5f8", "#c9dff5")}'
-                f'{_badge(*ch) if ch else ""}</div><div style="margin-top:0.3rem;">{chips}</div></div>',
+                f'<div class="gap-meta">{_badge(label, color, bg, border, title=_def)}'
+                f'{_badge(html.escape(r["finder"]) + score, "#4a6580", "#f2f5f8", "#c9dff5")}'
+                f'{_badge(*ch, title=glossary_lookup(ch[0])) if ch else ""}</div><div style="margin-top:0.3rem;">{chips}</div></div>',
                 unsafe_allow_html=True)
             with st.expander("Details, evidence and sources"):
                 st.markdown(html.escape(str(g.get("description", ""))))
@@ -2021,7 +2036,7 @@ def _render_proposals(res: dict, proposals: list) -> None:
     if not proposals and _open_gaps:
         # A run can finish with no proposals (the model's reply was unreadable);
         # fill them in for this run instead of repeating the whole analysis.
-        st.warning(f"This run has no proposals, although it found {len(_open_gaps)} open or partial gaps.")
+        show_warning(f"This run has no proposals, although it found {len(_open_gaps)} open or partial gaps.")
         if st.button("Generate proposals now", key="gen_proposals_now", type="primary",
                      help="Runs only the proposal step on this run's gaps (about 10–30 seconds)."):
             try:
@@ -2030,7 +2045,7 @@ def _render_proposals(res: dict, proposals: list) -> None:
                     _new = redo_proposal_step(res, res.get("context", {}), _pclient, domain_config=get_domain_config(
                         res.get("context", {}).get("domain", "General AI/ML")))
                 if not _new:
-                    st.error("The model returned nothing usable. Try again, or choose another Analysis model.")
+                    show_error("The model returned nothing usable. Try again, or choose another Analysis model.")
                 else:
                     res["proposals"] = _new
                     st.session_state.results = res
@@ -2044,7 +2059,7 @@ def _render_proposals(res: dict, proposals: list) -> None:
                             pass
                     st.rerun()
             except Exception as e:
-                st.error(f"Could not generate proposals: {e}")
+                show_error("Could not generate proposals", exc=e)
     if not rows:
         return
     st.caption(f"{len(rows)} proposals. Star the ones worth pursuing: starred and unstarred choices feed later runs.")
@@ -2066,11 +2081,11 @@ def _render_proposals(res: dict, proposals: list) -> None:
         head = f"{'★ ' if starred else ''}#{r['index'] + 1} {r['title']}{verdict}"
         with st.expander(head):
             effort = r["effort"]
-            ec = {"short": "#087f5b", "medium": "#b7791f", "long": "#c81e1e"}.get(
-                (effort.split()[0].lower() if effort else ""), "#55708f")
+            ec = {"short": "#087f5b", "medium": "#8a5a00", "long": "#c81e1e"}.get(
+                (effort.split()[0].lower() if effort else ""), "#4a6580")
             st.markdown(_badge((r["confidence"] or "–").title() + " confidence", "#004b93", "#e5f2ff", "#7ab8f5")
                         + (_badge(html.escape(effort), ec, "#e7f8f1", ec) if effort else "")
-                        + (_badge("Risk: " + html.escape(str(r["risk"]))[:30], "#55708f", "#f2f5f8", "#c9dff5") if r["risk"] else ""),
+                        + (_badge("Risk: " + html.escape(str(r["risk"]))[:30], "#4a6580", "#f2f5f8", "#c9dff5") if r["risk"] else ""),
                         unsafe_allow_html=True)
             if r["gap_title"]:
                 st.markdown(f"**Addresses gap #{r['gap_rank'] or '–'}:** {html.escape(r['gap_title'])}")
@@ -2171,15 +2186,15 @@ if st.session_state.results:
                            question="Was this analysis useful overall?")
 
     # B23 fix: this run's gate-blocked status must stay visible after the
-    # original st.warning() toast is gone (e.g. reloading a saved run from
+    # original show_warning() toast is gone (e.g. reloading a saved run from
     # history) -- gaps/proposals being empty here is a gate block, not a
     # genuinely gap-free corpus, and that distinction matters to the user.
     if res.get("gate_blocked"):
         reasons = "; ".join(res.get("gate_block_reasons", [])) or "corpus below quality threshold"
-        st.warning(
-            f"⚠️ This run's quality gate FAILED, so gap analysis was skipped: {reasons}. "
+        show_warning(
+            f"This run's quality check failed, so gap analysis was skipped: {reasons}. "
             "Papers, references, wiki, and evidence below were still fetched and saved. "
-            "Re-run with the sidebar override checked to force gap analysis anyway."
+            "Run it again with “Continue even if the quality check fails” ticked in the New analysis options to force it."
         )
 
     _TABS = ["Overview", "Evidence", "Wiki", "References", "Graph", "Gaps", "Proposals", "Lab", "Trace", "Export"]
@@ -2255,8 +2270,8 @@ if st.session_state.results:
             for col,(val,lbl,color) in zip([d1,d2,d3,d4],[
                 (ref_diagnostics.get("raw_entries",0), "Raw Citations", "#0066cc"),
                 (ref_diagnostics.get("structured_entries",0), "LLM Parsed", "#087f5b"),
-                (ref_diagnostics.get("fallback_entries",0), "Fallback Parsed", "#b7791f"),
-                (ref_diagnostics.get("duplicates_skipped",0), "Duplicates", "#55708f"),
+                (ref_diagnostics.get("fallback_entries",0), "Fallback Parsed", "#8a5a00"),
+                (ref_diagnostics.get("duplicates_skipped",0), "Duplicates", "#4a6580"),
             ]):
                 with col:
                     st.markdown(f'<div class="stat-box"><span class="stat-number" '
@@ -2266,22 +2281,22 @@ if st.session_state.results:
             if ref_diagnostics.get("errors"):
                 with st.expander("Reference extraction warnings"):
                     for err in ref_diagnostics.get("errors", [])[:20]:
-                        st.warning(err)
+                        show_warning(err)
             st.markdown("")
 
         if not ref_papers:
             if not res.get("ref_summary",{}).get("total"):
-                st.info("No references are available yet. Enable reference extraction in the sidebar and run the analysis.")
+                show_info("No references are available yet. Tick “Include cited references” when you start an analysis.")
             else:
-                st.info("Reference summary exists, but detailed references were not saved in this older run. Re-run once to persist them.")
+                show_info("Reference summary exists, but detailed references were not saved in this older run. Re-run once to persist them.")
         else:
             summary = summarise_reference_corpus(ref_papers)
             ra,rb,rc,rd = st.columns(4)
             for col,(val,lbl,color) in zip([ra,rb,rc,rd],[
                 (summary["total"],"Total Refs","#0066cc"),
                 (summary["tier2_abstract"],"With Abstract","#087f5b"),
-                (summary["tier3_title"],"Title Only","#55708f"),
-                (summary["year_range"],"Year Range","#b7791f"),
+                (summary["tier3_title"],"Title Only","#4a6580"),
+                (summary["year_range"],"Year Range","#8a5a00"),
             ]):
                 with col:
                     st.markdown(f'<div class="stat-box"><span class="stat-number" '
@@ -2314,7 +2329,7 @@ if st.session_state.results:
                 filtered = [r for r in filtered
                             if q in ((r.get("title") or "")+" "+(r.get("abstract") or "")).lower()]
 
-            st.markdown(f'<div style="font-size:0.8rem;color:#55708f;margin-bottom:0.8rem;">'
+            st.markdown(f'<div style="font-size:0.8rem;color:#4a6580;margin-bottom:0.8rem;">'
                         f'Showing {len(filtered)} of {len(ref_papers)} references</div>',
                         unsafe_allow_html=True)
 
@@ -2342,8 +2357,8 @@ if st.session_state.results:
                     f' &nbsp;·&nbsp; source: {source or "parsed"}'
                     f' &nbsp;·&nbsp; citations: {html.escape(str(citations or 0))}'
                     f' &nbsp;·&nbsp; cited in: {html.escape(str(found_in))}</div>'
-                    + (f'<div style="font-size:0.76rem;color:#55708f;margin-top:0.2rem;">{authors}</div>' if authors else '')
-                    + (f'<div style="font-size:0.76rem;color:#55708f;margin-top:0.2rem;font-style:italic;">{venue}</div>' if venue else '')
+                    + (f'<div style="font-size:0.76rem;color:#4a6580;margin-top:0.2rem;">{authors}</div>' if authors else '')
+                    + (f'<div style="font-size:0.76rem;color:#4a6580;margin-top:0.2rem;font-style:italic;">{venue}</div>' if venue else '')
                     + (f'<div style="font-size:0.82rem;color:#344054;margin-top:0.5rem;line-height:1.55;">{abstract}…</div>'
                        if abstract else '')
                     + '</div>',
@@ -2391,7 +2406,7 @@ if st.session_state.results:
                         for i, ref in enumerate(refs_for_paper[:40], 1):
                             _render_ref(ref, idx=i)
                         if len(refs_for_paper) > 40:
-                            st.info(f"Showing first 40 of {len(refs_for_paper)} references for this source paper. Use search or table view to inspect the rest.")
+                            show_info(f"Showing first 40 of {len(refs_for_paper)} references for this source paper. Use search or table view to inspect the rest.")
             else:
                 for i, ref in enumerate(filtered[:80], 1):
                     _render_ref(ref, idx=i)
@@ -2402,14 +2417,14 @@ if st.session_state.results:
         stats = graph.get("stats",{})
         graph_diag = graph.get("diagnostics", {})
         if graph_diag.get("used_fallback"):
-            st.warning("The LLM graph extraction returned no entities, so a deterministic fallback graph was built from wiki concepts, methods, datasets, limitations, and findings.")
+            show_warning("The model could not build a graph from the evidence, so a simpler graph was made from each paper's summary. It has fewer and weaker links.")
         elif graph_diag.get("grounded"):
-            st.info(f"Built from the papers' quoted evidence: {graph_diag.get('llm_entities', 0)} entities and "
+            show_info(f"Built from the papers' quoted evidence: {graph_diag.get('llm_entities', 0)} entities and "
                     f"{graph_diag.get('llm_relationships', 0)} relationships, each citing the passage that states it.")
         elif graph_diag:
             if graph_diag.get("grounded_failure"):
                 st.caption(f"Evidence-based graph not used: {graph_diag['grounded_failure']}.")
-            st.info(f"LLM graph extraction produced {graph_diag.get('llm_entities', 0)} entities and {graph_diag.get('llm_relationships', 0)} relationships.")
+            show_info(f"The model built the graph from the paper summaries: {graph_diag.get('llm_entities', 0)} entities and {graph_diag.get('llm_relationships', 0)} relationships.")
 
         # Clinova Phase 3, Epic 3.1 (FR-7): graph build status + quality
         # score, computed by pipeline/graph_quality.py. None on a
@@ -2444,7 +2459,7 @@ if st.session_state.results:
             ("Orphan Signals",stats.get("orphan_count",0)),
         ]):
             with col:
-                st.markdown(f'<div class="stat-box"><span class="stat-number" '
+                st.markdown(f'<div class="stat-box" title="{html.escape(glossary_lookup(lbl), quote=True)}"><span class="stat-number" '
                             f'style="font-size:1.5rem;">{val}</span>'
                             f'<span class="stat-label">{lbl}</span></div>',
                             unsafe_allow_html=True)
@@ -2505,7 +2520,7 @@ if st.session_state.results:
                 plotly_full_width(fig)
                 st.caption("Hover a line to see how two entities are related, and the supporting text.")
             except ImportError:
-                st.info("pip install plotly for network diagram")
+                show_info("The network diagram needs the plotly package, which is not installed here.")
 
         for comm in graph.get("communities",[]):
             with st.expander(f"🏘️ {comm.get('theme','Community')}"):
@@ -2514,7 +2529,7 @@ if st.session_state.results:
                 if comm.get("gap_signal"):
                     st.markdown(
                         f'<div style="background:#fff7e6;border:1px solid #f0c36a;border-radius:4px;'
-                        f'padding:0.5rem 0.8rem;margin-top:0.5rem;font-size:0.82rem;color:#b7791f;">'
+                        f'padding:0.5rem 0.8rem;margin-top:0.5rem;font-size:0.82rem;color:#8a5a00;">'
                         f'⚠️ {comm["gap_signal"]}</div>', unsafe_allow_html=True)
 
         entities = graph.get("entities",[])
@@ -2535,9 +2550,9 @@ if st.session_state.results:
                 st.markdown(
                     f'<div class="stage-card" style="padding:0.6rem 1rem;margin-bottom:0.3rem;">'
                     f'<span style="font-family:\'DM Mono\',monospace;color:#004b93;">{ent.get("name","")}</span>'
-                    f'<span style="font-family:\'DM Mono\',monospace;color:#55708f;font-size:0.7rem;'
+                    f'<span style="font-family:\'DM Mono\',monospace;color:#4a6580;font-size:0.7rem;'
                     f'margin-left:0.6rem;">[{ent.get("type","")}]</span>'
-                    f'<div style="font-size:0.78rem;color:#55708f;">{o.get("signal","")}</div></div>',
+                    f'<div style="font-size:0.78rem;color:#4a6580;">{o.get("signal","")}</div></div>',
                     unsafe_allow_html=True)
 
     # ── Tab 4: Research Gaps ───────────────────────────────────────────────────
@@ -2552,7 +2567,7 @@ if st.session_state.results:
     if _tab == "Lab":
         st.markdown("### 📊 Computational Lab")
         st.markdown(
-            '<div style="font-size:0.82rem;color:#55708f;margin-bottom:1.5rem;">'
+            '<div style="font-size:0.82rem;color:#4a6580;margin-bottom:1.5rem;">'
             'Parameter extraction (Tier 1 + Tier 2) → Cross-paper discovery → '
             'LLM Council model selection → Multi-algorithm simulation → '
             'Novel findings → Download package.</div>',
@@ -2567,7 +2582,7 @@ if st.session_state.results:
                 help="Run the insight council N times and merge the findings. More runs are slower but steadier.")
         with ci_col:
             st.markdown(
-                '<div style="font-size:0.78rem;color:#55708f;padding-top:0.5rem;">'
+                '<div style="font-size:0.78rem;color:#4a6580;padding-top:0.5rem;">'
                 f'Stages 7–12 · Uses Tier 1 + Tier 2 params · {n_council_runs}× council runs</div>',
                 unsafe_allow_html=True)
         st.caption(f"Results are added to this run (“{st.session_state.current_run_name or 'current run'}”), "
@@ -2612,7 +2627,7 @@ if st.session_state.results:
                         except Exception:
                             pass       # files are a convenience; the database copy is already saved
                     except Exception:
-                        st.warning("The Lab finished but could not be saved to the run.")
+                        show_warning("The Lab finished but could not be saved to the run.")
 
                 comp_prog.empty(); comp_stat.empty()
                 _cr = st.session_state.comp_results
@@ -2625,14 +2640,12 @@ if st.session_state.results:
                     + f"{len(_cr['discovery'].get('hypotheses', []))} hypotheses. "
                     f"Added to this run; generate the final report in the Export tab.")
                 if _cr.get("council_error"):
-                    st.warning(f"⚠️ {_cr['council_error']}. Run the Lab again in a few minutes, or choose "
+                    show_warning(f"{_cr['council_error']}. Run the Lab again in a few minutes, or choose "
                                "different Council models under “Models for this run”.")
 
             except Exception as e:
                 comp_prog.empty(); comp_stat.empty()
-                st.error(f"Error: {e}")
-                with st.expander("Error details"):
-                    st.code(traceback.format_exc())
+                show_error("The Lab could not finish", exc=e, details=traceback.format_exc())
 
         # ── Comp results display ───────────────────────────────────────────────
         if st.session_state.comp_results:
@@ -2649,7 +2662,7 @@ if st.session_state.results:
 
             # The verdict comes first: did the Lab simulate anything, and why (not)?
             _v = lab_verdict(cr)
-            _vc = {"simulated": "#087f5b", "skipped": "#b7791f"}[_v["state"]]
+            _vc = {"simulated": "#087f5b", "skipped": "#8a5a00"}[_v["state"]]
             st.markdown(
                 f'<div style="border:1px solid {_vc};background:{_vc}12;border-radius:8px;padding:0.9rem 1.2rem;'
                 f'margin-bottom:1rem;"><div style="font-weight:700;color:{_vc};">'
@@ -2667,7 +2680,7 @@ if st.session_state.results:
 
             # Data availability
             score      = sufficiency.get("coverage_score",0)
-            sc         = "#087f5b" if score>=7 else "#b7791f" if score>=4 else "#c81e1e"
+            sc         = "#087f5b" if score>=7 else "#8a5a00" if score>=4 else "#c81e1e"
             t1c, t2c   = cr.get("t1_count",0), cr.get("t2_count",0)
             st.markdown(f"""
             <div style="background:#ffffff;border:1px solid {sc};border-radius:8px;
@@ -2680,7 +2693,7 @@ if st.session_state.results:
                 {_tier_badge(2)} {t2c} from cited abstracts &nbsp;
                 🔀 {cr.get('derived_count',0)} cross-paper derived
               </div>
-              <div style="font-size:0.78rem;color:#55708f;margin-top:0.3rem;">
+              <div style="font-size:0.78rem;color:#4a6580;margin-top:0.3rem;">
                 {sufficiency.get('why_score_is_low','')}
               </div>
             </div>""", unsafe_allow_html=True)
@@ -2714,15 +2727,15 @@ if st.session_state.results:
                         tier_t = p.get("tier",1)
                         derived_t = (" 🔀" if p.get("is_derived") else "") + (
                             f" · <em>{kind_badge(p)}</em>" if kind_badge(p) else "")
-                        conf_c = {"high":"#087f5b","medium":"#b7791f","low":"#c81e1e"}.get(
-                            p.get("confidence","medium"),"#55708f")
+                        conf_c = {"high":"#087f5b","medium":"#8a5a00","low":"#c81e1e"}.get(
+                            p.get("confidence","medium"),"#4a6580")
                         st.markdown(
                             f'<div class="wiki-item" style="margin-bottom:0.4rem;">'
                             f'{_tier_badge(tier_t)}'
                             f'<span style="color:#004b93;">{p.get("name","")}</span> = '
                             f'<span style="color:{conf_c};font-family:\'DM Mono\',monospace;">'
                             f'{p.get("value","")}{ci}</span> {p.get("unit","")}'
-                            f'<span style="color:#55708f;font-size:0.7rem;"> '
+                            f'<span style="color:#4a6580;font-size:0.7rem;"> '
                             f'[{p.get("source_paper","")[:45]}]{derived_t}</span></div>',
                             unsafe_allow_html=True)
 
@@ -2733,7 +2746,7 @@ if st.session_state.results:
             st.markdown("#### Stage 8B — Novel Hypotheses")
             for h in discovery.get("hypotheses",[]):
                 conf  = h.get("confidence","medium")
-                cc    = {"high":"#087f5b","medium":"#b7791f","low":"#c81e1e"}.get(conf,"#55708f")
+                cc    = {"high":"#087f5b","medium":"#8a5a00","low":"#c81e1e"}.get(conf,"#4a6580")
                 st.markdown(
                     f'<div style="background:#edf6ff;border:1px solid #7ab8f5;'
                     f'border-left:4px solid {cc};border-radius:8px;'
@@ -2759,12 +2772,12 @@ if st.session_state.results:
                     with hc2:
                         _section_label("Clinical Opportunity"); _item(h.get("clinical_opportunity",""),"#087f5b")
                         st.markdown("")
-                        _section_label("Commercial Opportunity"); _item(h.get("commercial_opportunity",""),"#b7791f")
+                        _section_label("Commercial Opportunity"); _item(h.get("commercial_opportunity",""),"#8a5a00")
 
             # Simulation
             st.markdown(f"#### Stage 10 — Simulation: {sim_results.get('model_used','')}")
             if sim_results.get("skipped"):
-                st.info("**Simulation skipped.** The papers do not contain enough usable quantitative parameters "
+                show_info("**Simulation skipped.** The papers do not contain enough usable quantitative parameters "
                         f"({sim_results.get('skip_reason', 'insufficient data')}). Running a model on this would "
                         "produce numbers with no real meaning, so the insights below are qualitative and make no "
                         "numerical prediction.")
@@ -2790,7 +2803,7 @@ if st.session_state.results:
                         f'</div></div>', unsafe_allow_html=True)
 
             if cr.get("council_error"):
-                st.warning(f"⚠️ {cr['council_error']}. The insight sections below are empty for that reason; "
+                show_warning(f"{cr['council_error']}. The insight sections below are empty for that reason; "
                            "run the Lab again in a few minutes, or choose different Council models.")
             # Council insights (multi-run merged)
             st.markdown(f"#### Stage 11 — Council Findings ({n_runs}× runs merged)")
@@ -2805,17 +2818,17 @@ if st.session_state.results:
                 <div style="text-align:center;">
                   <div style="font-size:1.4rem;color:#087f5b;font-family:'DM Mono',monospace;">
                     {cov.get('total_novel_findings',0)}</div>
-                  <div style="font-size:0.68rem;color:#55708f;text-transform:uppercase;">Novel Findings</div>
+                  <div style="font-size:0.68rem;color:#4a6580;text-transform:uppercase;">Novel Findings</div>
                 </div>
                 <div style="text-align:center;">
                   <div style="font-size:1.4rem;color:#004b93;font-family:'DM Mono',monospace;">
                     {cov.get('total_clinical_insights',0)}</div>
-                  <div style="font-size:0.68rem;color:#55708f;text-transform:uppercase;">Clinical Insights</div>
+                  <div style="font-size:0.68rem;color:#4a6580;text-transform:uppercase;">Clinical Insights</div>
                 </div>
                 <div style="text-align:center;">
-                  <div style="font-size:1.4rem;color:#b7791f;font-family:'DM Mono',monospace;">
+                  <div style="font-size:1.4rem;color:#8a5a00;font-family:'DM Mono',monospace;">
                     {cov.get('total_next_steps',0)}</div>
-                  <div style="font-size:0.68rem;color:#55708f;text-transform:uppercase;">Next Steps</div>
+                  <div style="font-size:0.68rem;color:#4a6580;text-transform:uppercase;">Next Steps</div>
                 </div>
               </div>
             </div>""", unsafe_allow_html=True)
@@ -2831,11 +2844,11 @@ if st.session_state.results:
                     f'<div style="display:flex;justify-content:space-between;">'
                     f'<div style="font-family:\'DM Mono\',monospace;font-size:0.62rem;color:{cc};">🔬 NOVEL FINDING</div>'
                     f'<div>{_badge(g["confidence"],cc,"#ffffff",cc)}'
-                    f'{_badge(freq,"#55708f","#f2f5f8","#c9dff5")}</div></div>'
+                    f'{_badge(freq,"#4a6580","#f2f5f8","#c9dff5")}</div></div>'
                     f'<div style="font-size:1.05rem;color:#0b1f3a;font-weight:600;margin:0.5rem 0 0.4rem;">'
                     f'{nf.get("title","")}</div>'
                     f'<div style="font-size:0.88rem;color:#0b1f3a;line-height:1.7;">{nf.get("claim","")}</div>'
-                    f'<div style="font-size:0.75rem;color:#55708f;margin-top:0.4rem;font-style:italic;">'
+                    f'<div style="font-size:0.75rem;color:#4a6580;margin-top:0.4rem;font-style:italic;">'
                     f'What\'s new: {nf.get("what_makes_it_new","")}</div></div>',
                     unsafe_allow_html=True)
                 if nf.get("unsupported_numbers"):
@@ -2854,7 +2867,7 @@ if st.session_state.results:
                         f'<div style="display:flex;justify-content:space-between;">'
                         f'<div style="font-size:0.85rem;color:#0b1f3a;">{icon} {g["representative"]}</div>'
                         f'<div>{_badge(g["confidence"],cc,"#ffffff",cc)}'
-                        f'{_badge(g["frequency"],"#55708f","#f2f5f8","#c9dff5")}</div></div></div>',
+                        f'{_badge(g["frequency"],"#4a6580","#f2f5f8","#c9dff5")}</div></div></div>',
                         unsafe_allow_html=True)
 
             ic1,ic2 = st.columns(2)
@@ -2896,12 +2909,12 @@ if st.session_state.results:
             st.markdown("**Models used:** " + " · ".join(f"{html.escape(str(r))}: {html.escape(str(m))}"
                                                          for r, m in _ts["models"].items()))
         if _ts.get("fallback_count"):
-            st.warning(f"{_ts['fallback_count']} call(s) used the fallback model: " + "; ".join(_ts["fallbacks"][:5]))
+            show_warning(f"{_ts['fallback_count']} call(s) used the fallback model: " + "; ".join(_ts["fallbacks"][:5]))
         if _ts.get("tokens_total"):
             st.caption(f"Tokens used: {_ts['tokens_total']:,} in total · "
                        + " · ".join(f"{k}: {v:,}" for k, v in _ts["tokens_by_stage"].items()))
         if not trace:
-            st.info("This run has no stage trace stored (it was saved before traces were kept). "
+            show_info("This run has no stage trace stored (it was saved before traces were kept). "
                     "Run a new analysis to get one.")
         else:
             for entry in trace_rows(trace):
@@ -2913,9 +2926,9 @@ if st.session_state.results:
                     f'<div style="font-family:\'DM Mono\',monospace;font-size:0.7rem;color:#0066cc;">'
                     f'{entry.get("status","✅")} STAGE {i} — {entry["stage"]}</div>'
                     f'<div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-top:0.5rem;">'
-                    f'<div><span style="font-family:\'DM Mono\',monospace;font-size:0.62rem;color:#55708f;">IN: </span>'
+                    f'<div><span style="font-family:\'DM Mono\',monospace;font-size:0.62rem;color:#4a6580;">IN: </span>'
                     f'<span style="font-size:0.8rem;color:#0b1f3a;">{entry["inputs"]}</span></div>'
-                    f'<div><span style="font-family:\'DM Mono\',monospace;font-size:0.62rem;color:#55708f;">OUT: </span>'
+                    f'<div><span style="font-family:\'DM Mono\',monospace;font-size:0.62rem;color:#4a6580;">OUT: </span>'
                     f'<span style="font-size:0.8rem;color:#087f5b;">{entry["outputs"]}</span></div>'
                     f'</div></div>',
                     unsafe_allow_html=True)
@@ -2952,7 +2965,7 @@ if st.session_state.results:
             generate_report = st.button("Generate final report", key="generate_final_report",
                                         disabled=not report_sections)
         with mode_col:
-            use_llm_report = st.checkbox("Use LLM narrative polish", value=True,
+            use_llm_report = st.checkbox("Use a model-written summary", value=True,
                                          help="Uses the Analysis model to write a concise report narrative from existing structured results only.")
 
         if generate_report:
@@ -2980,14 +2993,12 @@ if st.session_state.results:
                 }
                 st.success("Final report generated.")
             except Exception as e:
-                st.error(f"Final report generation failed: {e}")
-                with st.expander("Report error details"):
-                    st.code(traceback.format_exc())
+                show_error("The report could not be generated", exc=e, details=traceback.format_exc())
 
         bundle = st.session_state.report_bundle
         if bundle and bundle.get("run_id") == st.session_state.current_run_id:
-            st.info(f"Report ready. Generated at {bundle.get('generated_at','')} · "
-                    f"LLM narrative: {'yes' if bundle.get('used_llm') else 'no'} · "
+            show_info(f"Report ready. Generated at {bundle.get('generated_at','')} · "
+                    f"Model-written summary: {'yes' if bundle.get('used_llm') else 'no'} · "
                     f"Lab section: {'yes' if bundle.get('with_lab') else 'no'}")
             sv_col, dl1, dl2 = st.columns(3)
             with sv_col:
@@ -3000,7 +3011,7 @@ if st.session_state.results:
                                                   bundle["html"], bundle["pdf"])
                         bundle["saved"] = True
                     except Exception as e:
-                        st.error(f"Could not save the report: {e}")
+                        show_error("Could not save the report", exc=e)
             with dl1:
                 st.download_button("Download HTML Report",
                                    data=bundle["html"].encode("utf-8"),
@@ -3029,7 +3040,7 @@ if st.session_state.results:
                                    data=to_pdf_report(res, context),
                                    file_name="research_gap_report.pdf", mime="application/pdf")
             except Exception as e:
-                st.error(f"PDF report generation failed: {e}")
+                show_error("PDF report generation failed", exc=e)
         with ex2:
             st.markdown('<div class="stage-card"><div class="stage-title">Markdown Report</div>'
                         '<div class="stage-body">Full analysis — wiki, gaps, proposals.</div></div>',

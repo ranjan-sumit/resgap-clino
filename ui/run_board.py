@@ -25,7 +25,7 @@ def status_chip(run: dict, manifest: dict | None, gate_blocked: bool = False) ->
     if run.get("archived"):
         return "Archived"
     if gate_blocked:
-        return "Quality gate failed"
+        return "Quality check failed"
     if manifest is None:
         return "No manifest"
     warnings = manifest.get("warnings") or []

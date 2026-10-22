@@ -142,7 +142,7 @@ def _export(app_test, comp=None, automatic_report=True):
 
 
 def _no_llm(at):
-    next(c for c in at.checkbox if c.label.startswith("Use LLM narrative polish")).uncheck()
+    next(c for c in at.checkbox if c.label.startswith("Use a model-written summary")).uncheck()
     return at.run()
 
 

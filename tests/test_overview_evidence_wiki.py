@@ -137,7 +137,7 @@ def test_evidence_filters_narrow_the_list(app_test, isolated_env):
 def test_evidence_screen_says_so_for_a_run_without_evidence(app_test, isolated_env):
     r = golden_results()
     r["evidence_objects"] = {}
-    assert "no stored evidence" in _texts(_open(app_test, "Evidence", r))
+    assert "No stored evidence" in _texts(_open(app_test, "Evidence", r))
 
 
 def test_evidence_text_is_escaped(app_test, isolated_env):
