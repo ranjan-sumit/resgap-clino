@@ -50,10 +50,10 @@ class AppSmokeTests(unittest.TestCase):
         self.assertIn("Default project", picker.options[0])
         self.assertIn("New project", [b.label for b in at.sidebar.button])
         self.assertEqual(len(at.tabs), 0)          # no results on screen
-        # the sidebar is slim: the project picker plus New project, New analysis and Settings
+        # the sidebar is slim: the project picker, the run picker (once there are runs), and three buttons
         self.assertEqual({b.label for b in at.sidebar.button}, {"New project", "New analysis", "Settings"})
         self.assertLessEqual(len(at.sidebar.button) + len(at.sidebar.selectbox) + len(at.sidebar.checkbox)
-                             + len(at.sidebar.text_input) + len(at.sidebar.text_area), 4)
+                             + len(at.sidebar.text_input) + len(at.sidebar.text_area), 5)
         self.assertIn("Start here", " ".join(m.value for m in at.markdown))   # the empty-state guide
 
     def test_newly_created_projects_appear_in_the_picker(self):

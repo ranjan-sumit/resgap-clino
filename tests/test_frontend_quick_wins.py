@@ -98,3 +98,40 @@ def test_no_deprecated_container_width_argument_is_left():
         if re.search(_LEGACY_ARG, path.read_text(encoding="utf-8")) and path.name != "compat.py":
             offenders.append(path.name)
     assert offenders == []
+
+
+# -- the run dropdown in the sidebar ------------------------------------------
+def test_sidebar_lists_the_projects_runs_in_one_dropdown(app_test, isolated_env):
+    seed_run(golden_results(), name="First run")
+    seed_run(golden_results(), name="Second run")
+    at = app_test(timeout=90)
+    picker = next(s for s in at.sidebar.selectbox if s.label == "Run")
+    assert len(picker.options) == 2 and any("First run" in o for o in picker.options)
+    assert not [b for b in at.sidebar.button if b.label not in {"New project", "New analysis", "Settings"}]
+
+
+def test_the_dropdown_shows_the_run_on_screen_and_selecting_another_loads_it(app_test, isolated_env):
+    first = seed_run(golden_results(), name="First run")
+    second = seed_run(golden_results(), name="Second run")
+    at = app_test(timeout=90)
+    picker = next(s for s in at.sidebar.selectbox if s.label == "Run")
+    assert at.session_state["current_run_id"] == second and picker.value == second
+    picker.select(next(o for o in picker.options if "First run" in o)).run()
+    assert at.session_state["current_run_id"] == first
+    assert next(s for s in at.sidebar.selectbox if s.label == "Run").value == first
+
+
+def test_selecting_a_run_from_another_page_returns_to_the_results(app_test, isolated_env):
+    first = seed_run(golden_results(), name="First run")
+    seed_run(golden_results(), name="Second run")
+    at = app_test(timeout=90)
+    at.button(key="settings_btn").click().run()
+    assert at.session_state["view"] == "settings"
+    picker = next(s for s in at.sidebar.selectbox if s.label == "Run")
+    picker.select(next(o for o in picker.options if "First run" in o)).run()
+    assert at.session_state["view"] == "main" and at.session_state["current_run_id"] == first
+
+
+def test_no_run_dropdown_for_a_project_without_runs(app_test, isolated_env):
+    at = app_test(timeout=90)
+    assert not [s for s in at.sidebar.selectbox if s.label == "Run"]

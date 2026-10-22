@@ -557,22 +557,28 @@ with st.sidebar:
     st.button("Settings", key="settings_btn", on_click=_go, args=("settings",))
 
     st.markdown("---")
-    st.markdown("##### Recent runs")
-    runs = list_runs(limit=5, project_id=st.session_state.current_project_id)
+    st.markdown("##### Run")
+    runs = list_runs(limit=30, project_id=st.session_state.current_project_id)
+    _run_by_id = {r["id"]: r for r in runs}
+
+    def _run_label(rid: str) -> str:
+        r = _run_by_id[rid]
+        return f"{r['name'][:28]} · {_local_time(r['created_at'])} · {r['n_gaps']} gaps" + (" · Lab" if r["has_comp"] else "")
+
+    def _on_run_select() -> None:
+        rid = st.session_state.get("run_select")
+        if rid in _run_by_id and _load_run_into_session(rid, _run_by_id[rid]["name"]):
+            st.session_state["view"] = "main"
+
     if not runs:
         st.caption("No saved runs in this project yet.")
-    for run in runs:
-        ts_short = _local_time(run["created_at"])
-        on_screen = "● " if run["id"] == st.session_state.current_run_id else ""
-        if st.button(f"{on_screen}{run['name'][:30]}", key=f"load_{run['id']}",
-                     help=f"{ts_short} · {run['domain']} · {run['n_papers']} papers · {run['n_gaps']} gaps"):
-            if _load_run_into_session(run["id"], run["name"]):
-                st.session_state["view"] = "main"
-                st.rerun()
-        chips = f'{ts_short} · {run["n_papers"]} papers · {run["n_gaps"]} gaps' + (" · Lab ✓" if run["has_comp"] else "")
-        st.markdown(f'<div style="font-size:0.72rem;color:#55708f;margin-top:-0.5rem;margin-bottom:0.4rem;'
-                    f'padding-left:0.2rem;">{chips}</div>', unsafe_allow_html=True)
-    if runs:
+    else:
+        # The picker always shows the run on screen (a run just finished, or loaded elsewhere).
+        st.session_state["run_select"] = (st.session_state.current_run_id
+                                          if st.session_state.current_run_id in _run_by_id else None)
+        st.selectbox("Run", list(_run_by_id), key="run_select", format_func=_run_label,
+                     on_change=_on_run_select, index=None, placeholder="Select a run",
+                     label_visibility="collapsed")
         st.caption("All runs, comparison, files and feedback: Project view.")
 
 # ── Main header (hero) ────────────────────────────────────────────────────────
