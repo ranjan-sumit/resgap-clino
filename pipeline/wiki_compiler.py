@@ -13,7 +13,21 @@ from utils.database import compute_cache_key, get_cached_wiki_page, save_cached_
 
 # Bumped whenever WIKI_SYSTEM_PROMPT or the wiki-domain-injection logic changes,
 # so old cached entries don't silently keep serving stale-logic results (AD-3).
-WIKI_STAGE_VERSION = 1
+# 2: the excerpt now keeps oversize sections (truncated) instead of dropping them,
+# so pages cached at version 1 for papers with one huge section are empty and wrong.
+# 3: the model now sees up to WIKI_EXCERPT_CHARS of the paper (was 10,000, i.e. 12-20%
+# of a typical paper: e.g. a survey's own "Limitations" section never reached it).
+WIKI_STAGE_VERSION = 3
+
+# Gemini flash-lite has a 1M-token window and ~60k characters is about 15k tokens, so
+# the whole of a normal paper fits for pennies. Anything longer is cut by priority.
+WIKI_EXCERPT_CHARS = 60000
+
+
+def _page_is_empty(page: dict) -> bool:
+    """A page with no findings, contributions, methods or concepts carries no
+    information; it must never be cached or served from the cache."""
+    return not any(page.get(f) for f in ("key_findings", "contributions", "methods", "key_concepts"))
 WIKI_DOMAIN_KEYS = ["wiki_focus", "wiki_entity_examples"]  # only keys inject_domain_into_wiki_prompt reads
 
 
@@ -27,11 +41,11 @@ Return ONLY a JSON object with this exact structure:
   "title": "Full paper title or best guess from content",
   "year": "Publication year if found, else null",
   "domain": "Primary research domain (e.g., NLP, Computer Vision, Healthcare AI)",
-  "contributions": ["List of 3-5 specific technical contributions"],
+  "contributions": ["List of 3-6 specific technical contributions"],
   "methods": ["List of methods, models, algorithms used"],
-  "datasets": ["List of datasets used for evaluation"],
-  "key_findings": ["List of 3-5 specific quantitative or qualitative findings"],
-  "limitations": ["List of EXPLICITLY stated limitations — be specific, use paper's own words"],
+  "datasets": ["List of datasets, cohorts or study populations used (with sample sizes where given)"],
+  "key_findings": ["List of 5-10 specific findings. Include the actual numbers, effect sizes and p-values the paper reports"],
+  "limitations": ["List of EXPLICITLY stated limitations — check the Limitations, Discussion and Conclusion sections; be specific, use the paper's own words"],
   "future_work": ["List of future work directions mentioned by authors"],
   "key_concepts": ["List of 8-12 important technical terms, acronyms, concepts"],
   "evaluated_on": ["Tasks or benchmarks the paper evaluates on"],
@@ -76,7 +90,7 @@ def compile_wiki_page(paper: dict, tree, client, domain_config: dict = None) -> 
             content, domain_config, WIKI_DOMAIN_KEYS, WIKI_STAGE_VERSION
         )
         cached = get_cached_wiki_page(cache_key)
-        if cached is not None:
+        if cached is not None and not _page_is_empty(cached):
             # B15 fix (review): a cache hit means the CONTENT matched -- but
             # this call's own paper dict (e.g. a renamed re-upload of the same
             # PDF) still owns the filename/char_count attribution, not
@@ -87,7 +101,7 @@ def compile_wiki_page(paper: dict, tree, client, domain_config: dict = None) -> 
             return cached
 
     # Build a smart excerpt prioritizing key sections
-    excerpt = get_smart_excerpt(paper, max_chars=10000)
+    excerpt = get_smart_excerpt(paper, max_chars=WIKI_EXCERPT_CHARS)
     tree_outline = tree_to_summary(tree, max_chars=1500)
 
     user_prompt = f"""Paper filename: {paper['filename']}
@@ -103,7 +117,7 @@ Compile a structured wiki page from this paper."""
     try:
         raw = unwrap(client.chat_json(
             inject_domain_into_wiki_prompt(WIKI_SYSTEM_PROMPT, domain_config or {}),
-            user_prompt, max_tokens=2500
+            user_prompt, max_tokens=5000
         ))
     except LLMCallError as e:
         # B12 fix: don't let one paper's failed LLM call abort build_wiki()'s
@@ -137,7 +151,7 @@ Compile a structured wiki page from this paper."""
     wiki["source_file"] = paper["filename"]
     wiki["char_count"] = paper.get("char_count", 0)
 
-    if cacheable and cache_write_ok:
+    if cacheable and cache_write_ok and not _page_is_empty(wiki):
         save_cached_wiki_page(cache_key, content_hash, domain_hash, WIKI_STAGE_VERSION, wiki)
     return wiki
 
@@ -189,10 +203,14 @@ def build_wiki(papers: list, trees: list, client, domain_config: dict = None) ->
     Build the full wiki: individual pages + cross-paper links.
     Returns: {pages: [...], cross_links: {...}, index: {...}}
     """
-    pages = []
-    for paper, tree in zip(papers, trees):
-        wiki_page = compile_wiki_page(paper, tree, client, domain_config=domain_config)
-        pages.append(wiki_page)
+    # The papers are independent, so compile them in parallel (the calls were made
+    # one after another before, so a slow call stalled everything behind it).
+    # Order is preserved: pages[i] is always papers[i].
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=max(1, min(len(papers), 4))) as pool:
+        pages = list(pool.map(
+            lambda pt: compile_wiki_page(pt[0], pt[1], client, domain_config=domain_config),
+            zip(papers, trees)))
 
     cross_links = compile_cross_links(pages, client)
 

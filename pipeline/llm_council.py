@@ -169,13 +169,18 @@ from cross-paper analysis. Produce the definitive finding report.
 
 The output MUST contain at least one NEW FINDING — something that emerges from combining
 these papers that no single paper stated. Do not produce vague statements.
-Be specific: name interventions, populations, outcomes, and estimated effect sizes.
+Be specific: name interventions, populations and outcomes.
+
+GROUNDING RULES:
+- The new finding is a HYPOTHESIS to be tested, not a result. State the expected direction of the effect, NOT its size.
+- NEVER state a percentage, fold-change, probability or threshold unless it appears in the hypotheses, simulation results or papers given above. If the size is unknown, write "magnitude unknown".
+- Every entry in evidence_chain must be a finding that was actually given above. Do not introduce a mechanism, exposure or population the papers do not discuss; if the link is a stretch, say so and use "low" confidence.
 
 Return ONLY JSON:
 {
   "novel_finding": {
     "title": "Short specific title of the new finding",
-    "claim": "Precise statement: [Intervention] in [Population] will [Outcome] by [estimate] vs [comparator]",
+    "claim": "Precise statement: [Intervention] in [Population] is expected to [increase|decrease|change] [Outcome] vs [comparator] (magnitude unknown unless given above)",
     "what_makes_it_new": "Specifically what no individual paper said",
     "evidence_chain": ["Paper X finding A supports this because...", "Paper Y finding B shows..."],
     "mechanism": "Biological/clinical mechanism making this plausible",
@@ -255,8 +260,33 @@ def _robust_parse(raw: str, expected: type = dict):
     return {} if expected == dict else []
 
 
+class _LegacyBackend:
+    """The original behaviour: every council seat is an NVIDIA model from
+    COUNCIL_MODELS, called with one NVIDIA key. Used when no model router is
+    supplied (existing callers and tests)."""
+
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+
+    def label(self, model_key: str) -> str:
+        return COUNCIL_MODELS[model_key]["model"]
+
+    def call(self, model_key: str, system: str, user: str):
+        return _call_model(self.api_key, model_key, system, user)
+
+
+def _backend_for(client) -> object:
+    """The council backend for a client: a ModelRouter supplies one (each seat and
+    the chair on whichever provider/model the user chose); a plain client falls
+    back to the original NVIDIA-only table."""
+    if hasattr(client, "council_backend"):
+        return client.council_backend()
+    return _LegacyBackend(getattr(client, "api_key", ""))
+
+
 def run_council(agents: list, context: str, final_prompt: str,
-                api_key: str, master_key: str = "gpt_120b") -> dict:
+                api_key: str = "", master_key: str = "gpt_120b", backend=None) -> dict:
+    backend = backend or _LegacyBackend(api_key)
     agent_responses = []
     failures = []
     transcript_lines = []
@@ -267,33 +297,33 @@ def run_council(agents: list, context: str, final_prompt: str,
             f"{agent['lens']}\n\n"
             "Be direct, specific, and evidence-based. Give 3-5 key points."
         )
-        model_info = COUNCIL_MODELS[agent["model_key"]]
-        response   = _call_model(api_key, agent["model_key"], system,
-                                 f"Council context:\n\n{context}\n\nGive your expert assessment.")
+        model_label = backend.label(agent["model_key"])
+        response    = backend.call(agent["model_key"], system,
+                                   f"Council context:\n\n{context}\n\nGive your expert assessment.")
         if isinstance(response, dict) and response.get("_failed"):
             # A failed call contributes no opinion: it is carried as
             # structured failure context, never as debate text the chair
             # could mistake for an agent's position.
             failures.append({
-                "agent": agent["name"], "model": model_info["model"],
+                "agent": agent["name"], "model": model_label,
                 "error": response.get("error", "unknown error"),
             })
             agent_responses.append({
                 "agent": agent["name"], "role": agent["role"],
-                "model": model_info["model"], "response": "",
+                "model": model_label, "response": "",
                 "failed": True, "error": response.get("error", ""),
             })
             transcript_lines.append(
-                f"**{agent['name']} ({agent['role']}) [{model_info['model']}]:\n"
+                f"**{agent['name']} ({agent['role']}) [{model_label}]:\n"
                 f"[CALL FAILED — no opinion available]"
             )
             continue
         agent_responses.append({
             "agent": agent["name"], "role": agent["role"],
-            "model": model_info["model"], "response": response,
+            "model": model_label, "response": response,
         })
         transcript_lines.append(
-            f"**{agent['name']} ({agent['role']}) [{model_info['model']}]:**\n{response}"
+            f"**{agent['name']} ({agent['role']}) [{model_label}]:**\n{response}"
         )
 
     debate_text = "\n\n---\n\n".join(
@@ -313,8 +343,8 @@ def run_council(agents: list, context: str, final_prompt: str,
         f"Original context:\n{context}\n\nDebate:\n{debate_text}{failures_note}"
     )
 
-    raw_consensus = _call_model(
-        api_key, master_key,
+    raw_consensus = backend.call(
+        master_key,
         CONSENSUS_PROMPT + "\n\nReturn ONLY valid JSON.",
         consensus_context,
     )
@@ -326,8 +356,8 @@ def run_council(agents: list, context: str, final_prompt: str,
         if not consensus:
             consensus = {"consensus": raw_consensus, "key_points": [], "confidence": "medium"}
 
-    raw_final = _call_model(
-        api_key, master_key,
+    raw_final = backend.call(
+        master_key,
         final_prompt + "\n\nReturn ONLY valid JSON.",
         f"{consensus_context}\n\nCouncil consensus:\n{json.dumps(consensus, indent=2)}",
     )
@@ -347,7 +377,7 @@ def run_council(agents: list, context: str, final_prompt: str,
 
 
 def council_select_model(params: list, sufficiency: dict, context: dict, client) -> dict:
-    api_key = client.api_key
+    backend = _backend_for(client)
     summary = {
         "total_parameters":   len(params),
         "categories_present": list(set(p.get("category", "") for p in params)),
@@ -364,26 +394,35 @@ def council_select_model(params: list, sufficiency: dict, context: dict, client)
         f"Researcher interest: {context.get('interest','')}\n\n"
         f"Extracted parameters:\n{json.dumps(summary, indent=2)}"
     )
-    return run_council(MODEL_SELECTION_AGENTS, council_context, MODEL_COUNCIL_FINAL_PROMPT, api_key)
+    return run_council(MODEL_SELECTION_AGENTS, council_context, MODEL_COUNCIL_FINAL_PROMPT, backend=backend)
 
 
 def council_synthesise_insights(
     sim_results: dict, discovery: dict,
     params: list, gaps: list, context: dict, client,
 ) -> dict:
-    api_key    = client.api_key
+    backend    = _backend_for(client)
     gap_titles = [g.get("title", "") for g in gaps[:5]]
     hypotheses = discovery.get("hypotheses", [])
 
+    if sim_results.get("skipped"):
+        simulation_block = (
+            "SIMULATION RESULTS:\nNO SIMULATION WAS RUN. The papers did not contain enough quantitative "
+            f"parameters ({sim_results.get('skip_reason', 'insufficient data')}). Base every insight on the "
+            "hypotheses, the research gaps and what the papers actually report. Make NO numerical prediction, "
+            "probability or effect size, and say plainly where the data are too thin to say more.\n\n")
+    else:
+        simulation_block = (
+            f"SIMULATION RESULTS:\n"
+            f"Models run: {sim_results.get('models_run', [sim_results.get('model_used','unknown')])}\n"
+            f"Headline numbers: {json.dumps(sim_results.get('headline_numbers',{}), indent=2)}\n"
+            f"Top sensitivity drivers: {json.dumps(sim_results.get('sensitivity_ranking',[])[:5], indent=2)}\n\n")
     council_context = (
         f"Research domain: {context.get('domain','Healthcare AI')}\n\n"
         f"NOVEL HYPOTHESES from cross-paper analysis:\n"
         f"{json.dumps(hypotheses[:3], indent=2)}\n\n"
-        f"SIMULATION RESULTS:\n"
-        f"Models run: {sim_results.get('models_run', [sim_results.get('model_used','unknown')])}\n"
-        f"Headline numbers: {json.dumps(sim_results.get('headline_numbers',{}), indent=2)}\n"
-        f"Top sensitivity drivers: {json.dumps(sim_results.get('sensitivity_ranking',[])[:5], indent=2)}\n\n"
+        f"{simulation_block}"
         f"RESEARCH GAPS previously identified:\n{json.dumps(gap_titles, indent=2)}\n\n"
         f"Parameters used: {len(params)}"
     )
-    return run_council(INSIGHT_SYNTHESIS_AGENTS, council_context, INSIGHT_COUNCIL_FINAL_PROMPT, api_key)
+    return run_council(INSIGHT_SYNTHESIS_AGENTS, council_context, INSIGHT_COUNCIL_FINAL_PROMPT, backend=backend)

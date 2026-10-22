@@ -118,7 +118,7 @@ def build_full_report_md(context, params, sufficiency, model_council,
             lines += [f"### {h.get('hypothesis_id','')}: {h.get('title','')}\n",
                       f"{h.get('claim','')}\n"]
 
-    lines.append("\n---\n*Report by Research Gap Analyzer — Computational Lab*")
+    lines.append("\n---\n*Report by Clinova — Agentic Research Analyzer Platform*")
     return "\n".join(lines)
 
 

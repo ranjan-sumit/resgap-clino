@@ -48,7 +48,10 @@ from packages.research_schemas.evidence_object import (
 # A result cached from a run without Docling (Provenance.page=None
 # everywhere) must not be served to a later run that has Docling segments
 # and could resolve real provenance -- and vice versa.
-EVIDENCE_STAGE_VERSION = 3
+# Bumped 3 -> 4: evidence is now read from the paper's text by the Evidence Reader
+# (verified quotes, real pages, study type); results cached from the wiki-based
+# path have no quotes and must not be served in its place.
+EVIDENCE_STAGE_VERSION = 4
 
 _DETERMINISTIC_FIELD_MAP = {
     "methods": "Method",
@@ -260,14 +263,33 @@ def extract_evidence(paper_id: str, wiki_page: dict, docling_result: dict = None
     """Combined entry point. `client=None` or `use_llm=False` skips the
     LLM half entirely and returns only the 6 deterministic evidence types
     -- a legitimate, honest mode (e.g. the Corpus Quality Engine toggle is
-    off, or a caller wants zero LLM cost)."""
+    off, or a caller wants zero LLM cost).
+
+    When the paper's page-tagged text is available and a client is given, the
+    Evidence Reader agent (pipeline/evidence_reader.py) reads the paper itself and
+    every item carries a verified quote, page and section. Only if the reader cannot
+    run (no text layer, model failure, nothing verified) does extraction fall back to
+    the wiki-based path below, with the reason recorded in diagnostics["reader"]."""
+    reader_diag = None
+    if use_llm and client is not None:
+        segments = (docling_result or {}).get("text_segments")
+        if segments:
+            from pipeline.evidence_reader import read_paper
+            objects, reader_diag = read_paper(paper_id, segments, client)
+            if reader_diag["usable"]:
+                return objects, {"deterministic": None, "llm": None, "reader": reader_diag}
+
     det_objects, det_diag = extract_deterministic_evidence(paper_id, wiki_page, docling_result)
 
     if not use_llm or client is None:
-        return det_objects, {"deterministic": det_diag, "llm": None}
+        return det_objects, {"deterministic": det_diag, "llm": None, "reader": reader_diag}
 
     llm_objects, llm_diag = extract_llm_evidence(paper_id, wiki_page, docling_result, client)
-    return det_objects + llm_objects, {"deterministic": det_diag, "llm": llm_diag}
+    if reader_diag and reader_diag.get("error") and "no usable text" not in reader_diag["error"]:
+        # The reader should have worked: do not cache this degraded fallback as if it
+        # were the real extraction (a transient failure must not be frozen in).
+        llm_diag["llm_call_failed"] = True
+    return det_objects + llm_objects, {"deterministic": det_diag, "llm": llm_diag, "reader": reader_diag}
 
 
 def _evidence_content_hash(paper_id: str, wiki_page: dict, docling_result: dict = None) -> str:

@@ -139,6 +139,30 @@ class ValidateGapsCacheTests(unittest.TestCase):
             self.assertEqual(second[0]["existing_papers"], first[0]["existing_papers"])
             self.assertEqual(second[0]["search_query_used"], first[0]["search_query_used"])
 
+    def test_progress_callback_reports_each_gap_before_it_is_checked(self):
+        client = MagicMock()
+        client.chat_json.return_value = Success(json.dumps({"status": "open", "reasoning": "none found"}))
+        seen = []
+        with patch("pipeline.academic_search._search_semantic_scholar_with_status", return_value=([], True)), \
+             patch("pipeline.academic_search._search_arxiv_with_status", return_value=([], True)), \
+             patch("pipeline.academic_search.time.sleep"):
+            out = validate_gaps([self._gap("A"), self._gap("B"), self._gap("C")], client, domain_config=None,
+                                progress_callback=lambda done, total: seen.append((done, total)))
+        self.assertEqual(seen, [(0, 3), (1, 3), (2, 3)])
+        self.assertEqual(len(out), 3)
+
+    def test_a_failing_progress_callback_does_not_stop_validation(self):
+        client = MagicMock()
+        client.chat_json.return_value = Success(json.dumps({"status": "open", "reasoning": "x"}))
+
+        def boom(done, total):
+            raise RuntimeError("display broke")
+        with patch("pipeline.academic_search._search_semantic_scholar_with_status", return_value=([], True)), \
+             patch("pipeline.academic_search._search_arxiv_with_status", return_value=([], True)), \
+             patch("pipeline.academic_search.time.sleep"):
+            out = validate_gaps([self._gap("A"), self._gap("B")], client, domain_config=None, progress_callback=boom)
+        self.assertEqual(len(out), 2)
+
     def test_no_papers_found_is_cached(self):
         client = MagicMock()
         with patch("pipeline.academic_search._search_semantic_scholar_with_status", return_value=([], True)) as mock_ss, \

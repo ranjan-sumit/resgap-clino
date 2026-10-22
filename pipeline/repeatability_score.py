@@ -29,7 +29,10 @@ this is named honestly in the returned report, not silently substituted.
 import re
 from itertools import combinations
 
-from scipy.stats import spearmanr
+# scipy.stats is imported inside _ranking_correlation, not here: this module is
+# imported when the app starts, and a cold scipy import took minutes on a
+# memory-starved machine, blocking every page load for a feature used only when
+# comparing runs.
 
 REPEATABILITY_SCORE_VERSION = 1
 
@@ -104,6 +107,7 @@ def _ranking_correlation(gaps_a: list, gaps_b: list) -> float | None:
     rank_b = [pos_b[id(g)] for _, g in pairs]
     if len(set(rank_a)) < 2 or len(set(rank_b)) < 2:
         return None
+    from scipy.stats import spearmanr
     corr, _ = spearmanr(rank_a, rank_b)
     return None if corr != corr else float(corr)  # corr != corr catches NaN
 

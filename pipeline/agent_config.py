@@ -110,6 +110,24 @@ EVIDENCE_EXTRACTOR = AgentConfig(
     model="openai/gpt-oss-20b",  # MASTER_MODEL, utils/azure_client.py
 )
 
+# Reads a whole paper (~15-20k tokens in) and returns up to ~45 quoted items, so the
+# output budget is far above the wiki-based extractor's 1500.
+EVIDENCE_READER = AgentConfig(
+    role="Evidence Reader",
+    max_tokens=12000,
+    timeout_seconds=300,
+    max_retries=2,
+    prompt_version="2",
+)
+
+# The three gap-finder lenses (limitation miner, cross-paper synthesizer, methodology
+# auditor) and the critic that scores, merges and ranks what they propose.
+GAP_FINDER = AgentConfig(role="Gap Finder", max_tokens=6000, timeout_seconds=300, max_retries=2, prompt_version="2")
+GAP_CRITIC = AgentConfig(role="Methodology Critic", max_tokens=8000, timeout_seconds=300, max_retries=2,
+                         prompt_version="1")
+PROPOSAL_REVIEWER = AgentConfig(role="Proposal Reviewer", max_tokens=10000, timeout_seconds=300, max_retries=2,
+                                prompt_version="1")
+
 GAP_GENERATOR = AgentConfig(
     role="Gap Generator",
     # pipeline/gap_detector.py's detect_gaps(): max_tokens unchanged from

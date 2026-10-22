@@ -61,6 +61,9 @@ Return ONLY a JSON array:
 ]"""
 
 
+_MIN_ENTITIES_PER_PAPER = 8
+
+
 def _robust_parse(raw: str, expected: type = dict):
     """
     Multi-strategy JSON parser. Tries 5 strategies before giving up.
@@ -95,7 +98,34 @@ def _robust_parse(raw: str, expected: type = dict):
     return {} if expected == dict else []
 
 
-def extract_entities_and_relations(wiki: dict, client, domain_config: dict = None) -> dict:
+# The Healthcare-AI vocabulary (model_architecture, clinical_task, predicts, diagnoses,
+# validated_on...) describes machine-learning studies on patients. Forced onto a corpus of
+# lab, review and survey papers it mislabels things (a survey became a "clinical_task", a
+# statistical test a "clinical_metric", "Phe508del diagnoses Cystic Fibrosis").
+_ML_STUDY_TYPES = ("ml_prediction_model", "computational_simulation")
+
+_SCIENCE_VOCABULARY = """
+
+ENTITY TYPES to use (pick the most specific): disease, condition, intervention (a drug, therapy or procedure), target (a gene, protein or pathway), biomarker, method, model_system (a cell model, organ-on-chip, animal model), organism, dataset_or_cohort, outcome_measure, concept.
+- A statistical test is a method, not a metric. A survey or questionnaire is a method (or a dataset_or_cohort), never a task. A microorganism is an organism.
+RELATIONSHIP TYPES to use: treats, targets, causes, associated_with, measured_by, studied_in, modeled_by, compared_with, contradicts, extends, enables, limited_by, requires, validated_on.
+- Use "predicts" or "diagnoses" ONLY when a paper builds a predictive or diagnostic model. Prefer the specific relation ("treats", "targets", "measured_by") over the generic "applied_to".
+"""
+
+
+def _vocabulary_prompt(base_prompt: str, domain_config: dict, evidence_objects: dict | None) -> str:
+    """The graph prompt with the domain vocabulary that fits the corpus: the configured
+    (Healthcare-AI) one only when a paper is an ML / simulation study, otherwise a general
+    biomedical-science vocabulary."""
+    from pipeline.evidence_reader import study_type_of
+    types = {study_type_of(items) for items in (evidence_objects or {}).values()} - {None}
+    if types and not (types & set(_ML_STUDY_TYPES)):
+        return base_prompt + _SCIENCE_VOCABULARY
+    return inject_domain_into_graph_prompt(base_prompt, domain_config or {})
+
+
+def extract_entities_and_relations(wiki: dict, client, domain_config: dict = None,
+                                   evidence_objects: dict = None) -> dict:
     pages = wiki.get("pages", [])
     cross_links = wiki.get("cross_links", {})
 
@@ -119,9 +149,16 @@ Cross-paper connections already identified:
 {json.dumps(cross_links, indent=2)}
 
 Extract all entities and relationships for the knowledge graph.
+
+Coverage rules (a sparse graph is a failure):
+- Give EVERY paper at least {_MIN_ENTITIES_PER_PAPER} entities, drawn from its key_concepts, methods, datasets and findings. Use short, specific names.
+- Every entity must appear in at least one relationship. Do not return isolated entities.
+- Include at least {len(pages)} relationships that connect entities from DIFFERENT papers (shared concepts, contrasting methods, a dataset used by one paper and discussed by another).
+- Use ONLY the relation values and type values listed in the schema.
+- Give each relationship a short "evidence" phrase taken from the wiki text.
 IMPORTANT: Return ONLY valid JSON — no text before or after."""
 
-    system_prompt = inject_domain_into_graph_prompt(ENTITY_EXTRACTION_PROMPT, domain_config or {})
+    system_prompt = _vocabulary_prompt(ENTITY_EXTRACTION_PROMPT, domain_config or {}, evidence_objects)
 
     # B24 fix (2026-08-21): max_tokens was 6000. Measured live against a real
     # 2-paper corpus: gpt-oss models are "thinking" models that stream a
@@ -370,6 +407,77 @@ def find_missing_bridges(graph_data: dict, wiki: dict) -> list:
     return bridges
 
 
+def layout_positions(n: int, edges: list, seed: int = 7, iterations: int = 300) -> list:
+    """Force-directed (Fruchterman-Reingold) positions, deterministic for a
+    given graph: linked nodes pull together, all nodes push apart, and nodes
+    with no links are spread on a ring around the connected cluster instead of
+    piling up. Returns [(x, y), ...] scaled to roughly [-1, 1]."""
+    import numpy as np
+    if n == 0:
+        return []
+    if n == 1:
+        return [(0.0, 0.0)]
+    rng = np.random.default_rng(seed)
+    pos = rng.uniform(-1, 1, size=(n, 2))
+    pairs = sorted({(min(e["source_idx"], e["target_idx"]), max(e["source_idx"], e["target_idx"]))
+                    for e in edges if e["source_idx"] != e["target_idx"]})
+    linked = {i for pair in pairs for i in pair}
+    k = 1.0 / np.sqrt(n)
+    temp = 0.2
+    for _ in range(iterations):
+        delta = pos[:, None, :] - pos[None, :, :]
+        dist = np.maximum(np.linalg.norm(delta, axis=2), 1e-3)
+        force = (delta / dist[..., None]) * ((k * k) / dist)[..., None]
+        disp = force.sum(axis=1)
+        for a, b in pairs:
+            d = pos[a] - pos[b]
+            dl = max(float(np.linalg.norm(d)), 1e-3)
+            pull = (d / dl) * (dl * dl / k)
+            disp[a] -= pull
+            disp[b] += pull
+        disp -= pos * 4.0 * k          # gravity: keeps separate groups from drifting apart
+        length = np.maximum(np.linalg.norm(disp, axis=1), 1e-9)
+        pos += (disp / length[:, None]) * np.minimum(length, temp)[:, None]
+        temp = max(temp * 0.98, 0.002)
+    # Centre and scale on the connected nodes only: isolated nodes get pushed
+    # far out by the repulsion and would otherwise shrink the real cluster to a dot.
+    anchor = sorted(linked) or list(range(n))
+    pos -= pos[anchor].mean(axis=0)
+    scale = float(np.abs(pos[anchor]).max()) or 1.0
+    pos = pos / scale
+    loose = [i for i in range(n) if i not in linked]
+    if loose and linked:
+        import math
+        ring = 1.25
+        for j, i in enumerate(loose):
+            ang = 2 * math.pi * j / len(loose)
+            pos[i] = (ring * math.cos(ang), ring * math.sin(ang))
+    return [(float(x), float(y)) for x, y in pos]
+
+
+_TYPE_COLORS = {
+    "concept":  "#58a6ff",
+    "method":   "#3fb950",
+    "dataset":  "#d29922",
+    "metric":   "#a371f7",
+    "problem":  "#f85149",
+    "domain":   "#79c0ff",
+    "model":    "#ffa657",
+}
+_EXTRA_PALETTE = ["#e0678f", "#2aa7a1", "#8e6bd1", "#c2873a", "#4f7fd6", "#7fa83f",
+                  "#d6544f", "#3d9bd1", "#b05fb0", "#8a8f3a", "#d98e2b", "#5a7d8c",
+                  "#c94f7c", "#38a36a", "#6a63c9", "#a8744f"]
+
+
+def node_color(entity_type) -> str:
+    """Models invent types ("disease", "biomarker"); give each a stable colour
+    of its own rather than one shared grey."""
+    t = str(entity_type or "concept")
+    if t in _TYPE_COLORS:
+        return _TYPE_COLORS[t]
+    return _EXTRA_PALETTE[sum(map(ord, t)) % len(_EXTRA_PALETTE)]
+
+
 def prepare_network_diagram_data(graph_data: dict) -> dict:
     """
     Prepare node/edge data for plotly network diagram.
@@ -377,16 +485,7 @@ def prepare_network_diagram_data(graph_data: dict) -> dict:
     """
     entities = graph_data.get("entities", [])
     relationships = graph_data.get("relationships", [])
-
-    type_colors = {
-        "concept":  "#58a6ff",
-        "method":   "#3fb950",
-        "dataset":  "#d29922",
-        "metric":   "#a371f7",
-        "problem":  "#f85149",
-        "domain":   "#79c0ff",
-        "model":    "#ffa657",
-    }
+    _color = node_color
 
     # Build id/name → index map. LLMs sometimes use entity names in relationships.
     id_to_idx = {e.get("id", e.get("name", f"e{i}")): i for i, e in enumerate(entities)}
@@ -396,7 +495,7 @@ def prepare_network_diagram_data(graph_data: dict) -> dict:
         "id":       e.get("id", f"e{i}"),
         "name":     e.get("name", "Unknown"),
         "type":     e.get("type", "concept"),
-        "color":    type_colors.get(e.get("type", "concept"), "#8b949e"),
+        "color":    _color(e.get("type", "concept")),
         "papers":   e.get("papers", []),
         "importance": e.get("importance", "low"),
         "size":     {"high": 20, "medium": 14, "low": 9}.get(e.get("importance", "low"), 9),
@@ -418,6 +517,11 @@ def prepare_network_diagram_data(graph_data: dict) -> dict:
                 "relationship_id": rel.get("relationship_id"),
             })
 
+    try:
+        for nd, (x, y) in zip(nodes, layout_positions(len(nodes), edges)):
+            nd["x"], nd["y"] = round(x, 4), round(y, 4)
+    except Exception:
+        pass        # the UI falls back to a circle when positions are absent
     return {"nodes": nodes, "edges": edges}
 
 
@@ -426,7 +530,8 @@ def build_knowledge_graph(wiki: dict, client, domain_config: dict = None, eviden
     # extraction — see Story 1.3 / AD-4. Story 1.2 deliberately left
     # extract_entities_and_relations' LLMCallError uncaught for this to catch.
     try:
-        graph_data  = extract_entities_and_relations(wiki, client, domain_config=domain_config)
+        graph_data  = extract_entities_and_relations(wiki, client, domain_config=domain_config,
+                                                     evidence_objects=evidence_objects)
         diagnostics = {
             "used_fallback": bool(graph_data.get("_used_fallback")),
             "raw_response_preview": graph_data.get("_raw_response_preview", ""),

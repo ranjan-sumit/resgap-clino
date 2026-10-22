@@ -341,10 +341,13 @@ Return ONLY JSON: {{"status": "open|partial|solved", "reasoning": "1 sentence ex
     return {"status": "open", "reasoning": "No directly relevant recent papers found."}, False
 
 
-def validate_gaps(gaps: list, client, domain_config: dict = None, ss_api_key: str = "") -> list:
+def validate_gaps(gaps: list, client, domain_config: dict = None, ss_api_key: str = "",
+                  progress_callback=None) -> list:
     """
     Validate all gaps against academic databases.
     Updates each gap with: validation_status, existing_papers, reasoning.
+    `progress_callback(done, total)`, when given, is called before each gap so
+    a slow run (searches are ~12 s per uncached gap) shows it is moving.
     """
     boost_terms = []
     if domain_config:
@@ -352,7 +355,12 @@ def validate_gaps(gaps: list, client, domain_config: dict = None, ss_api_key: st
         boost_terms = get_search_boost_terms(domain_config)
 
     validated = []
-    for gap in gaps:
+    for idx, gap in enumerate(gaps):
+        if progress_callback:
+            try:
+                progress_callback(idx, len(gaps))
+            except Exception:
+                pass        # a display problem must never stop the validation
         # B18 fix: check the cache before the search calls OR the LLM
         # assessment (Story 2.4 / AD-2 / AD-3). gap_hash is title+description
         # only, per AD-3's literal definition -- see Story 2.4 Dev Notes for

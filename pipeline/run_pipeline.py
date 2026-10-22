@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable
 
-from pipeline.academic_search import validate_gaps
+from pipeline.literature_scout import scout_gaps
 from pipeline.canonical_resolver import filter_and_dedupe_references
 from pipeline.corpus_quality import (
     QualityGateBlockedError, compute_corpus_quality, enforce_quality_gate,
@@ -37,12 +37,14 @@ from pipeline.corpus_quality import (
 from pipeline.deterministic_gap_patterns import detect_deterministic_gaps
 from pipeline.docling_parser import DOCLING_STAGE_VERSION, extract_with_docling
 from pipeline.evidence_extractor import extract_evidence_cached
+from pipeline.evidence_reader import study_type_of
 from pipeline.extraction_reconciler import reconcile_paper
 from pipeline.gap_challenger import GAP_CHALLENGER_STAGE_VERSION, run_challenge
+from pipeline.gap_agents import find_gaps
 from pipeline.gap_detector import GapDetectionError, detect_gaps
 from pipeline.graph_builder import build_knowledge_graph
 from pipeline.graph_persistence import (
-    GRAPH_PERSISTENCE_VERSION, connect_ok as arcadedb_connect_ok, save_graph_snapshot,
+    GRAPH_PERSISTENCE_VERSION, connect_ok as graph_store_connect_ok, save_graph_snapshot,
 )
 from pipeline.graph_quality import apply_graph_quality_to_gaps, score_graph_quality
 from pipeline.graph_structural_gaps import detect_graph_structural_gaps
@@ -50,13 +52,35 @@ from pipeline.lineage import record_run_lineage
 from pipeline.page_index import build_tree, tree_to_summary
 from pipeline.paper_manager import assign_tiers, corpus_stats
 from pipeline.pdf_parser import parse_pdf
-from pipeline.proposal_generator import generate_proposals
+from pipeline.proposal_generator import generate_proposals, review_proposals
 from pipeline.reference_extractor import (
     REFERENCE_STAGE_VERSION, extract_and_enrich_references, summarise_reference_corpus,
 )
 from pipeline.relevance_ranking import EMBEDDING_MODEL, RERANK_MODEL
 from pipeline.wiki_compiler import build_wiki
-from utils.database import record_artifact, record_run_manifest, save_run
+from utils.database import DEFAULT_PROJECT_ID, record_artifact, record_run_manifest, save_run
+from utils import project_store
+
+
+# The rule-based pattern library (TRIPOD/PROBAST-style items: external validation,
+# calibration, fairness...) only makes sense for studies that build or test a model on patients.
+_RULE_CHECK_STUDY_TYPES = ("ml_prediction_model", "clinical_trial", "observational_clinical")
+# arXiv covers computing, physics and maths; for biomedical corpora it only adds noise and delay.
+_ARXIV_STUDY_TYPES = ("ml_prediction_model", "computational_simulation")
+
+
+def _dedupe_supplementary(gaps: list, max_items: int = 10) -> list:
+    """Drop near-identical titles (graph templates like 'Unexplored concept: X' repeat) and cap the list."""
+    import difflib
+    kept = []
+    for g in gaps:
+        title = str(g.get("title", "")).lower()
+        if any(difflib.SequenceMatcher(None, title, str(k.get("title", "")).lower()).ratio() > 0.85 for k in kept):
+            continue
+        kept.append(g)
+        if len(kept) >= max_items:
+            break
+    return kept
 
 
 class PipelineInputError(ValueError):
@@ -79,6 +103,9 @@ class RunOptions:
     enable_gap_challenger: bool = False
     enable_graph_persistence: bool = False
     ss_api_key: str = ""
+    nvidia_api_key: str = ""              # relevance reranking in the Gap Challenger
+    models: dict | None = None            # ModelConfig.to_dict(): which model did which job
+    project_id: str | None = None         # None = the default project
     domain_config: dict | None = None
     git_commit: str | None = None
 
@@ -98,8 +125,34 @@ class RunOutcome:
     duration_seconds: float = 0.0
 
 
+def _model_bundle(options: "RunOptions") -> str:
+    """One string naming every model a run used (the old single "provider:model"
+    when no per-role assignment was given)."""
+    models = options.models
+    if not models:
+        return f"{options.provider_key}:{options.model}"
+    roles = models.get("roles") or {}
+    parts = [f"{r}={roles[r]['provider']}:{roles[r]['model']}" for r in ("extraction", "wiki", "analysis") if r in roles]
+    fb = models.get("fallback")
+    if fb:
+        parts.append(f"fallback={fb['provider']}:{fb['model']}")
+    return "; ".join(parts)
+
+
 def _noop(*_args, **_kwargs) -> None:
     return None
+
+
+def redo_proposal_step(results: dict, context: dict, client, domain_config: dict | None = None) -> list:
+    """Stage 6 (draft + review) alone, on a finished run's gaps. For a run whose proposal
+    step failed: fills them in without repeating the whole analysis."""
+    client.set_stage("Stage 6 — Proposals")
+    gaps = results.get("gaps", [])
+    proposals = generate_proposals(gaps, results.get("wiki", {}), context, client, domain_config=domain_config)
+    if proposals:
+        reviewed, _diag = review_proposals(proposals, gaps, client, domain_config=domain_config)
+        proposals = reviewed or proposals
+    return proposals
 
 
 MIN_PAPERS = 2
@@ -129,6 +182,16 @@ def run_full_pipeline(
             "compares papers against each other, so a single paper has nothing to compare to."
         )
     papers = papers[:MAX_PAPERS]
+    project_id = options.project_id or DEFAULT_PROJECT_ID
+
+    # Keep the uploaded papers in the project folder before anything else runs,
+    # so they survive even if a later stage fails. A failure here must never
+    # stop the analysis itself.
+    paper_file_ids: list[int] = []
+    try:
+        paper_file_ids = project_store.save_papers(project_id, papers)
+    except Exception as e:
+        warn(f"Papers were not saved to the project folder (analysis continues): {e}")
 
     domain_cfg = options.domain_config
     run_start = time.time()
@@ -157,9 +220,13 @@ def run_full_pipeline(
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
             tmp.write(content)
             tmp_path = tmp.name
+        if options.use_vision:
+            client.set_stage("Stage 1 — Figure analysis")
         paper = parse_pdf(tmp_path, filename,
                           client=client if options.use_vision else None,
-                          use_vision=options.use_vision)
+                          use_vision=options.use_vision,
+                          on_progress=lambda msg, _f=filename: progress(
+                              f"Stage 1 — Analysing figures in {_f} ({msg})…", 8))
         paper["tier"] = 1
         all_papers.append(paper)
         all_trees.append(build_tree(paper))
@@ -171,6 +238,15 @@ def run_full_pipeline(
     _trace("Stage 1 — PDF Parse",
           f"{len(papers)} PDFs",
           f"{sum(p.get('char_count', 0) for p in all_papers):,} chars extracted")
+    for p in all_papers:
+        secs = [k for k, v in p.get("sections", {}).items() if k != "_header" and str(v).strip()]
+        figs = p.get("figures") or []
+        bad = sum(1 for f in figs if str(f.get("description", "")).startswith("["))
+        fig_note = f", figures: {len(figs) - bad}/{len(figs)} analysed" if figs else ""
+        _trace(f"  Parsed {p.get('filename', '?')}",
+               f"{p.get('char_count', 0):,} chars",
+               f"{len(secs)} sections, {len(p.get('tables', []))} tables{fig_note}",
+               "✅" if len(secs) >= 2 and not bad else "⚠️")
     progress("Stage 1 complete", 12)
 
     # ── Stage 1B/1C: References ───────────────────────────────────────────
@@ -219,6 +295,10 @@ def run_full_pipeline(
           f"{len(all_papers)} papers",
           f"{len(wiki.get('pages', []))} pages, "
           f"{len(wiki.get('cross_links', {}).get('shared_concepts', []))} links")
+    for pg in wiki.get("pages", []):
+        if not (pg.get("key_findings") or pg.get("contributions") or pg.get("methods")):
+            _trace(f"  Wiki page for {pg.get('source_file', '?')}", "paper text",
+                   "empty — the model returned no findings, contributions or methods", "⚠️")
     progress("Wiki complete", 34)
 
     # ── Stage 2B: Corpus Quality Engine (opt-in) ──────────────────────────
@@ -243,14 +323,14 @@ def run_full_pipeline(
         paper_scores = []
         docling_results = []
         for i, (paper, tmp_path) in enumerate(zip(all_papers, paper_tmp_paths)):
-            progress(f"Stage 2B — Cross-checking paper {i+1}/{len(all_papers)} with Docling…", 35)
+            progress(f"Stage 2B — Cross-checking paper {i+1}/{len(all_papers)} with the structural parser…", 35)
             wiki_page = wiki_pages[i] if i < len(wiki_pages) else {}
             docling_result = None
             try:
                 docling_result = extract_with_docling(tmp_path, paper.get("filename", papers[i][0]))
                 reconciled = reconcile_paper(paper, docling_result, paper.get("filename", ""))
             except Exception:
-                # A Docling failure degrades this paper's score rather than
+                # A second-parser failure degrades this paper's score rather than
                 # aborting the run -- its doi/tables fields score as
                 # not-extracted, correctly lowering completeness instead of
                 # pretending nothing was lost.
@@ -302,25 +382,45 @@ def run_full_pipeline(
     progress("Stage 2C — Extracting evidence objects…", 35)
     client.set_stage("Stage 2C — Evidence Extraction")
     evidence_objects: dict = {}
+    paper_profiles: dict = {}
     total_evidence = 0
-    for i, paper in enumerate(all_papers):
+
+    def _read_one(i_paper):
+        i, paper = i_paper
         wiki_page = wiki_pages[i] if i < len(wiki_pages) else {}
         docling_result = docling_results[i] if i < len(docling_results) else None
+        if not docling_result and paper.get("text_segments"):
+            # The page-tagged text from Stage 1 is what the Evidence Reader reads and
+            # what gives every quote a real page and section.
+            docling_result = {"text_segments": paper["text_segments"]}
         filename = paper.get("filename", f"paper_{i+1}")
         try:
-            evidence_dicts, _, _ = extract_evidence_cached(
+            evidence_dicts, diag, _ = extract_evidence_cached(
                 filename, wiki_page, docling_result, client=client, use_llm=True,
             )
         except Exception:
             # Evidence extraction is additive, not load-bearing.
-            evidence_dicts = []
+            evidence_dicts, diag = [], {}
+        return filename, evidence_dicts, diag
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=max(1, min(len(all_papers), 4))) as pool:
+        reads = list(pool.map(_read_one, enumerate(all_papers)))
+    for filename, evidence_dicts, diag in reads:
         evidence_objects[filename] = evidence_dicts
         total_evidence += len(evidence_dicts)
+        reader = (diag or {}).get("reader") or {}
+        paper_profiles[filename] = {"study_type": study_type_of(evidence_dicts),
+                                    "quoted_items": sum(1 for e in evidence_dicts if (e.get("provenance") or {}).get("quote"))}
+        if reader and not reader.get("usable"):
+            _trace(f"  Evidence for {filename}", "paper text",
+                   f"reader could not run ({reader.get('error')}); used the wiki summary instead", "⚠️")
 
+    n_quoted = sum(p["quoted_items"] for p in paper_profiles.values())
     _trace("Stage 2C — Evidence Extraction",
           f"{len(all_papers)} papers",
-          f"{total_evidence} evidence objects extracted "
-          f"({'with' if options.enable_quality_engine else 'without'} Docling page provenance)")
+          f"{total_evidence} evidence objects, {n_quoted} with a verified quote and page "
+          f"(study types: " + ", ".join(f"{p['study_type'] or '?'}" for p in paper_profiles.values()) + ")")
 
     # ── Stages 3-6 (skipped entirely on a FAIL gate) ──────────────────────
     if not gate_blocked:
@@ -336,43 +436,88 @@ def run_full_pipeline(
               f"— {graph_quality['build_status']} (quality={graph_quality['quality_score']})")
         progress("Graph complete", 48)
 
-        progress("Stage 4 — Detecting research gaps…", 50)
+        progress("Stage 4 — Finding research gaps (finder agents + critic)…", 50)
         client.set_stage("Stage 4 — Gap Detection")
         gap_detection_error = None
-        try:
-            gaps = detect_gaps(wiki, graph, context, client, domain_config=domain_cfg,
-                               evidence_objects=evidence_objects)
-        except GapDetectionError as e:
-            # B19 makes GapDetectionError deliberate (never fabricate gaps
-            # from an unparseable LLM response), but it must not kill the run
-            # before save_run and discard everything already fetched --
-            # degrade to the two non-LLM gap sources only, with the failure
-            # recorded, same philosophy as the B23 gate-blocked path.
-            gap_detection_error = str(e)
-            warn(f"LLM gap detection failed ({e}) -- using deterministic + "
-                 "graph-structural gap candidates only.")
-            gaps = []
-        # Two additional, independent candidate-gap sources (no LLM call):
-        # the deterministic pattern library and graph-structural signals.
-        det_gaps = detect_deterministic_gaps(evidence_objects, context.get("domain", ""))
+        agent_out = find_gaps(wiki, graph, context, client, evidence_objects, paper_profiles)
+        gaps = agent_out["gaps"]
+        rejected_gaps = agent_out["rejected"]
+        agent_diag = agent_out["diagnostics"]
+        _trace("Stage 4 — Gap agents",
+               f"{len(evidence_objects)} papers' quoted evidence, 3 finder lenses",
+               f"{agent_diag.get('candidates', 0)} grounded candidates -> {len(agent_out['gaps'])} kept by the critic, "
+               f"{len(rejected_gaps)} merged/dropped"
+               + (f"; critic: {agent_diag['critic_error']}" if agent_diag.get("critic_error") else ""),
+               "⚠️" if agent_diag.get("critic_error") else "✅")
+        for fd in agent_diag.get("finders", []):
+            if fd.get("error"):
+                _trace(f"  Gap finder: {fd['lens']}" + (f" ({fd['paper']})" if fd.get("paper") else ""),
+                       "evidence brief", fd["error"], "⚠️")
+        if not gaps:
+            # Agents produced nothing usable (all calls failed or nothing grounded): fall back to
+            # the single-call detector so a run is not left without gaps by one bad round of calls.
+            client.set_stage("Stage 4 — Gap Detection")
+            try:
+                gaps = detect_gaps(wiki, graph, context, client, domain_config=domain_cfg,
+                                   evidence_objects=evidence_objects)
+                gap_detection_error = "gap agents returned nothing; used the single-call detector"
+            except GapDetectionError as e:
+                gap_detection_error = str(e)
+                warn(f"Gap detection failed ({e}).")
+                gaps = []
+        # Supplementary candidates, kept OUT of the main gap list: rule-based checks only for
+        # papers whose study type they fit (a review or a lab study has no calibration curve),
+        # and graph-structure hints, de-duplicated. They are shown separately and are not
+        # validated or turned into proposals.
+        applicable = {pid: ev for pid, ev in evidence_objects.items()
+                      if (paper_profiles.get(pid) or {}).get("study_type") in _RULE_CHECK_STUDY_TYPES}
+        det_gaps = detect_deterministic_gaps(applicable, context.get("domain", "")) if applicable else []
         graph_gaps = detect_graph_structural_gaps(graph)
-        gaps = gaps + det_gaps + graph_gaps
+        supplementary_gaps = _dedupe_supplementary(det_gaps + graph_gaps)
+        for g in supplementary_gaps:
+            g["supplementary"] = True
+        if not gaps:
+            # Last resort: neither the agents nor the single-call detector produced a gap, so
+            # promote the rule-based and graph-structure leads (ungated) rather than end the run
+            # with nothing. They are marked as degraded so nobody mistakes them for findings.
+            lead_gaps = _dedupe_supplementary(
+                detect_deterministic_gaps(evidence_objects, context.get("domain", "")) + graph_gaps)
+            for g in lead_gaps:
+                g["degraded_source"] = True
+            gaps, supplementary_gaps = lead_gaps, []
+            warn("No gaps came from the model-based detectors; showing rule-based and graph-structure leads instead.")
         if gap_detection_error:
-            _trace("Stage 4 — Gap Detection (LLM failed)",
-                  "degraded to deterministic + graph-structural sources",
-                  gap_detection_error, status="⚠️")
+            _trace("Stage 4 — Gap Detection (fallback)", "gap agents", gap_detection_error, status="⚠️")
         # FR-7: a DEGRADED/FALLBACK graph downgrades confidence for gaps
         # whose entire evidentiary basis is that graph.
         gaps = apply_graph_quality_to_gaps(gaps, graph_quality)
 
-        progress("Stage 5 — Validating gaps (Semantic Scholar + arXiv)…", 58)
+        progress("Stage 5 — Checking gaps against the literature (Semantic Scholar + Europe PMC)…", 58)
         client.set_stage("Stage 5 — Gap Validation")
-        validated_gaps = validate_gaps(gaps, client, domain_config=domain_cfg,
-                                       ss_api_key=(options.ss_api_key or "").strip())
+        _study_types = {(p or {}).get("study_type") for p in paper_profiles.values()}
+        scout_out = scout_gaps(
+            gaps, client, domain_config=domain_cfg,
+            ss_api_key=(options.ss_api_key or "").strip(),
+            use_arxiv=bool(_study_types & set(_ARXIV_STUDY_TYPES)),
+            progress_callback=lambda done, total: progress(
+                f"Stage 5 — Checking gaps against the literature: {done + 1} of {total}…",
+                58 + int(8 * done / max(total, 1))))
+        validated_gaps = scout_out["gaps"]
+        scout_diag = scout_out["diagnostics"]
+        _by_status = {}
+        for g in validated_gaps:
+            _by_status[g.get("validation_status")] = _by_status.get(g.get("validation_status"), 0) + 1
+        _trace("Stage 5 — Literature check",
+               f"{len(validated_gaps)} gaps, queries written by a planner agent",
+               ", ".join(f"{n} {s}" for s, n in sorted(_by_status.items(), key=lambda kv: str(kv[0])))
+               + (f"; {scout_diag['cache_hits']} from cache" if scout_diag.get("cache_hits") else "")
+               + (f"; WARNING: {scout_diag['unverified']} could not be checked (search unavailable)"
+                  if scout_diag.get("unverified") else "")
+               + (f"; {scout_diag['planner_error']}" if scout_diag.get("planner_error") else ""),
+               "⚠️" if scout_diag.get("unverified") or scout_diag.get("planner_error") else "✅")
         _trace("Stage 4-5 — Gaps",
-              "Wiki + graph + domain context"
-              + (f" + {len(det_gaps)} deterministic-pattern candidates" if det_gaps else "")
-              + (f" + {len(graph_gaps)} graph-structural candidates" if graph_gaps else ""),
+              "Top-ranked agent gaps"
+              + (f" (+{len(supplementary_gaps)} supplementary, not validated)" if supplementary_gaps else ""),
               f"{len(validated_gaps)} gaps: "
               f"{sum(1 for g in validated_gaps if g.get('validation_status') == 'open')} open")
         progress("Gaps complete", 66)
@@ -386,6 +531,7 @@ def run_full_pipeline(
                     gap.update(run_challenge(
                         gap, client, ss_api_key=(options.ss_api_key or "").strip(),
                         domain_config=domain_cfg,
+                        nvidia_api_key=(options.nvidia_api_key or "").strip(),
                     ))
                 except Exception as e:
                     # Per-gap failure degrades that gap only.
@@ -403,13 +549,36 @@ def run_full_pipeline(
         client.set_stage("Stage 6 — Proposals")
         proposals = generate_proposals(validated_gaps, wiki, context, client,
                                        domain_config=domain_cfg)
-        _trace("Stage 6 — Proposals", f"{len(validated_gaps)} gaps", f"{len(proposals)} proposals")
+        _had_actionable = any(g.get("validation_status") in ("open", "partial", "unverified") for g in validated_gaps)
+        if proposals:
+            _trace("Stage 6 — Proposals", f"{len(validated_gaps)} gaps", f"{len(proposals)} drafted")
+            progress("Stage 6b — Reviewing proposals…", 72)
+            drafted = len(proposals)
+            reviewed, review_diag = review_proposals(proposals, validated_gaps, client, domain_config=domain_cfg)
+            if reviewed:
+                proposals = reviewed
+            else:
+                review_diag["error"] = (review_diag.get("error") or "") + " every proposal was rejected: kept the originals"
+            _trace("Stage 6b — Proposal Review", f"{drafted} drafted proposals",
+                   f"{len(proposals)} kept: {review_diag['accepted']} accepted, {review_diag['revised']} revised, "
+                   f"{len(review_diag['rejected'])} rejected"
+                   + (f" ({'; '.join(r['title'] + ': ' + r['reason'] for r in review_diag['rejected'][:3])})"
+                      if review_diag["rejected"] else "")
+                   + (f"; {review_diag['error']}" if review_diag.get("error") else ""),
+                   "⚠️" if review_diag.get("error") else "✅")
+        elif not _had_actionable:
+            _trace("Stage 6 — Proposals", f"{len(validated_gaps)} gaps", "0 proposals (no open or partial gaps)")
+        else:
+            _trace("Stage 6 — Proposals", f"{len(validated_gaps)} gaps",
+                   "0 proposals even though open gaps exist: the model's reply could not be read. "
+                   "Run again, or pick a different Analysis model.", "⚠️")
         progress("Proposals complete", 75)
     else:
         progress("Quality gate FAILED — skipping gap analysis, saving fetched data…", 68)
         graph = {"stats": {"entity_count": 0, "relationship_count": 0}, "communities": []}
         graph_quality = None
         validated_gaps = []
+        supplementary_gaps, rejected_gaps, agent_diag = [], [], {}
         proposals = []
         _trace("Stage 3-6 — Skipped (quality gate FAIL)",
               f"{len(all_papers)} papers, {len(ref_papers)} refs",
@@ -439,6 +608,9 @@ def run_full_pipeline(
         ],
         "wiki": wiki, "graph": graph, "graph_quality": graph_quality,
         "gaps": validated_gaps, "proposals": proposals,
+        "supplementary_gaps": supplementary_gaps,
+        "rejected_gaps": rejected_gaps,
+        "gap_agent_diagnostics": agent_diag,
         "communities": graph.get("communities", []),
         "context": context,
         "corpus_stats": corpus_stats(corpus),
@@ -449,25 +621,35 @@ def run_full_pipeline(
         "corpus_quality_metrics": corpus_quality_metrics,
         "paper_quality_scores": paper_quality_scores,
         "evidence_objects": evidence_objects,
+        "paper_profiles": paper_profiles,
         "corpus": corpus,
         "pipeline_trace": trace_rows,
+        "models": options.models,
+        # Calls where the chosen model failed and the fallback answered (empty
+        # when the client is a plain single-model one).
+        "model_fallbacks": list(getattr(client, "fallback_events", []) or []),
         "gate_blocked": gate_blocked,
         "gate_block_reasons": gate_block_reasons,
     }
 
     # Auto-save regardless of gate_blocked, so a FAIL-gated run's fetched
     # data is never lost (B23).
-    saved_id = save_run(name, results)
+    if results["model_fallbacks"]:
+        n_fb = len(results["model_fallbacks"])
+        warn(f"{n_fb} call(s) used the fallback model because the chosen model failed "
+             f"(first: {results['model_fallbacks'][0]['from']} -> {results['model_fallbacks'][0]['to']}).")
+
+    saved_id = save_run(name, results, project_id=project_id)
 
     # Opt-in graph persistence. Skipped (not attempted) when gate_blocked --
     # that path's graph is an empty placeholder. A failure degrades to a
     # warning; it must never look like the run itself failed.
     if options.enable_graph_persistence and not gate_blocked:
-        ok, msg = arcadedb_connect_ok()
+        ok, msg = graph_store_connect_ok()
         if ok:
             try:
                 gsummary = save_graph_snapshot(saved_id, name, graph, quality=graph_quality)
-                _trace("Graph Persistence (ArcadeDB)",
+                _trace("Graph Persistence (SQLite)",
                       f"{gsummary['entity_count']} entities, {gsummary['relationship_count']} relationships",
                       f"Saved under run_id={saved_id[:8]}…")
             except Exception as e:
@@ -483,12 +665,12 @@ def run_full_pipeline(
         record_artifact(
             artifact_id=f"pipeline:{saved_id}", artifact_type="pipeline",
             artifact_version=f"pipeline:{saved_id}",
-            project_id=context.get("domain") or "default",
+            project_id=project_id,
             content_hash=saved_id, run_id=saved_id,
         )
         lineage = record_run_lineage(
             run_id=saved_id,
-            project_id=context.get("domain") or "default",
+            project_id=project_id,
             papers=all_papers, wiki=wiki, ref_papers=ref_papers,
             evidence_objects=evidence_objects,
             graph=None if gate_blocked else graph,
@@ -497,20 +679,20 @@ def run_full_pipeline(
             tooling={
                 "graph_builder": str(GRAPH_PERSISTENCE_VERSION) if options.enable_graph_persistence else None,
                 "embedding_model": EMBEDDING_MODEL if options.enable_gap_challenger else None,
-                "model_bundle": f"{options.provider_key}:{options.model}",
+                "model_bundle": _model_bundle(options),
             },
             gate_blocked=gate_blocked,
         )
         record_run_manifest(
             run_id=saved_id,
-            project_id=context.get("domain") or "default",
+            project_id=project_id,
             git_commit=options.git_commit,
             parser_versions={
                 "pymupdf": None,  # no formal version constant exists for this stage yet
                 "docling": DOCLING_STAGE_VERSION if options.enable_quality_engine else None,
             },
             reference_resolver_version=str(REFERENCE_STAGE_VERSION),
-            model_bundle_version=f"{options.provider_key}:{options.model}",
+            model_bundle_version=_model_bundle(options),
             embedding_model_version=EMBEDDING_MODEL if options.enable_gap_challenger else None,
             reranker_version=RERANK_MODEL if options.enable_gap_challenger else None,
             graph_version=str(GRAPH_PERSISTENCE_VERSION) if options.enable_graph_persistence else None,
@@ -528,6 +710,29 @@ def run_full_pipeline(
         )
     except Exception as e:
         warn(f"Run Manifest not recorded (run itself completed normally): {e}")
+
+    # Write the run's artifacts (results, report, manifest) into the project
+    # folder. Best-effort for the same reason as above: the run is already saved.
+    try:
+        project_store.write_run_artifacts(
+            project_id, saved_id, results, context, paper_file_ids=paper_file_ids,
+            manifest={
+                "run_name": name,
+                "model": _model_bundle(options),
+                "models": options.models,
+                "model_fallbacks": results["model_fallbacks"],
+                "options": {
+                    "use_vision": options.use_vision, "extract_refs": options.extract_refs,
+                    "ref_limit": options.ref_limit,
+                    "quality_check": options.enable_quality_engine,
+                    "deep_gap_validation": options.enable_gap_challenger,
+                },
+                "gate_blocked": gate_blocked,
+                "duration_seconds": round(time.time() - run_start, 1),
+            },
+        )
+    except Exception as e:
+        warn(f"Run artifacts were not written to the project folder (run itself completed normally): {e}")
 
     progress("Done", 80)
 

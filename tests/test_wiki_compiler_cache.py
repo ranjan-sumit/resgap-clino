@@ -148,7 +148,8 @@ class CompileWikiPageCacheTests(unittest.TestCase):
         # filename must still be attributed to the CURRENT filename, not
         # whichever paper first populated this cache entry.
         client = MagicMock()
-        client.chat_json.return_value = Success(json.dumps({"title": "Shared Content", "contributions": []}))
+        # Must carry real content: an empty page is deliberately never cached.
+        client.chat_json.return_value = Success(json.dumps({"title": "Shared Content", "contributions": ["a real one"]}))
         text = "Identical full text shared by two uploads."
         paper_v1 = _paper(text=text, filename="original_name.pdf")
         paper_v2 = _paper(text=text, filename="renamed_copy.pdf")

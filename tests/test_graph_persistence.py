@@ -1,56 +1,50 @@
 """
-Tests for pipeline/graph_persistence.py (Clinova Phase 3, Epic 3.1).
-Mocked HTTP -- no live ArcadeDB server needed for this suite, matching
-this codebase's existing convention (live-server verification happens by
-hand, same as evals/benchmarks/ scripts).
+Tests for pipeline/graph_persistence.py (Clinova Phase 3, Epic 3.1), now on
+SQLite instead of ArcadeDB. Runs against a real throwaway SQLite file per
+test class (tests/pg_test_utils.py) -- no mocked HTTP, no server.
 """
-import re
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
-
-import requests
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import utils.database as db
 from pipeline.graph_persistence import (
     connect_ok, save_graph_snapshot, load_graph_snapshot,
-    list_graph_snapshots, diff_graph_snapshots, _normalize_name, _config,
+    list_graph_snapshots, diff_graph_snapshots, _normalize_name,
 )
+from tests.pg_test_utils import new_test_schema, drop_test_schema
 
 
-def _resp(status_code=200, json_data=None, raise_exc=None):
-    m = MagicMock()
-    m.status_code = status_code
-    m.json.return_value = json_data or {}
-    if raise_exc:
-        m.raise_for_status.side_effect = raise_exc
-    else:
-        m.raise_for_status.return_value = None
-    return m
+def _entity(eid, name, **kw):
+    return {"id": eid, "name": name, "type": "concept", "importance": "high",
+            "papers": ["P1"], **kw}
 
 
-class ConnectOkTests(unittest.TestCase):
-    @patch("pipeline.graph_persistence.requests.get")
-    def test_returns_true_on_204(self, mock_get):
-        mock_get.return_value = _resp(status_code=204)
-        ok, msg = connect_ok({"url": "http://localhost:2480", "user": "root", "password": "x", "database": "d"})
+class _DbTestCase(unittest.TestCase):
+    def setUp(self):
+        self.schema = new_test_schema()
+        self.patcher = patch.object(db, "_SCHEMA", self.schema)
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+        drop_test_schema(self.schema)
+
+
+class ConnectOkTests(_DbTestCase):
+    def test_ok_for_a_usable_sqlite_file(self):
+        ok, msg = connect_ok()
         self.assertTrue(ok)
+        self.assertIn("SQLite", msg)
 
-    @patch("pipeline.graph_persistence.requests.get")
-    def test_returns_false_on_connection_error_not_raise(self, mock_get):
-        import requests
-        mock_get.side_effect = requests.exceptions.ConnectionError("refused")
-        ok, msg = connect_ok({"url": "http://localhost:2480", "user": "root", "password": "x", "database": "d"})
+    def test_returns_false_not_raise_when_db_cannot_open(self):
+        with patch.object(db, "init_db", side_effect=OSError("disk full")):
+            ok, msg = connect_ok()
         self.assertFalse(ok)
-        self.assertIn("localhost:2480", msg)
-
-    @patch("pipeline.graph_persistence.requests.get")
-    def test_unexpected_status_is_not_ok(self, mock_get):
-        mock_get.return_value = _resp(status_code=500)
-        ok, msg = connect_ok({"url": "http://localhost:2480", "user": "root", "password": "x", "database": "d"})
-        self.assertFalse(ok)
+        self.assertIn("disk full", msg)
 
 
 class NormalizeNameTests(unittest.TestCase):
@@ -61,391 +55,122 @@ class NormalizeNameTests(unittest.TestCase):
         self.assertEqual(_normalize_name(None), "")
 
 
-_TEST_CONFIG = {"url": "http://localhost:2480", "user": "root", "password": "x", "database": "d"}
-
-
-class SaveGraphSnapshotTests(unittest.TestCase):
-    @patch("pipeline.graph_persistence.requests.post")
-    def test_delete_statements_use_the_from_keyword(self, mock_post):
-        # Real bug found live (2026-08-22): ArcadeDB's DELETE VERTEX
-        # requires "FROM" ("DELETE VERTEX FROM GraphEntity WHERE ...") --
-        # omitting it is a SQL syntax error (CommandSQLParsingException),
-        # confirmed live before fixing.
-        mock_post.return_value = _resp(json_data={"result": []})
-        save_graph_snapshot("run_1", "Test", {"entities": [], "relationships": []}, config=_TEST_CONFIG)
-        delete_calls = [c for c in mock_post.call_args_list
-                        if "DELETE VERTEX" in c.kwargs["json"]["command"]]
-        self.assertTrue(delete_calls)
-        for c in delete_calls:
-            self.assertIn("DELETE VERTEX FROM", c.kwargs["json"]["command"])
-
-    @patch("pipeline.graph_persistence.requests.post")
-    def test_saves_entities_and_relationships(self, mock_post):
-        # Each _command() call maps to one requests.post -- return a
-        # fresh @rid-bearing vertex result for entity inserts, empty for
-        # everything else (delete/run-insert/edge-create don't need one).
-        def side_effect(url, json=None, **kwargs):
-            cmd = (json or {}).get("command", "")
-            if "INSERT INTO GraphEntity" in cmd:
-                return _resp(json_data={"result": [{"@rid": f"#1:{mock_post.call_count}"}]})
-            return _resp(json_data={"result": []})
-
-        mock_post.side_effect = side_effect
-
+class SaveLoadTests(_DbTestCase):
+    def test_round_trip_in_graph_builder_shape(self):
         graph = {
-            "entities": [
-                {"id": "adhd", "name": "ADHD", "type": "concept", "importance": "high", "papers": ["P1"]},
-                {"id": "internalising", "name": "Internalising problems", "type": "concept",
-                 "importance": "high", "papers": ["P1"]},
-            ],
-            "relationships": [
-                {"source": "adhd", "target": "internalising", "relation": "predicts", "paper": "P1", "evidence": "..."},
-            ],
+            "entities": [_entity("adhd", "ADHD"), _entity("int", "Internalising problems")],
+            "relationships": [{"source": "adhd", "target": "int", "relation": "predicts",
+                               "paper": "P1", "evidence": "..."}],
         }
-        summary = save_graph_snapshot("run_1", "Test Run", graph, config=_TEST_CONFIG)
-        self.assertEqual(summary["run_id"], "run_1")
-        self.assertEqual(summary["entity_count"], 2)
-        self.assertEqual(summary["relationship_count"], 1)
+        summary = save_graph_snapshot("run_1", "Test Run", graph)
+        self.assertEqual(summary, {"run_id": "run_1", "entity_count": 2, "relationship_count": 1})
 
-    @patch("pipeline.graph_persistence.requests.post")
-    def test_relationship_referencing_unknown_entity_is_skipped_not_crashed(self, mock_post):
-        def side_effect(url, json=None, **kwargs):
-            cmd = (json or {}).get("command", "")
-            if "INSERT INTO GraphEntity" in cmd:
-                return _resp(json_data={"result": [{"@rid": "#1:0"}]})
-            return _resp(json_data={"result": []})
-        mock_post.side_effect = side_effect
+        loaded = load_graph_snapshot("run_1")
+        self.assertEqual([e["name"] for e in loaded["entities"]], ["ADHD", "Internalising problems"])
+        self.assertEqual(loaded["entities"][0]["papers"], ["P1"])
+        self.assertEqual(loaded["relationships"], [
+            {"source": "adhd", "target": "int", "relation": "predicts", "paper": "P1", "evidence": "..."}])
 
-        graph = {
-            "entities": [{"id": "adhd", "name": "ADHD", "type": "concept", "importance": "high", "papers": []}],
-            "relationships": [{"source": "adhd", "target": "nonexistent_entity", "relation": "predicts"}],
-        }
-        summary = save_graph_snapshot("run_1", "Test Run", graph, config=_TEST_CONFIG)
+    def test_relationship_by_name_resolves_to_entity_id(self):
+        graph = {"entities": [_entity("e1", "Alpha"), _entity("e2", "Beta")],
+                 "relationships": [{"source": "  alpha ", "target": "BETA", "relation": "r"}]}
+        self.assertEqual(save_graph_snapshot("run_1", "R", graph)["relationship_count"], 1)
+        rel = load_graph_snapshot("run_1")["relationships"][0]
+        self.assertEqual((rel["source"], rel["target"]), ("e1", "e2"))
+
+    def test_relationship_referencing_unknown_entity_is_skipped_not_crashed(self):
+        graph = {"entities": [_entity("adhd", "ADHD")],
+                 "relationships": [{"source": "adhd", "target": "nonexistent_entity", "relation": "predicts"}]}
+        summary = save_graph_snapshot("run_1", "R", graph)
         self.assertEqual(summary["relationship_count"], 0)
+        self.assertEqual(load_graph_snapshot("run_1")["relationships"], [])
 
-    @patch("pipeline.graph_persistence.requests.post")
-    def test_quality_dict_is_persisted_onto_the_graphrun_insert(self, mock_post):
-        mock_post.return_value = _resp(json_data={"result": []})
-        quality = {"build_status": "DEGRADED", "quality_score": 0.42}
-        save_graph_snapshot("run_1", "Test", {"entities": [], "relationships": []},
-                             config=_TEST_CONFIG, quality=quality)
-        run_insert_calls = [c for c in mock_post.call_args_list
-                             if "INSERT INTO GraphRun" in c.kwargs["json"]["command"]]
-        self.assertTrue(run_insert_calls)
-        params = run_insert_calls[0].kwargs["json"]["params"]
-        self.assertEqual(params["build_status"], "DEGRADED")
-        self.assertEqual(params["quality_score"], 0.42)
+    def test_never_saved_run_id_returns_empty_graph_not_error(self):
+        self.assertEqual(load_graph_snapshot("nonexistent_run"), {"entities": [], "relationships": []})
 
-    @patch("pipeline.graph_persistence.requests.post")
-    def test_missing_quality_dict_stores_none_not_a_crash(self, mock_post):
-        mock_post.return_value = _resp(json_data={"result": []})
-        save_graph_snapshot("run_1", "Test", {"entities": [], "relationships": []}, config=_TEST_CONFIG)
-        run_insert_calls = [c for c in mock_post.call_args_list
-                             if "INSERT INTO GraphRun" in c.kwargs["json"]["command"]]
-        params = run_insert_calls[0].kwargs["json"]["params"]
-        self.assertIsNone(params["build_status"])
-        self.assertIsNone(params["quality_score"])
+    def test_successful_resave_replaces_prior_snapshot_completely(self):
+        v1 = {"entities": [_entity("a", "Alpha"), _entity("b", "Beta")],
+              "relationships": [{"source": "a", "target": "b", "relation": "predicts"}]}
+        v2 = {"entities": [_entity("c", "Gamma")], "relationships": []}
+        save_graph_snapshot("run_1", "Run", v1)
+        save_graph_snapshot("run_1", "Run", v2)
 
+        loaded = load_graph_snapshot("run_1")
+        self.assertEqual([e["name"] for e in loaded["entities"]], ["Gamma"])
+        self.assertEqual(loaded["relationships"], [])
+        self.assertEqual(len(list_graph_snapshots()), 1)  # idempotent per run_id
 
-class LoadGraphSnapshotTests(unittest.TestCase):
-    @patch("pipeline.graph_persistence.requests.post")
-    def test_relationship_query_uses_at_prefixed_out_in(self, mock_post):
-        # Real bug found live (2026-08-22): ArcadeDB SQL silently returns
-        # null (not an error) for `out.entity_id`/`in.entity_id` -- the
-        # correct edge-link dereference needs the @-prefixed
-        # @out.entity_id/@in.entity_id. Confirmed live against the real
-        # server before fixing; this locks the correct query in.
-        mock_post.return_value = _resp(json_data={"result": []})
-        load_graph_snapshot("run_1", config=_TEST_CONFIG)
-        rel_call = next(c for c in mock_post.call_args_list
-                         if "GraphRelation WHERE" in c.kwargs["json"]["command"])
-        cmd = rel_call.kwargs["json"]["command"]
-        self.assertIn("@out.entity_id", cmd)
-        self.assertIn("@in.entity_id", cmd)
-        self.assertNotIn(" out.entity_id", cmd)
-        self.assertNotIn(" in.entity_id", cmd)
+    def test_mid_save_failure_preserves_prior_snapshot(self):
+        v1 = {"entities": [_entity("a", "Alpha"), _entity("b", "Beta")],
+              "relationships": [{"source": "a", "target": "b", "relation": "predicts"}]}
+        save_graph_snapshot("run_1", "Run", v1)
+        before = load_graph_snapshot("run_1")
 
-    @patch("pipeline.graph_persistence.requests.post")
-    def test_reconstructs_the_graph_builder_shape(self, mock_post):
-        def side_effect(url, json=None, **kwargs):
-            cmd = (json or {}).get("command", "")
-            if "GraphEntity WHERE" in cmd:
-                return _resp(json_data={"result": [
-                    {"entity_id": "adhd", "name": "ADHD", "type": "concept",
-                     "importance": "high", "papers": ["P1"]},
-                ]})
-            if "GraphRelation WHERE" in cmd:
-                return _resp(json_data={"result": [
-                    {"source": "adhd", "target": "internalising", "relation": "predicts",
-                     "paper": "P1", "evidence": "..."},
-                ]})
-            return _resp(json_data={"result": []})
-        mock_post.side_effect = side_effect
+        v2 = {"entities": [_entity("c", "Gamma")], "relationships": []}
+        with patch("pipeline.graph_persistence.json.dumps", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                save_graph_snapshot("run_1", "Run", v2)
 
-        graph = load_graph_snapshot("run_1", config=_TEST_CONFIG)
-        self.assertEqual(len(graph["entities"]), 1)
-        self.assertEqual(graph["entities"][0]["name"], "ADHD")
-        self.assertEqual(len(graph["relationships"]), 1)
-        self.assertEqual(graph["relationships"][0]["relation"], "predicts")
+        self.assertEqual(load_graph_snapshot("run_1"), before)
 
-    @patch("pipeline.graph_persistence.requests.post")
-    def test_never_saved_run_id_returns_empty_graph_not_error(self, mock_post):
-        mock_post.return_value = _resp(json_data={"result": []})
-        graph = load_graph_snapshot("nonexistent_run", config=_TEST_CONFIG)
-        self.assertEqual(graph, {"entities": [], "relationships": []})
+    def test_corrupted_row_loads_as_empty_not_crash(self):
+        save_graph_snapshot("run_1", "Run", {"entities": [_entity("a", "Alpha")], "relationships": []})
+        conn = db._get_conn()
+        conn.execute("UPDATE graph_snapshots SET graph_json = 'not json' WHERE run_id = 'run_1'")
+        conn.commit()
+        conn.close()
+        self.assertEqual(load_graph_snapshot("run_1"), {"entities": [], "relationships": []})
 
 
-class ListGraphSnapshotsTests(unittest.TestCase):
-    @patch("pipeline.graph_persistence.requests.post")
-    def test_lists_saved_runs(self, mock_post):
-        mock_post.return_value = _resp(json_data={"result": [
-            {"run_id": "run_2", "name": "Second", "saved_at": "2026-08-22T12:00:00",
-             "entity_count": 5, "relationship_count": 3},
-            {"run_id": "run_1", "name": "First", "saved_at": "2026-08-22T10:00:00",
-             "entity_count": 4, "relationship_count": 2},
-        ]})
-        runs = list_graph_snapshots(config=_TEST_CONFIG)
-        self.assertEqual(len(runs), 2)
-        self.assertEqual(runs[0]["run_id"], "run_2")
+class ListGraphSnapshotsTests(_DbTestCase):
+    def test_lists_newest_first(self):
+        g = {"entities": [_entity("a", "A")], "relationships": []}
+        save_graph_snapshot("run_old", "First", g)
+        save_graph_snapshot("run_new", "Second", g)
+        runs = list_graph_snapshots()
+        self.assertEqual([r["run_id"] for r in runs], ["run_new", "run_old"])
+        self.assertEqual(runs[0]["entity_count"], 1)
 
-    @patch("pipeline.graph_persistence.requests.post")
-    def test_build_status_and_quality_score_pass_through(self, mock_post):
-        mock_post.return_value = _resp(json_data={"result": [
-            {"run_id": "run_1", "name": "Scored", "saved_at": "2026-08-22T10:00:00",
-             "entity_count": 4, "relationship_count": 2,
-             "build_status": "CLEAN", "quality_score": 0.91},
-        ]})
-        runs = list_graph_snapshots(config=_TEST_CONFIG)
-        self.assertEqual(runs[0]["build_status"], "CLEAN")
-        self.assertEqual(runs[0]["quality_score"], 0.91)
+    def test_quality_dict_is_persisted_and_passes_through(self):
+        save_graph_snapshot("run_1", "Scored", {"entities": [], "relationships": []},
+                            quality={"build_status": "DEGRADED", "quality_score": 0.42})
+        run = list_graph_snapshots()[0]
+        self.assertEqual(run["build_status"], "DEGRADED")
+        self.assertEqual(run["quality_score"], 0.42)
 
-    @patch("pipeline.graph_persistence.requests.post")
-    def test_run_saved_before_scoring_existed_reports_none_not_a_crash(self, mock_post):
-        mock_post.return_value = _resp(json_data={"result": [
-            {"run_id": "run_0", "name": "Old", "saved_at": "2026-08-20T10:00:00",
-             "entity_count": 4, "relationship_count": 2},
-        ]})
-        runs = list_graph_snapshots(config=_TEST_CONFIG)
-        self.assertIsNone(runs[0]["build_status"])
-        self.assertIsNone(runs[0]["quality_score"])
+    def test_missing_quality_dict_stores_none_not_a_crash(self):
+        save_graph_snapshot("run_1", "Unscored", {"entities": [], "relationships": []})
+        run = list_graph_snapshots()[0]
+        self.assertIsNone(run["build_status"])
+        self.assertIsNone(run["quality_score"])
 
 
-class DiffGraphSnapshotsTests(unittest.TestCase):
-    @patch("pipeline.graph_persistence.load_graph_snapshot")
-    def test_identifies_new_removed_and_common_entities(self, mock_load):
-        graph_a = {
-            "entities": [
-                {"id": "a1", "name": "Shared Concept", "type": "concept"},
-                {"id": "a2", "name": "Only In A", "type": "concept"},
-            ],
-            "relationships": [],
-        }
-        graph_b = {
-            "entities": [
-                {"id": "b1", "name": "shared concept", "type": "concept"},  # same name, different case/id
-                {"id": "b2", "name": "Only In B", "type": "concept"},
-            ],
-            "relationships": [],
-        }
-        mock_load.side_effect = [graph_a, graph_b]
+class DiffGraphSnapshotsTests(_DbTestCase):
+    def test_identifies_new_removed_and_common_entities(self):
+        save_graph_snapshot("run_a", "A", {"entities": [
+            _entity("a1", "Shared Concept"), _entity("a2", "Only In A")], "relationships": []})
+        save_graph_snapshot("run_b", "B", {"entities": [
+            _entity("b1", "shared concept"),  # same name, different case/id
+            _entity("b2", "Only In B")], "relationships": []})
 
-        diff = diff_graph_snapshots("run_a", "run_b", config=_TEST_CONFIG)
+        diff = diff_graph_snapshots("run_a", "run_b")
         self.assertEqual(diff["entities_only_in_a"], ["Only In A"])
         self.assertEqual(diff["entities_only_in_b"], ["Only In B"])
         self.assertEqual(diff["entities_common"], ["Shared Concept"])
 
-    @patch("pipeline.graph_persistence.load_graph_snapshot")
-    def test_identifies_new_and_common_relationships(self, mock_load):
-        graph_a = {
-            "entities": [{"id": "x", "name": "X"}, {"id": "y", "name": "Y"}],
-            "relationships": [{"source": "x", "target": "y", "relation": "predicts"}],
-        }
-        graph_b = {
-            "entities": [{"id": "x", "name": "X"}, {"id": "y", "name": "Y"}, {"id": "z", "name": "Z"}],
-            "relationships": [
-                {"source": "x", "target": "y", "relation": "predicts"},
-                {"source": "x", "target": "z", "relation": "evaluated_on"},
-            ],
-        }
-        mock_load.side_effect = [graph_a, graph_b]
+    def test_identifies_new_and_common_relationships(self):
+        save_graph_snapshot("run_a", "A", {
+            "entities": [_entity("x", "X"), _entity("y", "Y")],
+            "relationships": [{"source": "x", "target": "y", "relation": "predicts"}]})
+        save_graph_snapshot("run_b", "B", {
+            "entities": [_entity("x", "X"), _entity("y", "Y"), _entity("z", "Z")],
+            "relationships": [{"source": "x", "target": "y", "relation": "predicts"},
+                              {"source": "x", "target": "z", "relation": "evaluated_on"}]})
 
-        diff = diff_graph_snapshots("run_a", "run_b", config=_TEST_CONFIG)
+        diff = diff_graph_snapshots("run_a", "run_b")
         self.assertEqual(diff["relationships_common"], [("x", "y", "predicts")])
         self.assertEqual(diff["relationships_only_in_b"], [("x", "z", "evaluated_on")])
         self.assertEqual(diff["relationships_only_in_a"], [])
-
-
-class _FakeArcadeDB:
-    """Minimal in-memory stand-in for the subset of ArcadeDB commands
-    save_graph_snapshot()/load_graph_snapshot() issue -- enough to verify
-    cross-command behavior (generational save_token scoping, delete
-    ordering) that per-call MagicMock return values can't express."""
-
-    def __init__(self):
-        self.entities = []   # dicts: @rid, run_id, save_token, entity fields
-        self.edges = []      # dicts: out/@rid pair, run_id, save_token, rel fields
-        self.runs = []       # GraphRun rows (dicts)
-        self._rid_seq = 0
-        self.call_count = 0
-        self.fail_predicate = None  # callable(cmd, params) -> raise mid-command
-
-    @staticmethod
-    def _is_stale(row, params):
-        token = row.get("save_token")
-        return token is None or token != params["save_token"]
-
-    def __call__(self, url, json=None, **kwargs):
-        self.call_count += 1
-        cmd = (json or {}).get("command", "")
-        params = (json or {}).get("params") or {}
-        if self.fail_predicate is not None and self.fail_predicate(cmd, params):
-            raise requests.exceptions.ConnectionError("simulated mid-save failure")
-        result = self._execute(cmd, params)
-        m = MagicMock()
-        m.raise_for_status.return_value = None
-        m.json.return_value = {"result": result}
-        return m
-
-    def _execute(self, cmd, params):
-        if "INSERT INTO GraphEntity" in cmd:
-            self._rid_seq += 1
-            rid = f"#1:{self._rid_seq}"
-            self.entities.append({
-                "@rid": rid, "run_id": params["run_id"],
-                "save_token": params.get("save_token"),
-                "entity_id": params["entity_id"], "name": params["name"],
-                "type": params["type"], "importance": params["importance"],
-                "papers": params["papers"],
-            })
-            return [{"@rid": rid}]
-        if "INSERT INTO GraphRun" in cmd:
-            self.runs.append(dict(params))
-            return []
-        if "UPDATE GraphRun" in cmd:
-            for r in self.runs:
-                if r["run_id"] == params["run_id"]:
-                    r.update(params)
-            return []
-        if "CREATE EDGE GraphRelation" in cmd:
-            m = re.search(r"FROM (#\d+:\d+) TO (#\d+:\d+)", cmd)
-            self.edges.append({
-                "out": m.group(1), "in": m.group(2),
-                "run_id": params["run_id"],
-                "save_token": params.get("save_token"),
-                "relation": params.get("relation"),
-                "paper": params.get("paper"), "evidence": params.get("evidence"),
-            })
-            return []
-        if "DELETE FROM GraphRelation" in cmd:
-            self.edges = [e for e in self.edges
-                          if not (e["run_id"] == params["run_id"]
-                                  and self._is_stale(e, params))]
-            return []
-        if "DELETE VERTEX FROM GraphEntity" in cmd:
-            dead = {e["@rid"] for e in self.entities
-                    if e["run_id"] == params["run_id"] and self._is_stale(e, params)}
-            self.entities = [e for e in self.entities if e["@rid"] not in dead]
-            self.edges = [e for e in self.edges
-                          if e["out"] not in dead and e["in"] not in dead]
-            return []
-        if "FROM GraphRun WHERE" in cmd:
-            return [r for r in self.runs if r["run_id"] == params["run_id"]]
-        if "FROM GraphEntity WHERE" in cmd:
-            rows = [e for e in self.entities if e["run_id"] == params["run_id"]]
-            if "save_token = :save_token" in cmd:
-                rows = [e for e in rows if e.get("save_token") == params["save_token"]]
-            return rows
-        if "FROM GraphRelation WHERE" in cmd:
-            rows = []
-            for e in self.edges:
-                if e["run_id"] != params["run_id"]:
-                    continue
-                if "save_token = :save_token" in cmd \
-                        and e.get("save_token") != params["save_token"]:
-                    continue
-                src = next((x["entity_id"] for x in self.entities if x["@rid"] == e["out"]), "")
-                tgt = next((x["entity_id"] for x in self.entities if x["@rid"] == e["in"]), "")
-                rows.append({"source": src, "target": tgt, "relation": e["relation"],
-                             "paper": e["paper"], "evidence": e["evidence"]})
-            return rows
-        # ensure_schema's CREATE ... / create database need no emulation.
-        return []
-
-
-class SnapshotAtomicityTests(unittest.TestCase):
-    """save_graph_snapshot() used to DELETE the prior snapshot before
-    inserting anything -- any mid-save failure destroyed the last good
-    snapshot. The new generation must be inserted first and the DELETE
-    scoped so it can never touch the new rows."""
-
-    def _entity(self, eid, name):
-        return {"id": eid, "name": name, "type": "concept",
-                "importance": "high", "papers": ["P1"]}
-
-    @patch("pipeline.graph_persistence.requests.post")
-    def test_mid_save_failure_preserves_prior_snapshot(self, mock_post):
-        fake = _FakeArcadeDB()
-        mock_post.side_effect = fake
-
-        v1 = {
-            "entities": [self._entity("a", "Alpha"), self._entity("b", "Beta")],
-            "relationships": [{"source": "a", "target": "b", "relation": "predicts",
-                               "paper": "P1", "evidence": "e"}],
-        }
-        save_graph_snapshot("run_1", "Run", v1, config=_TEST_CONFIG)
-        loaded = load_graph_snapshot("run_1", config=_TEST_CONFIG)
-        self.assertEqual([e["name"] for e in loaded["entities"]], ["Alpha", "Beta"])
-        self.assertEqual(len(loaded["relationships"]), 1)
-
-        # Re-save that dies partway through inserting the new generation's
-        # entities. The DELETEs must never have run yet, and load must
-        # still return exactly the prior snapshot.
-        v2 = {"entities": v1["entities"] + [self._entity("c", "Gamma")],
-              "relationships": []}
-        fake.fail_predicate = lambda cmd, params: (
-            "INSERT INTO GraphEntity" in cmd and params.get("entity_id") == "c")
-        with self.assertRaises(requests.exceptions.ConnectionError):
-            save_graph_snapshot("run_1", "Run", v2, config=_TEST_CONFIG)
-
-        loaded_after = load_graph_snapshot("run_1", config=_TEST_CONFIG)
-        self.assertEqual(loaded_after, loaded)
-
-    @patch("pipeline.graph_persistence.requests.post")
-    def test_successful_resave_replaces_prior_snapshot_completely(self, mock_post):
-        fake = _FakeArcadeDB()
-        mock_post.side_effect = fake
-
-        v1 = {
-            "entities": [self._entity("a", "Alpha"), self._entity("b", "Beta")],
-            "relationships": [{"source": "a", "target": "b", "relation": "predicts"}],
-        }
-        v2 = {
-            "entities": [self._entity("c", "Gamma")],
-            "relationships": [],
-        }
-        save_graph_snapshot("run_1", "Run", v1, config=_TEST_CONFIG)
-        save_graph_snapshot("run_1", "Run", v2, config=_TEST_CONFIG)
-
-        loaded = load_graph_snapshot("run_1", config=_TEST_CONFIG)
-        self.assertEqual([e["name"] for e in loaded["entities"]], ["Gamma"])
-        self.assertEqual(loaded["relationships"], [])
-        # Exactly one GraphRun row -- re-saving stays idempotent per run_id.
-        self.assertEqual(len(fake.runs), 1)
-
-    @patch("pipeline.graph_persistence.requests.post")
-    def test_resave_delete_is_scoped_to_prior_save_token(self, mock_post):
-        fake = _FakeArcadeDB()
-        mock_post.side_effect = fake
-
-        save_graph_snapshot("run_1", "Run",
-                            {"entities": [self._entity("a", "Alpha")], "relationships": []},
-                            config=_TEST_CONFIG)
-        delete_cmds = [c.kwargs["json"]["command"] for c in mock_post.call_args_list
-                       if "DELETE" in c.kwargs["json"]["command"]]
-        self.assertTrue(delete_cmds)
-        for cmd in delete_cmds:
-            self.assertIn("save_token != :save_token", cmd)
-            self.assertIn("run_id = :run_id", cmd)
 
 
 if __name__ == "__main__":

@@ -43,7 +43,8 @@ class GapDetectionFailureTests(unittest.TestCase):
                   return_value=[{"title": "det gap", "confidence": "medium"}]), \
             patch("pipeline.run_pipeline.detect_graph_structural_gaps", return_value=[]), \
             patch("pipeline.run_pipeline.apply_graph_quality_to_gaps", side_effect=lambda g, _q: g), \
-            patch("pipeline.run_pipeline.validate_gaps", side_effect=lambda gaps, *_a, **_kw: gaps), \
+            patch("pipeline.run_pipeline.scout_gaps",
+                  side_effect=lambda gaps, *_a, **_kw: {"gaps": gaps, "diagnostics": {}}), \
             patch("pipeline.run_pipeline.generate_proposals", return_value=[]), \
             patch("pipeline.run_pipeline.assign_tiers", return_value=[]), \
             patch("pipeline.run_pipeline.corpus_stats", return_value={}), \

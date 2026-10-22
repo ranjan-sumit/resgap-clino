@@ -12,7 +12,6 @@ Algorithms:
 Auto-selector runs ALL applicable algorithms based on available data.
 """
 import numpy as np
-from scipy import stats
 from pipeline.pooling import pool_risk_ratios, sample_pooled_risk
 
 # NEVER set np.random.seed() at module level — it runs once at import and

@@ -61,14 +61,19 @@ Each hypothesis must be:
 - SPECIFIC (not vague — name the intervention, population, outcome)
 - TESTABLE (describable as a study design)
 - NOVEL (not addressed by any of the input papers)
-- GROUNDED (supported by evidence from multiple papers)
+- GROUNDED (each step of the reasoning rests on something the input papers actually report)
+
+GROUNDING RULES:
+- A hypothesis is a prediction to be tested, not a result. State the direction of the expected effect, NOT its size.
+- NEVER give a percentage, fold-change, rate or threshold unless it is one of the numbers in the papers' data supplied below. If a size is unknown, say "magnitude unknown".
+- Build on what the papers state. Do not introduce a mechanism, exposure or population that none of the papers discuss; if a connection is a stretch, say so in confidence_reasoning and use "low" confidence.
 
 Return ONLY JSON array:
 [
   {{
     "hypothesis_id": "H1",
     "title": "Short, specific hypothesis title",
-    "claim": "Precise testable statement: [Intervention X] in [Population Y] will [Outcome Z] by [estimate] compared to [comparator]",
+    "claim": "Precise testable statement: [Intervention X] in [Population Y] is expected to [increase|decrease|change] [Outcome Z] compared with [comparator] (magnitude unknown unless a paper reports it)",
     "evidence_chain": [
       "Paper A (section): finding that supports this",
       "Paper B (section): finding that supports this"
@@ -201,7 +206,11 @@ def generate_novel_hypotheses(
 
     raw = unwrap(client.chat_json(prompt, user_prompt, max_tokens=5000))
     hypotheses = _robust_parse(raw, list)
-    return hypotheses if isinstance(hypotheses, list) else []
+    hypotheses = hypotheses if isinstance(hypotheses, list) else []
+    # Belt and braces: whatever the prompt says, flag effect sizes that no paper reports.
+    from pipeline.grounding import annotate_claims, corpus_numbers
+    annotate_claims(hypotheses, ("title", "claim"), corpus_numbers(wiki, params, fingerprints))
+    return hypotheses
 
 
 def run_discovery_engine(

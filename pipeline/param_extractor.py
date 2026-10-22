@@ -10,17 +10,31 @@ import json
 import re
 import csv
 import io
+import logging
 from utils.azure_client import unwrap, LLMCallError
 from utils.database import compute_cache_key, get_cached_parameters, save_cached_parameters
 
+logger = logging.getLogger(__name__)
+
 # Bumped whenever PARAM_EXTRACTION_PROMPT changes, so old cached entries
 # don't silently keep serving stale-logic results (AD-3).
-PARAM_STAGE_VERSION = 1
+# 2: the prompt now excludes laboratory protocol settings (a real run's parameters were mostly
+# coating and staining concentrations, which no model can use).
+PARAM_STAGE_VERSION = 2
 
 PARAM_EXTRACTION_PROMPT = """You are a clinical biostatistician extracting quantitative parameters
 from healthcare research paper summaries.
 
-Extract EVERY numerical value. Also convert linguistic expressions to numbers:
+Extract the numerical values a quantitative model could use: prevalence, incidence, rates,
+probabilities, effect sizes, risk or hazard ratios, treatment efficacy, survival, sensitivity,
+specificity, costs, response rates, and MEASURED OUTCOMES with their values.
+
+DO NOT extract laboratory protocol settings that describe how an experiment was set up rather than
+what it found: reagent, coating, staining or cell-suspension concentrations, incubation times,
+device or membrane dimensions, flow or pump settings used as setup, inoculum sizes, antibody
+dilutions. Do not extract sample sizes, years, page or figure numbers.
+
+Convert linguistic expressions to numbers:
   "approximately one third" → 33.3 (confidence: low)
   "nearly doubled" → use baseline × 2 (confidence: low)
   "significantly higher (p<0.05)" → flag as statistically significant, estimate if possible
@@ -126,11 +140,11 @@ def extract_parameters(wiki: dict, papers: list, client) -> list:
     # If wiki compilation failed for any paper, we'd silently lose those papers.
     # Pad wiki_pages with stub entries so every paper is always processed.
     if len(wiki_pages) < len(papers):
-        n_missing = len(papers) - len(wiki_pages)
-        for k in range(n_missing):
+        start = len(wiki_pages)          # fixed before the loop: wiki_pages grows as stubs are appended
+        for idx in range(start, len(papers)):
             wiki_pages.append({
-                "title": papers[len(wiki_pages) + k].get("filename", f"Paper {len(wiki_pages)+k+1}"),
-                "source_file": papers[len(wiki_pages) + k].get("filename", ""),
+                "title": papers[idx].get("filename", f"Paper {idx+1}"),
+                "source_file": papers[idx].get("filename", ""),
                 "key_findings": [], "limitations": [], "methods": [],
                 "datasets": [], "contributions": [],
             })
@@ -146,12 +160,30 @@ def extract_parameters(wiki: dict, papers: list, client) -> list:
                 context_parts.append(field.upper() + ":\n" + "\n".join(f"- {x}" for x in items))
 
         sections = paper.get("sections", {})
+        matched_chars = 0
+        matched_names = set()
         for sec_name, sec_text in sections.items():
             if any(k in sec_name.lower() for k in [
                 "result", "statistic", "table", "finding",
                 "outcome", "survival", "efficacy", "method", "discussion"
-            ]):
-                context_parts.append(f"[{sec_name}]\n{str(sec_text)[:3000]}")
+            ]) and str(sec_text).strip():
+                chunk = str(sec_text)[:3000]
+                context_parts.append(f"[{sec_name}]\n{chunk}")
+                matched_chars += len(chunk)
+                matched_names.add(sec_name)
+        if matched_chars < 4000:
+            # Papers headed by topic ("3.1 The human CF airway chip") keep their
+            # numbers under headings with no keyword, and a bare "Results"
+            # heading can be empty. Top up from the other sections' openings.
+            budget = 12000 - matched_chars
+            for sec_name, sec_text in sections.items():
+                if budget <= 0:
+                    break
+                if sec_name in matched_names or sec_name == "References" or not str(sec_text).strip():
+                    continue
+                chunk = str(sec_text)[:min(1500, budget)]
+                context_parts.append(f"[{sec_name}]\n{chunk}")
+                budget -= len(chunk)
 
         for tbl in paper.get("tables", [])[:6]:
             context_parts.append(f"[Table p.{tbl.get('page')}]\n{tbl['content'][:1200]}")
@@ -183,7 +215,9 @@ def extract_parameters(wiki: dict, papers: list, client) -> list:
                 # response, which would freeze a transient failure forever.
                 if params or _is_confidently_empty(raw):
                     save_cached_parameters(cache_key, content_hash, PARAM_STAGE_VERSION, params)
-            except LLMCallError:
+            except LLMCallError as e:
+                logger.warning("Parameter extraction failed for %r (%s); skipping this paper",
+                               title, getattr(getattr(e, "error", None), "kind", "unknown"))
                 # B12 fix: don't abort extraction for every remaining paper just
                 # because one paper's LLM call failed — skip this paper's params
                 # (consistent with the B6 FIX philosophy above: never silently

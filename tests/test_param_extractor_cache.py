@@ -154,7 +154,7 @@ class ExtractParametersCacheTests(unittest.TestCase):
         extract_parameters(wiki, papers, client)
         self.assertEqual(client.chat_json.call_count, 1)
 
-        with patch.object(param_extractor, "PARAM_STAGE_VERSION", 2):
+        with patch.object(param_extractor, "PARAM_STAGE_VERSION", param_extractor.PARAM_STAGE_VERSION + 1):
             extract_parameters(wiki, papers, client)
         self.assertEqual(client.chat_json.call_count, 2)  # version bump -> real cache miss
 

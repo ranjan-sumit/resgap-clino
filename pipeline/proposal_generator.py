@@ -112,9 +112,11 @@ def generate_proposals(gaps: list, wiki: dict, context: dict, client, domain_con
         return []
 
     # Only generate proposals for open or partial gaps
+    # "unverified" (the literature search was unavailable) is still actionable: not knowing
+    # whether a gap is solved is not a reason to drop it.
     actionable_gaps = [
         g for g in gaps
-        if g.get("validation_status") in ["open", "partial"]
+        if g.get("validation_status") in ["open", "partial", "unverified"]
     ]
 
     if not actionable_gaps:
@@ -185,25 +187,182 @@ Make proposals specific enough that a researcher could begin working on them imm
     # measurement (no successful timing sample exists yet to measure
     # against), consistent with B24's own "measure later, add margin now"
     # approach when no real measurement exists.
-    raw = unwrap(client.chat_json(
-        inject_domain_into_proposal_prompt(PROPOSAL_SYSTEM_PROMPT, domain_config or {}),
-        user_prompt, max_tokens=10000, timeout_seconds=300, max_retries=3
-    ))
-
-    try:
-        proposals = json.loads(raw)
-        if not isinstance(proposals, list):
-            proposals = []
-    except json.JSONDecodeError:
-        import re
-        match = re.search(r'\[.*\]', raw, re.DOTALL)
-        if match:
-            try:
-                proposals = json.loads(match.group())
-            except Exception:
-                proposals = []
-        else:
-            proposals = []
+    system_prompt = inject_domain_into_proposal_prompt(PROPOSAL_SYSTEM_PROMPT, domain_config or {})
+    proposals = []
+    # Two attempts: a reply that arrives but cannot be read (fenced, wrapped in
+    # an object, cut off) is a sampling accident, and a second sample almost
+    # always parses. Seen in a real Gemini run: 4.5k tokens spent, 0 proposals.
+    for _attempt in range(2):
+        raw = unwrap(client.chat_json(
+            system_prompt, user_prompt, max_tokens=10000, timeout_seconds=300, max_retries=3
+        ))
+        proposals = _parse_proposals(raw)
+        if proposals or not (raw or "").strip():
+            break
 
     _resolve_addresses_gap(proposals, actionable_gaps)
     return proposals
+
+
+_REVIEWER_PROMPT = """You are a skeptical grant-panel reviewer. You are given research proposals, each with the research gap it addresses, the evidence behind that gap (quotes from the source papers), and what an academic search found already exists on that gap.
+
+For EACH proposal give integer scores 1-5 for:
+- specificity: concrete population/system, methods, measurements and scope (5) versus vague (1)
+- novelty: not already done by the existing papers listed and not an obvious step (5) versus already done (1)
+- feasibility: a small team could carry it out in 6-12 months with available methods and data (5) versus not (1)
+- impact: would change understanding or practice if it worked (5) versus minor (1)
+and a verdict:
+- "accept": strong as written.
+- "revise": a good core with fixable problems. Put concrete, specific fixes in "required_changes".
+- "reject": generic, already done, unsupported by its gap evidence, or infeasible. Give a "reason".
+Also list the main "issues" (short phrases).
+
+Return ONLY JSON: {"reviews": [ {"index": 0, "specificity": 4, "novelty": 3, "feasibility": 4, "impact": 4, "verdict": "accept|revise|reject", "issues": ["..."], "required_changes": "", "reason": ""} ]}
+Review every proposal index exactly once."""
+
+
+def _gap_context_for(proposal: dict, gaps_by_id: dict) -> dict:
+    g = gaps_by_id.get(proposal.get("addresses_gap_id")) or {}
+    return {
+        "gap": g.get("title") or proposal.get("addresses_gap"),
+        "gap_description": g.get("description", ""),
+        "gap_evidence": (g.get("evidence") or [])[:4],
+        "validation": g.get("validation_status"),
+        "already_found_by_search": [p.get("title") for p in (g.get("existing_papers") or [])[:5]],
+    }
+
+
+def review_proposals(proposals: list, gaps: list, client, domain_config: dict = None) -> tuple[list, dict]:
+    """Proposal Reviewer agent + one revision pass. Returns (proposals, diagnostics).
+    Each kept proposal gets `review` = {scores, verdict, issues}; "reject" proposals are removed
+    (listed in diagnostics), "revise" ones are rewritten once from the reviewer's required changes.
+    A failed review never loses proposals: they are returned unreviewed with the reason recorded."""
+    from pipeline.agent_config import PROPOSAL_REVIEWER
+    from utils.azure_client import LLMCallError
+    import re
+    diag = {"reviewed": 0, "accepted": 0, "revised": 0, "rejected": [], "error": None}
+    if not proposals:
+        return proposals, diag
+    gaps_by_id = {g.get("gap_id"): g for g in gaps if g.get("gap_id")}
+    brief = [{"index": i, "title": p.get("title"), "problem_statement": p.get("problem_statement"),
+              "methodology": p.get("methodology"), "novelty_claim": p.get("novelty"),
+              **_gap_context_for(p, gaps_by_id)} for i, p in enumerate(proposals)]
+
+    client.set_stage("Stage 6b — Proposal Review")
+    try:
+        raw = unwrap(client.chat_json(_REVIEWER_PROMPT, "Proposals to review:\n" + json.dumps(brief, indent=1, ensure_ascii=False),
+                                      max_tokens=PROPOSAL_REVIEWER.max_tokens, timeout_seconds=PROPOSAL_REVIEWER.timeout_seconds,
+                                      max_retries=PROPOSAL_REVIEWER.max_retries))
+    except LLMCallError as e:
+        diag["error"] = f"review failed: {e.error.kind}"
+        return proposals, diag
+    text = re.sub(r'^\s*```(?:json)?\s*|\s*```\s*$', '', (raw or "").strip())
+    reviews = None
+    for candidate in (text, re.sub(r',\s*([}\]])', r'\1', text)):
+        try:
+            value = json.loads(candidate)
+            reviews = value.get("reviews") if isinstance(value, dict) else value
+            break
+        except json.JSONDecodeError:
+            continue
+    if not isinstance(reviews, list):
+        diag["error"] = "review reply could not be read"
+        return proposals, diag
+    by_index = {r.get("index"): r for r in reviews if isinstance(r, dict)}
+
+    kept, to_revise = [], []
+    for i, p in enumerate(proposals):
+        r = by_index.get(i)
+        if not r:
+            kept.append(p)
+            continue
+        diag["reviewed"] += 1
+        verdict = r.get("verdict") if r.get("verdict") in ("accept", "revise", "reject") else "accept"
+        p["review"] = {"verdict": verdict, "issues": r.get("issues") or [],
+                       "scores": {k: r.get(k) for k in ("specificity", "novelty", "feasibility", "impact")}}
+        if verdict == "reject":
+            diag["rejected"].append({"title": p.get("title"), "reason": r.get("reason") or "rejected by the reviewer"})
+            continue
+        if verdict == "revise" and r.get("required_changes"):
+            to_revise.append((len(kept), r["required_changes"]))
+        else:
+            diag["accepted"] += 1
+        kept.append(p)
+
+    if to_revise:
+        client.set_stage("Stage 6 — Proposals")
+        for pos, changes in to_revise:
+            original = kept[pos]
+            try:
+                raw = unwrap(client.chat_json(
+                    inject_domain_into_proposal_prompt(PROPOSAL_SYSTEM_PROMPT, domain_config or {}),
+                    "Rewrite this ONE proposal so that it fully addresses the reviewer's required changes. "
+                    "Keep it grounded in the same gap. Return a JSON array with exactly one proposal.\n\n"
+                    f"PROPOSAL:\n{json.dumps({k: v for k, v in original.items() if k != 'review'}, ensure_ascii=False)}\n\n"
+                    f"REVIEWER'S REQUIRED CHANGES:\n{changes}",
+                    max_tokens=PROPOSAL_REVIEWER.max_tokens, timeout_seconds=PROPOSAL_REVIEWER.timeout_seconds,
+                    max_retries=PROPOSAL_REVIEWER.max_retries))
+            except LLMCallError:
+                continue                              # keep the original rather than lose it
+            revised = _parse_proposals(raw)
+            if revised:
+                new = revised[0]
+                for keep_key in ("addresses_gap_id", "addresses_gap_id_resolution", "addresses_gap_ref", "addresses_gap"):
+                    if original.get(keep_key) is not None:
+                        new[keep_key] = original[keep_key]
+                new["review"] = {**original["review"], "revised": True, "required_changes": changes}
+                kept[pos] = new
+                diag["revised"] += 1
+    return kept, diag
+
+
+def _parse_proposals(raw: str) -> list:
+    """The list of proposal dicts in a model reply, tolerating the shapes models
+    really return: a bare JSON list, a ```json fence, an object wrapping the list
+    ({"proposals": [...]}), or a list cut off mid-way (the complete objects before
+    the cut are kept). Returns [] when nothing usable is there."""
+    import re
+    text = re.sub(r'^\s*```(?:json)?\s*|\s*```\s*$', '', (raw or "").strip())
+
+    def _from(value):
+        if isinstance(value, list):
+            return [p for p in value if isinstance(p, dict)]
+        if isinstance(value, dict):
+            for key in ("proposals", "research_proposals", "results", "items"):
+                if isinstance(value.get(key), list):
+                    return _from(value[key])
+            for v in value.values():                      # any single list of objects
+                if isinstance(v, list) and v and all(isinstance(p, dict) for p in v):
+                    return v
+            if value.get("title"):                        # one proposal returned alone
+                return [value]
+        return []
+
+    try:
+        found = _from(json.loads(text))
+        if found:
+            return found
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r'\[.*\]', text, re.DOTALL)
+    if match:
+        try:
+            found = _from(json.loads(match.group()))
+            if found:
+                return found
+        except json.JSONDecodeError:
+            pass
+    # Truncated list: keep every complete {...} object that has a title.
+    decoder, found, pos = json.JSONDecoder(), [], text.find("[") + 1
+    while pos > 0:
+        start = text.find("{", pos)
+        if start == -1:
+            break
+        try:
+            obj, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            break
+        if isinstance(obj, dict) and obj.get("title"):
+            found.append(obj)
+        pos = end
+    return found
