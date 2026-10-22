@@ -122,9 +122,9 @@ EVIDENCE_READER = AgentConfig(
 # auditor) and the critic that scores, merges and ranks what they propose.
 GAP_FINDER = AgentConfig(role="Gap Finder", max_tokens=6000, timeout_seconds=300, max_retries=2, prompt_version="2")
 GAP_CRITIC = AgentConfig(role="Methodology Critic", max_tokens=8000, timeout_seconds=300, max_retries=2,
-                         prompt_version="1")
+                         prompt_version="2")        # 2: scoring anchors with examples
 PROPOSAL_REVIEWER = AgentConfig(role="Proposal Reviewer", max_tokens=10000, timeout_seconds=300, max_retries=2,
-                                prompt_version="1")
+                                prompt_version="2")        # 2: scoring anchors with examples
 
 GAP_GENERATOR = AgentConfig(
     role="Gap Generator",

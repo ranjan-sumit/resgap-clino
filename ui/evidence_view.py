@@ -147,6 +147,7 @@ def warnings_summary(results: dict) -> list[str]:
     n_fb = len(results.get("model_fallbacks") or [])
     if n_fb:
         out.append(f"{n_fb} model call(s) used the fallback model because the chosen one failed.")
+    out += (results.get("calibration") or {}).get("warnings", [])
     q = results.get("run_quality") or {}
     if q.get("quote_rate") is not None and q["quote_rate"] < 0.9:
         out.append(f"Only {q['quote_rate']:.0%} of evidence items have a verified quote.")
@@ -162,4 +163,7 @@ def quality_chips(results: dict) -> list[str]:
         chips.append(f"{q['paper_coverage']:.0%} of papers fully processed")
     if q.get("duplicate_gap_rate"):
         chips.append(f"{q['duplicate_gap_rate']:.0%} duplicate gaps")
+    rep = results.get("repeatability") or {}
+    if rep.get("overlap") is not None:
+        chips.append(f"{rep['overlap']:.0%} agreement with the previous run")
     return chips

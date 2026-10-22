@@ -96,6 +96,13 @@ and a verdict:
 - "keep": a genuine, specific, non-trivial gap.
 - "merge": the same underlying gap as another candidate; set "merge_into" to that candidate's id.
 - "drop": generic ("more research"), a restatement of a paper's own contribution, already answered by the papers, or not really a gap. Give a short "reason".
+SCORING ANCHORS. Use the whole 1-5 range: a set of candidates almost always contains weak and strong ones, so identical scores for every candidate are almost always wrong.
+- novelty: 1 = the papers already report it; 3 = related work exists but this specific combination is not shown; 5 = no paper addresses it and it is not an obvious extension.
+- importance: 1 = fine-tuning a method; 3 = would strengthen a subfield's evidence base; 5 = would change a clinical decision or the field's model of the disease.
+- feasibility: 1 = needs a cohort or technology no small team can obtain; 3 = needs new data collection with existing methods; 5 = can be done with data or materials the papers already describe.
+Example of a LOW candidate: "More research on X is needed" -> novelty 1, importance 2, feasibility 5, verdict drop.
+Example of a HIGH candidate: "Test whether the modulator class studied in paper A rescues the airway phenotype built in paper B's infection model" -> novelty 4, importance 4, feasibility 3, verdict keep.
+Score the strongest candidate at least one point above the weakest on at least one criterion.
 Also give a one-sentence "critique" and, if the title is vague, a "sharpened_title".
 When candidates are of comparable quality, prefer a final set that draws on every paper rather than clustering on one; do not keep a weak candidate just to include a paper.
 

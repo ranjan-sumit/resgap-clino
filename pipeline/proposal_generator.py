@@ -215,6 +215,13 @@ and a verdict:
 - "accept": strong as written.
 - "revise": a good core with fixable problems. Put concrete, specific fixes in "required_changes".
 - "reject": generic, already done, unsupported by its gap evidence, or infeasible. Give a "reason".
+SCORING ANCHORS. Use the whole 1-5 range and do NOT give every proposal the same scores: if two proposals truly are equal, say why in "issues".
+- specificity: 1 = names a topic only ("study CFTR in chips"); 3 = names a system and a method but not the measurements or sample; 5 = names the population or model system, the intervention, the readouts and the comparison.
+- novelty: 1 = a listed existing paper already does it; 3 = a variation on existing work; 5 = nothing listed does it and it is not an obvious next step.
+- feasibility: 1 = needs resources a small team cannot get; 3 = doable with new data collection; 5 = doable with materials and methods the cited papers already describe.
+- impact: 1 = a minor refinement; 3 = would strengthen a subfield; 5 = would change practice or understanding.
+Example of a weak proposal (specificity 2, novelty 2, impact 2 -> "reject" or "revise"): "Use machine learning to improve outcomes in cystic fibrosis."
+Example of a strong proposal (specificity 5, novelty 4, feasibility 4, impact 4 -> "accept"): a named airway-chip infection model, a named modulator at stated doses, ciliary beat frequency and bacterial load as readouts, compared against untreated chips.
 Also list the main "issues" (short phrases).
 
 Return ONLY JSON: {"reviews": [ {"index": 0, "specificity": 4, "novelty": 3, "feasibility": 4, "impact": 4, "verdict": "accept|revise|reject", "issues": ["..."], "required_changes": "", "reason": ""} ]}

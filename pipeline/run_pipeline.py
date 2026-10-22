@@ -54,6 +54,7 @@ from pipeline.paper_manager import assign_tiers, corpus_stats
 from pipeline.agent_config import agent_versions
 from pipeline.feedback_context import build_feedback_context, get_feedback_items
 from pipeline.run_quality import compute_run_quality
+from pipeline.variance import calibration_report, compare_with_previous, self_preference_note
 from pipeline.pdf_parser import check_pdf_readable, parse_pdf
 from pipeline.proposal_generator import generate_proposals, review_proposals
 from pipeline.reference_extractor import (
@@ -256,6 +257,22 @@ def run_full_pipeline(
     except BaseException as e:
         _dump_failed_run_log(options, call_log, e)
         raise
+
+
+def _repeatability_vs_previous(results: dict, project_id: str, look_back: int = 8) -> dict | None:
+    """Overlap of this run's gaps with the most recent earlier run in the project on the same papers
+    (None when there is none). Best effort: a failure here never touches the run."""
+    try:
+        from utils.database import list_runs, load_run
+        for row in list_runs(limit=look_back, project_id=project_id):
+            previous = load_run(row["id"], sections=False).get("results") or {}
+            found = compare_with_previous(results, previous, row["id"])
+            if found is not None:
+                found["matches"] = found["matches"][:10]
+                return found
+    except Exception:
+        return None
+    return None
 
 
 def _dump_failed_run_log(options, call_log, exc) -> None:
@@ -817,6 +834,21 @@ def _run_full_pipeline(
         "gate_block_reasons": gate_block_reasons,
         "agent_versions": agent_versions(),
     }
+    # Are the judges discriminating, is the same model marking its own work, and does this run agree
+    # with an earlier run on the same papers? (pipeline/variance.py)
+    if not gate_blocked:
+        results["calibration"] = calibration_report(validated_gaps, proposals)
+        for _w in results["calibration"]["warnings"]:
+            _trace("  Judge calibration", "critic and reviewer scores", _w, "⚠️")
+            warn(_w)
+        _self_note = self_preference_note(client.config) if hasattr(client, "config") else None
+        if _self_note:
+            _trace("  Judge independence", "critic and reviewer model", _self_note, "⚠️")
+        results["repeatability"] = _repeatability_vs_previous(results, project_id)
+        if results["repeatability"]:
+            _rp = results["repeatability"]
+            _trace("  Repeatability", f"vs the previous run on these papers ({_rp['n_previous']} gaps)",
+                   f"{_rp['overlap']:.0%} of distinct gaps found by both runs ({_rp['matched']} matched)")
     results["run_quality"] = compute_run_quality(
         results, duration_seconds=round(time.time() - run_start, 1),
         call_summary=_audit["call_log"].summary(), tokens_estimated=_audit["budget"].used)
