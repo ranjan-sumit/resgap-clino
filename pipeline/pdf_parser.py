@@ -90,15 +90,19 @@ _NON_BODY_LABELS = frozenset({"page_header", "page_footer", "page_number"})
 _MIN_STRUCTURAL_SECTIONS = 3
 
 
-def _structural_segments(pdf_path: str, filename: str) -> list:
-    """The page-tagged text blocks from the structural parser ([] when it cannot
-    run). They carry real page numbers and heading labels, which is what lets
-    evidence be traced to a page and section."""
+def _structural_extraction(pdf_path: str, filename: str) -> dict:
+    """The structural parser's output ({} when it cannot run): page-tagged text blocks that carry
+    real page numbers and heading labels, and the ruled tables it found."""
     try:
         from pipeline.docling_parser import extract_with_docling  # lazy: it imports this module
-        return list(extract_with_docling(pdf_path, filename).get("text_segments", []))
+        return extract_with_docling(pdf_path, filename)
     except Exception:
-        return []
+        return {}
+
+
+def _structural_segments(pdf_path: str, filename: str) -> list:
+    """The page-tagged text blocks from the structural parser ([] when it cannot run)."""
+    return list(_structural_extraction(pdf_path, filename).get("text_segments", []))
 
 
 def _sections_from_structure(pdf_path: str, filename: str) -> dict | None:
@@ -116,7 +120,7 @@ def _sections_from_segments(segments: list) -> dict | None:
     current = "_header"
     for seg in segments:
         label, text = seg.get("label"), (seg.get("text") or "").strip()
-        if not text or label in _NON_BODY_LABELS:
+        if not text or label in _NON_BODY_LABELS or label == "table":      # tables live in paper["tables"]
             continue
         if label == "section_header" and len(text) <= 80:
             name, n = text, 2
@@ -129,6 +133,23 @@ def _sections_from_segments(segments: list) -> dict | None:
     if sum(1 for k, v in sections.items() if k != "_header" and v.strip()) < _MIN_STRUCTURAL_SECTIONS:
         return None
     return sections
+
+
+def _strip_furniture(result: dict, segments: list) -> None:
+    """Running headers, footers and page numbers the structural parser recognised are removed
+    from the keyword-based sections and the full text too (they would otherwise be read as
+    paper content and, for a journal-name banner, as a section)."""
+    junk = {" ".join((s.get("text") or "").lower().split()) for s in segments if s.get("label") in _NON_BODY_LABELS}
+    junk.discard("")
+    if not junk:
+        return
+
+    def clean(text: str) -> str:
+        return "\n".join(line for line in text.split("\n") if " ".join(line.lower().split()) not in junk)
+
+    result["sections"] = {k: clean(v) if isinstance(v, str) else v for k, v in result["sections"].items()}
+    result["full_text"] = clean(result["full_text"])
+    result["char_count"] = len(result["full_text"])
 
 
 def _extract_tables(pdf_path: str) -> list:
@@ -282,7 +303,8 @@ def parse_pdf(pdf_path: str, filename: str, client=None, use_vision: bool = Fals
     # The keyword splitter only recognises headings like "Results"; papers with
     # topic headings end up as one huge "_header" blob. Prefer the structural split.
     legacy_named = sum(1 for k, v in result["sections"].items() if k != "_header" and v.strip())
-    segments = _structural_segments(pdf_path, filename)
+    structural_out = _structural_extraction(pdf_path, filename)
+    segments = list(structural_out.get("text_segments", []))
     result["text_segments"] = segments          # page-tagged blocks: the evidence reader's input
     structural = _sections_from_segments(segments)
     if structural is not None and (
@@ -292,9 +314,10 @@ def parse_pdf(pdf_path: str, filename: str, client=None, use_vision: bool = Fals
         result["sections"] = structural
     result["full_text"] = text_data["full_text"]
     result["char_count"] = text_data["char_count"]
+    _strip_furniture(result, segments)
 
-    # Table extraction
-    result["tables"] = _extract_tables(pdf_path)
+    # Tables: the structural parser reads ruled tables as real rows; pdfplumber is the fallback.
+    result["tables"] = list(structural_out.get("tables") or []) or _extract_tables(pdf_path)
 
     # Vision-based figure extraction (optional, requires PyMuPDF)
     if use_vision and client and FITZ_AVAILABLE:

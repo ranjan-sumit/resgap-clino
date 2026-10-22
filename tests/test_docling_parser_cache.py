@@ -93,7 +93,9 @@ class StructuralParserTests(unittest.TestCase):
         t = result["tables"][0]
         self.assertEqual((t["page"], t["rows"], t["cols"]), (1, 3, 3))
         self.assertIn("r1c1", t["content"])
-        self.assertFalse(any("r1c1" in s["text"] for s in result["text_segments"]))
+        # not duplicated as prose; the table itself is its own "table" segment
+        self.assertFalse(any("r1c1" in s["text"] for s in result["text_segments"] if s["label"] != "table"))
+        self.assertEqual(sum(1 for s in result["text_segments"] if s["label"] == "table"), 1)
 
     def test_cache_hit_skips_extraction(self):
         _make_pdf(self.tmp.name)

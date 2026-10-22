@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent
 def test_overview_counts_for_golden_and_legacy_runs():
     g = vm.overview(golden_results())
     assert [lbl for _, lbl in g] == ["Papers Analysed", "Graph Entities", "Communities", "Gaps Found", "Proposals"]
-    assert [v for v, _ in g] == [3, 0, 0, 2, 2]
+    assert [v for v, _ in g] == [3, 4, 0, 2, 2]
     assert [v for v, _ in vm.overview(legacy_results())] == [3, 0, 0, 2, 2]
 
 

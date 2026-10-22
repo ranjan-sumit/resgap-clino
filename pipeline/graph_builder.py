@@ -16,6 +16,7 @@ from collections import defaultdict
 from domain_config import inject_domain_into_graph_prompt
 from utils.azure_client import unwrap, LLMCallError
 from pipeline.evidence_linker import EVIDENCE_LINK_VERSION, build_paper_index, match_evidence_ids, resolve_paper_id
+from pipeline.graph_grounded import extract_graph_grounded, has_quoted_evidence
 
 ENTITY_EXTRACTION_PROMPT = """You are a knowledge graph builder for research papers.
 
@@ -529,15 +530,35 @@ def build_knowledge_graph(wiki: dict, client, domain_config: dict = None, eviden
     # B13 fix: distinguish an outright failed LLM call from a genuine empty
     # extraction — see Story 1.3 / AD-4. Story 1.2 deliberately left
     # extract_entities_and_relations' LLMCallError uncaught for this to catch.
+    # Evidence-first: with quoted evidence the graph is built from it, every relationship citing the
+    # item that states it. Without quotes (or if that fails) the wiki-based extraction below runs.
+    grounded_graph, grounded_diag = None, None
+    if has_quoted_evidence(evidence_objects):
+        try:
+            grounded_graph, grounded_diag = extract_graph_grounded(evidence_objects, wiki, client)
+            if not grounded_graph["entities"] or not grounded_graph["relationships"]:
+                grounded_graph, grounded_diag = None, {"grounded": False,
+                                                       "grounded_failure": "the model returned no usable graph"}
+        except LLMCallError as e:
+            grounded_graph, grounded_diag = None, {"grounded": False,
+                                                   "grounded_failure": f"LLM call failed: {e.error.kind}"}
+
     try:
-        graph_data  = extract_entities_and_relations(wiki, client, domain_config=domain_config,
-                                                     evidence_objects=evidence_objects)
-        diagnostics = {
-            "used_fallback": bool(graph_data.get("_used_fallback")),
-            "raw_response_preview": graph_data.get("_raw_response_preview", ""),
-            "llm_entities": len(graph_data.get("entities", [])),
-            "llm_relationships": len(graph_data.get("relationships", [])),
-        }
+        if grounded_graph is not None:
+            graph_data = {**grounded_graph, "_used_fallback": False, "_raw_response_preview": "", "_grounded": True}
+            diagnostics = {"used_fallback": False, "raw_response_preview": "",
+                           "llm_entities": len(graph_data["entities"]),
+                           "llm_relationships": len(graph_data["relationships"]), **grounded_diag}
+        else:
+            graph_data  = extract_entities_and_relations(wiki, client, domain_config=domain_config,
+                                                         evidence_objects=evidence_objects)
+            diagnostics = {
+                "used_fallback": bool(graph_data.get("_used_fallback")),
+                "raw_response_preview": graph_data.get("_raw_response_preview", ""),
+                "llm_entities": len(graph_data.get("entities", [])),
+                "llm_relationships": len(graph_data.get("relationships", [])),
+                **(grounded_diag or {}),
+            }
         if not graph_data.get("entities"):
             graph_data = _fallback_graph_from_wiki(wiki)
             diagnostics["used_fallback"] = True
@@ -571,7 +592,7 @@ def build_knowledge_graph(wiki: dict, client, domain_config: dict = None, eviden
     # "evidence" paraphrase to real Evidence Object ids.
     _assign_relationship_ids(graph_data)
     provenance_resolution = None
-    if evidence_objects is not None:
+    if evidence_objects is not None and not graph_data.get("_grounded"):     # grounded edges already cite their item
         provenance_resolution = _link_relationship_evidence(graph_data, wiki, evidence_objects)
 
     orphans     = find_orphan_concepts(graph_data, wiki)

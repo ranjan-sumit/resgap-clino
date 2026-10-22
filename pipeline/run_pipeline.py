@@ -589,11 +589,15 @@ def _run_full_pipeline(
         graph = build_knowledge_graph(wiki, client, domain_config=domain_cfg,
                                       evidence_objects=evidence_objects)
         graph_quality = score_graph_quality(graph, wiki)
+        _gd = graph.get("diagnostics", {})
         _trace("Stage 3 — Knowledge Graph",
-              "Wiki pages + cross-links",
+              "Quoted evidence" if _gd.get("grounded") else "Wiki pages + cross-links",
               f"{graph['stats']['entity_count']} entities, "
               f"{graph['stats']['relationship_count']} relationships "
-              f"— {graph_quality['build_status']} (quality={graph_quality['quality_score']})")
+              f"— {graph_quality['build_status']} (quality={graph_quality['quality_score']})"
+              + (f"; every relationship cites its quote; orphans {_gd.get('orphans_remaining', 0)} "
+                 f"({_gd.get('orphan_share', 0):.0%}) after linking" if _gd.get("grounded") else
+                 (f"; evidence-based graph not used: {_gd['grounded_failure']}" if _gd.get("grounded_failure") else "")))
         progress("Graph complete", 48)
 
         progress("Stage 4 — Finding research gaps (finder agents + critic)…", 50)

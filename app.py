@@ -187,6 +187,7 @@ for _k, _v in _DEFAULTS.items():
 from ui.viewmodels import (keys_line, off_note, overview, run_header, saved_trace, trace_summary,
                            trace_rows, stage_status)
 from ui.compat import plotly_full_width, table_full_width
+from ui.graph_view import filter_relations, grounding_summary, orphan_explanation, relation_rows
 from ui.gaps_view import (SORTS as GAP_SORTS, compare_proposals, filter_gaps, gap_rows, proposal_rows,
                           sort_gaps)
 from ui.evidence_view import (citation, evidence_rows, filter_evidence, match_evidence, paper_titles,
@@ -2013,6 +2014,36 @@ def _render_proposals(res: dict, proposals: list) -> None:
                                  for c in compare_proposals(a, b)]), hide_index=True)
 
 
+def _render_relations(res: dict, graph: dict) -> None:
+    """The graph as a table: every relationship with the paper, page and quote it rests on."""
+    ev_by_id = {r["id"]: r for r in evidence_rows(res)}
+    rows = relation_rows(graph, ev_by_id)
+    if not rows:
+        return
+    summary = grounding_summary(graph)
+    st.markdown("#### Relations and their evidence")
+    st.caption(f"{summary['grounded']} of {summary['relations']} relations cite a quoted passage of a paper."
+               if summary["relations"] else "")
+    c1, c2, c3 = st.columns([2, 2, 2])
+    kinds = sorted({r["relation"] for r in rows})
+    chosen = c1.multiselect("Relation", kinds, key="gr_relation")
+    papers = sorted({r["paper"] for r in rows if r["paper"]})
+    paper = c2.selectbox("Paper", ["All papers", *papers], key="gr_paper")
+    entity = c3.text_input("Entity", key="gr_entity", placeholder="e.g., CFTR")
+    shown = filter_relations(rows, relations=tuple(chosen), paper=None if paper == "All papers" else paper,
+                             entity=entity)
+    st.caption(f"{len(shown)} of {len(rows)} relations")
+    import pandas as pd
+    _table(pd.DataFrame([{
+        "From": r["source"], "Relation": r["relation"], "To": r["target"],
+        "Paper": r["paper"][:40], "Page": r["page"] if r["page"] is not None else "—",
+        "Quote": (r["quote"][:140] + ("…" if len(r["quote"]) > 140 else "")),
+    } for r in shown[:300]]), hide_index=True)
+    note = orphan_explanation(graph)
+    if note:
+        st.caption(note)
+
+
 # ── Results ────────────────────────────────────────────────────────────────────
 if st.session_state.results:
     res        = st.session_state.results
@@ -2279,7 +2310,12 @@ if st.session_state.results:
         graph_diag = graph.get("diagnostics", {})
         if graph_diag.get("used_fallback"):
             st.warning("The LLM graph extraction returned no entities, so a deterministic fallback graph was built from wiki concepts, methods, datasets, limitations, and findings.")
+        elif graph_diag.get("grounded"):
+            st.info(f"Built from the papers' quoted evidence: {graph_diag.get('llm_entities', 0)} entities and "
+                    f"{graph_diag.get('llm_relationships', 0)} relationships, each citing the passage that states it.")
         elif graph_diag:
+            if graph_diag.get("grounded_failure"):
+                st.caption(f"Evidence-based graph not used: {graph_diag['grounded_failure']}.")
             st.info(f"LLM graph extraction produced {graph_diag.get('llm_entities', 0)} entities and {graph_diag.get('llm_relationships', 0)} relationships.")
 
         # Clinova Phase 3, Epic 3.1 (FR-7): graph build status + quality
@@ -2320,6 +2356,8 @@ if st.session_state.results:
                             f'<span class="stat-label">{lbl}</span></div>',
                             unsafe_allow_html=True)
         st.markdown("")
+
+        _render_relations(res, graph)
 
         # Network diagram
         network_data = graph.get("network_data",{})

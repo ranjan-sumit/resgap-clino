@@ -51,7 +51,7 @@ from packages.research_schemas.evidence_object import (
 # Bumped 3 -> 4: evidence is now read from the paper's text by the Evidence Reader
 # (verified quotes, real pages, study type); results cached from the wiki-based
 # path have no quotes and must not be served in its place.
-EVIDENCE_STAGE_VERSION = 4
+EVIDENCE_STAGE_VERSION = 5
 
 _DETERMINISTIC_FIELD_MAP = {
     "methods": "Method",

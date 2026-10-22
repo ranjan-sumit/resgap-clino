@@ -65,6 +65,24 @@ def golden_results() -> dict:
             ],
             "gamma.pdf": [],
         },
+        "graph": {
+            "entities": [{"id": "chip", "name": "airway chip", "type": "model_system", "papers": ["Alpha trial of drug X"]},
+                         {"id": "culture", "name": "static culture", "type": "method", "papers": ["Alpha trial of drug X"]},
+                         {"id": "cohort", "name": "single-centre cohort", "type": "dataset_or_cohort",
+                          "papers": ["Beta cohort study of drug X"]},
+                         {"id": "lonely", "name": "lung tissue", "type": "concept", "papers": [], "orphan": True}],
+            "relationships": [
+                {"source": "chip", "target": "culture", "relation": "limited_by", "paper": "Alpha trial of drug X",
+                 "evidence": "Follow-up was 3 months.", "provenance_evidence_ids": ["e1"], "grounded": True, "page": 4},
+                {"source": "cohort", "target": "chip", "relation": "compared_with", "paper": "Beta cohort study of drug X",
+                 "evidence": "We enrolled 80 patients at one centre.", "provenance_evidence_ids": ["e3"], "grounded": True},
+                {"source": "culture", "target": "cohort", "relation": "mentions", "paper": "Gamma review of drug X",
+                 "evidence": "Fallback graph linked an item."}],
+            "communities": [], "orphan_concepts": [],
+            "diagnostics": {"grounded": True, "orphans_after_extraction": 3, "linked_by_comention": 1,
+                            "linked_by_model": 1, "orphans_remaining": 1, "orphan_share": 0.25,
+                            "llm_entities": 4, "llm_relationships": 3},
+            "stats": {"entity_count": 4, "relationship_count": 3, "community_count": 0, "orphan_count": 1}},
         "supplementary_gaps": [],
         "pipeline_trace": [
             {"stage": "Stage 1 — PDF Parse", "inputs": "3 PDFs", "outputs": "9,000 chars extracted", "status": "✅"},
@@ -77,7 +95,7 @@ def golden_results() -> dict:
 def legacy_results() -> dict:
     """Old schema: only context/papers/gaps/proposals."""
     r = copy.deepcopy(golden_results())
-    for k in ("paper_profiles", "supplementary_gaps", "pipeline_trace", "models"):
+    for k in ("paper_profiles", "supplementary_gaps", "pipeline_trace", "models", "graph"):
         r.pop(k)
     return r
 

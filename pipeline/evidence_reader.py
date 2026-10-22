@@ -102,6 +102,12 @@ def build_passages(text_segments: list) -> list:
         if in_refs:
             continue
         page = seg.get("page")
+        if label == "table":                      # never merged into prose: a row quoted from it must be findable
+            flush()
+            passages.append({"page": page, "section": f"Table (p.{page})", "text": text[:_PASSAGE_TARGET_CHARS * 3],
+                             "id": f"P{len(passages) + 1}"})
+            total += len(text)
+            continue
         if cur is None or cur["page"] != page or len(cur["text"]) + len(text) > _PASSAGE_TARGET_CHARS:
             flush()
             cur = {"page": page, "section": section, "text": ""}

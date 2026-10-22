@@ -33,7 +33,7 @@ except ImportError:  # PyMuPDF < 1.24.3 only exposes the legacy module name
 # Bumped 2 -> 3 on the Docling -> PyMuPDF swap: a v2 cache row holds Docling
 # output (different segmentation and labels) and must not be served as if the
 # new engine produced it (AD-3's stage_logic_version convention).
-DOCLING_STAGE_VERSION = 3
+DOCLING_STAGE_VERSION = 4     # 4: furniture found anywhere on the page; tables become segments
 
 _MARGIN_FRACTION = 0.08        # top/bottom band scanned for running headers/footers
 _REPEAT_FRACTION = 0.5         # margin text on >= this share of pages is a running header/footer
@@ -125,6 +125,38 @@ def _margin_labels(blocks: list[dict], n_pages: int) -> dict[int, str]:
         elif n_pages >= 3 and len(seen_on_pages[_norm_margin(b["text"])]) >= max(2, _REPEAT_FRACTION * n_pages):
             labels[id(b)] = kind
     return labels
+
+
+def _exact_key(text: str) -> str:
+    """Whitespace- and case-folded text WITHOUT masking digits: "2. Results" and "3. Results" are
+    different headings, whereas a margin running header ("... 2021;12:34") has its own rule."""
+    return " ".join(text.lower().split())
+
+
+_FURNITURE_MAX_CHARS = 90
+_FURNITURE_PAGE_FRACTION = 0.3
+
+
+def _repeated_furniture(blocks: list[dict], n_pages: int, already: dict) -> dict[int, str]:
+    """id(block) -> page_header | page_footer for short blocks whose text repeats on many pages
+    wherever they sit (a journal name set in a bold banner below the margin band is still a
+    running header). Real section headings are never repeated page after page, and a heading
+    keyword ("Methods", "Results") is never treated as furniture."""
+    if n_pages < 3:
+        return {}
+    pages_of: dict[str, set] = {}
+    for b in blocks:
+        if id(b) in already or len(b["text"]) > _FURNITURE_MAX_CHARS or b["n_lines"] > 2:
+            continue
+        pages_of.setdefault(_exact_key(b["text"]), set()).add(b["page"])
+    need = max(3, _FURNITURE_PAGE_FRACTION * n_pages)
+    out = {}
+    for b in blocks:
+        if id(b) in already or len(b["text"]) > _FURNITURE_MAX_CHARS or b["n_lines"] > 2:
+            continue
+        if len(pages_of.get(_exact_key(b["text"]), ())) >= need and not _detect_section(b["text"]):
+            out[id(b)] = "page_header" if b["bbox"][1] < b["page_h"] / 2 else "page_footer"
+    return out
 
 
 def _is_heading(b: dict, body_size: float) -> bool:
@@ -220,6 +252,7 @@ def extract_with_docling(pdf_path: str, filename: str) -> dict:
 
     body_size = _body_font_size(blocks)
     margin = _margin_labels(blocks, n_pages)
+    margin.update(_repeated_furniture(blocks, n_pages, margin))
 
     text_segments, md_parts = [], []
     for b in blocks:
@@ -233,6 +266,10 @@ def extract_with_docling(pdf_path: str, filename: str) -> dict:
             md_parts.append(b["text"])
     for t in tables:
         md_parts.append(f"[Table, page {t['page']}]\n{t['content']}")
+        # The table is also a segment of its own, so what a reader quotes from it can be found again.
+        seg = {"text": f"Table (page {t['page']}):\n{t['content']}", "page": t["page"], "label": "table"}
+        at = max((i + 1 for i, x in enumerate(text_segments) if (x.get("page") or 0) <= t["page"]), default=len(text_segments))
+        text_segments.insert(at, seg)
     full_text = "\n\n".join(md_parts)
 
     result = {
