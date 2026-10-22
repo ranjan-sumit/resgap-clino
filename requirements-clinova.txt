@@ -1,9 +1,11 @@
-# Additional runtime dependencies introduced by the Clinova rebuild
-# (Phase 1, Epic 1.1). requirements.txt itself is left untouched -- it
-# stays the exact baseline the original ResGap app depends on.
--r requirements.txt
-docling>=2.121.0
-
+# Clinova runtime dependencies.
+#
+# Docling was removed 2026-10-09: it pulled torch + CUDA + triton + opencv +
+# transformers (~5.8GB installed, ~1.1GB RAM/paper) and could not run on
+# Streamlit Cloud. The Quality Engine's second parser is now PyMuPDF-based
+# (pipeline/docling_parser.py) and needs nothing beyond requirements.txt.
+#
 # fastapi/uvicorn removed 2026-10-01: apps/api was archived (Streamlit-only
 # going forward, see _archive/react-fastapi-stack/README.md). Re-add if
 # that stack is ever restored.
+-r requirements.txt

@@ -1,9 +1,9 @@
 -- Clinova Phase 4, Epic 4.1: Research Artifact Registry (FR-22, ADR-005).
 -- Exact schema from 06-versioning-lineage-architecture.md §2 -- one table
 -- covering every artifact_type via a discriminator column, per-type detail
--- living in `metadata` jsonb (the doc does not define a separate table per
--- artifact type; only the Run Manifest gets its own dedicated detail table,
--- see 0003_run_manifest.sql).
+-- living in `metadata` (JSON TEXT; the doc does not define a separate table
+-- per artifact type; only the Run Manifest gets its own dedicated detail
+-- table, see 0003_run_manifest.sql). SQLite dialect.
 
 CREATE TABLE IF NOT EXISTS research_artifacts (
     artifact_id      TEXT PRIMARY KEY,
@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS research_artifacts (
     parent_artifact  TEXT REFERENCES research_artifacts(artifact_id),
     project_id       TEXT NOT NULL,
     run_id           TEXT,
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     content_hash     TEXT NOT NULL,
     storage_uri      TEXT,
     -- Lifecycle per 06-versioning-lineage-architecture.md §2:
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS research_artifacts (
     status           TEXT NOT NULL DEFAULT 'EXPERIMENTAL' CHECK (status IN (
         'EXPERIMENTAL', 'CANDIDATE', 'CHAMPION', 'ARCHIVED'
     )),
-    metadata         JSONB
+    metadata         TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_artifacts_type    ON research_artifacts(artifact_type);

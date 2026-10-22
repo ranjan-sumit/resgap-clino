@@ -1,87 +1,128 @@
-# Local Deployment — Docker Compose
+# Deployment
 
-Full local stack per `_bmad-output/clinova/08-local-deployment-architecture.md`.
+The app is a single Streamlit process plus one SQLite file. No database
+server, no graph server, no GPU libraries.
 
-## Services & ports
-
-| Service | Image | Host port | Purpose |
-|---|---|---|---|
-| `postgres` | postgres:16-alpine | **5433** | Mandatory. Role `clinova_app`, DB `clinova`; schema self-migrates (`migrations/*.sql`) on first app touch |
-| `arcadedb` | arcadedata/arcadedb | **2480** | Optional knowledge-graph persistence (opt-in checkbox in Streamlit) |
-| `api` | built from `Dockerfile.api` | **8000** | FastAPI backend (`apps/api`), health at `GET /api/health` |
-| `web` | built from `Dockerfile.web` | **3000** | Next.js frontend (build bakes `NEXT_PUBLIC_API_BASE_URL=http://localhost:8000`) |
-| `streamlit` | built from `Dockerfile.api` | **8501** | Original full-pipeline UI (`app.py`) |
-
-## First start
+## Run locally
 
 ```bash
-# from the repo root — bash (WSL) or Git Bash:
-bash scripts/make_dotenv.sh
-#   …or in PowerShell:
-# powershell -File scripts/make_dotenv.ps1
-
-# EDIT .env: replace paste-your-nvidia-key-here with your key (https://build.nvidia.com)
-
-docker compose up -d --build      # first build is long (docling/torch + Next.js build)
-docker compose ps                 # wait until all show (healthy)
+python -m venv .venv && source .venv/bin/activate     # or .venv\Scripts\activate on Windows
+pip install -r requirements.txt                        # ~0.7 GB installed
+cp .env.example .env                                   # then add NVIDIA_API_KEY (or GEMINI_API_KEY)
+streamlit run app.py
 ```
 
-Then open:
+Run history, caches and saved knowledge graphs live in `data/run_history.db`
+(override with `RESGAP_DB_PATH`). Delete the file to reset everything; it is
+recreated on next start. The schema is applied from `migrations/*.sql`.
 
-- **Web UI**: http://localhost:3000
-- **Streamlit UI**: http://localhost:8501 (paste your NVIDIA key in the sidebar if not in `.env`)
-- **API docs**: http://localhost:8000/docs
+## Models
 
-## Health checks
+Each kind of LLM work can use its own provider and model, chosen in **Models for
+this run** (right above **Run analysis**), with **Test models** to check them
+before a run:
 
-```bash
-docker compose ps                          # status column
-docker compose logs -f api                 # follow a service
+| Job | What it does |
+|---|---|
+| Extraction | parses/enriches references, extracts evidence (and Lab parameters) |
+| Wiki & graph | compiles each paper's wiki page and the knowledge graph |
+| Analysis | finds, validates and judges gaps; writes proposals |
+| Council (seats 1-3, chair) | the Computational Lab's council |
+| Fallback | takes over when a job's own model fails (a different provider is best) |
+
+Providers: Gemini, NVIDIA, OpenAI, Groq, Qwen, and a **Custom endpoint** (any
+OpenAI-compatible base URL). Set a key per provider in **API keys & endpoints**
+or in the environment (`GEMINI_API_KEY`, `NVIDIA_API_KEY`, `OPENAI_API_KEY`,
+`GROQ_API_KEY`, `CUSTOM_LLM_BASE_URL` + `CUSTOM_LLM_API_KEY`). Only the model
+choice is saved (`data/model_settings.json`), never a key.
+
+**Use recommended** picks from the keys you have, using measurements (see "Why
+these recommendations?" in the panel). Key findings: gemini-3.5-flash-lite is
+fast and has request headroom, so it runs the call-heavy jobs; gemini-3.6-flash
+is richer but its free tier allows only 5 requests/minute, so it suits the
+council; gemini-3.7-flash is ~20x slower and is not recommended. Each run
+records which model did what, and every call the fallback had to take over, in
+its manifest.
+
+## How a run works
+
+| Stage | What happens | Agents |
+|---|---|---|
+| 1 Parse | PyMuPDF reads each PDF into page-tagged text blocks and headings | — |
+| 2 Wiki | one compiled page per paper (sees up to 60k characters, papers in parallel) | wiki compiler |
+| 2C Evidence | each paper is read in parts of ~18k characters; every item carries a **verbatim quote** that is checked against the PDF text, with real page and section. Quotes that are not found, and statements whose numbers are not in the cited passage, are dropped. Also classifies the study type | **Evidence Reader** |
+| 3 Graph | entities and relations; the vocabulary matches the corpus (the Healthcare-AI one only for ML or simulation studies) | graph builder |
+| 4 Gaps | three finders work from the quoted evidence in parallel (authors' limitations, cross-paper synthesis, a per-paper methodology audit with a checklist for that study type); a critic scores novelty, importance and feasibility, merges duplicates and keeps the top ~12 | **Limitation Miner, Cross-Paper Synthesizer, Methodology Auditor, Methodology Critic** |
+| 5 Literature | a planner writes short keyword queries per gap; Semantic Scholar + Europe PMC (arXiv only for ML corpora) are searched; an assessor says open / partial / solved naming the closest paper. A failed search is "unverified", never "open" | **Query Planner, Gap Assessor** |
+| 6 Proposals | drafts, then a reviewer scores specificity, novelty, feasibility and impact and accepts, revises once, or rejects | **Proposal Reviewer** |
+| Lab (optional) | parameters, hypotheses, simulation and an insight council. The simulation and model-selection council are **skipped** when the papers do not contain enough usable numbers | council agents |
+
+Rule-based checks and graph-structure hints are kept as a separate "supplementary" list and are never validated or turned into proposals. Each run's trace and the **Paper coverage** panel show whether every paper made it through every stage.
+
+`SEMANTIC_SCHOLAR_API_KEY` in `.env` (or the sidebar field) is used for the literature check: with a key a run's literature stage takes about 4 minutes, without one the free tier is much slower and often rate-limited.
+
+## Projects
+
+Analyses are grouped into **projects**. Creating one (sidebar, **New project**)
+makes a folder next to the database, `data/projects/<name>-<id>/` (override the
+location with `RESGAP_PROJECTS_DIR`):
+
+```
+project.json
+papers/<hash>_<file>.pdf        uploaded papers, stored once per unique content
+runs/<run_id>/results.json      the full results
+              report.html       the report
+              report.pdf
+              manifest.json     model, options, and a file list
 ```
 
-Each service has a Compose healthcheck: Postgres `pg_isready`, API `GET /api/health`,
-Streamlit `GET /healthz`, web HTTP ping. Nothing depends on ArcadeDB being healthy —
-it is opt-in at runtime; if its healthcheck shows unhealthy, check
-`docker compose logs arcadedb`.
+Everything is also recorded in the database (`projects`, `project_files`,
+`run_files`), along with the user's feedback on gaps and runs (`feedback`).
+The **Project** view lists a project's runs, compares any two, and has
+**Download project (.zip)**, which bundles the folder plus a database export
+of its runs and feedback. Runs from before projects existed sit in the
+"Default project". `data/projects/` is gitignored: it holds user data.
 
-## Everyday commands
+`pipeline/feedback_context.py` formats a project's feedback for prompts
+(`build_feedback_context(project_id, role="judge" | "agent" | "all")`). It is
+not wired into any prompt yet.
+
+## Docker (optional)
 
 ```bash
-docker compose up -d              # start (after first build)
-docker compose stop               # stop, keep data
-docker compose down               # stop, remove containers (data volumes kept)
-docker compose down -v            # ALSO delete Postgres/ArcadeDB data (irreversible)
-docker compose up -d --build api  # rebuild one service after dependency changes
+bash scripts/make_dotenv.sh        # or: powershell -File scripts/make_dotenv.ps1
+# edit .env: add your key
+docker compose up -d --build       # Streamlit on http://localhost:8501
+docker compose logs -f streamlit
+docker compose down
 ```
 
-Code in `pipeline/`, `utils/`, `app.py`, and `apps/api/` is bind-mounted into the
-`api`/`streamlit` containers (uvicorn runs with `--reload`), so Python edits only need:
+The repo is bind-mounted, so `data/run_history.db` persists on the host.
+Streamlit has no auto-reload in this setup: `docker compose restart streamlit`
+after Python edits.
+
+## Streamlit Community Cloud
+
+1. Push the repo to GitHub; create the app pointing at `app.py`. Cloud
+   installs `requirements.txt` only.
+2. In the app's **Secrets**, add `NVIDIA_API_KEY` and/or `GEMINI_API_KEY`
+   (and optionally `SEMANTIC_SCHOLAR_API_KEY`).
+3. **The Cloud disk is ephemeral**: `data/run_history.db` **and the project
+   folders** are wiped when the app reboots or is redeployed, so run history,
+   saved papers and reports there last only until then. Use **Download project
+   (.zip)** in the Project view to keep a project.
+
+## Tests
 
 ```bash
-docker compose restart api streamlit   # streamlit has no auto-reload
-```
-
-The `web` image has no bind mount — rebuild it after frontend changes:
-`docker compose up -d --build web`.
-
-## Running tests on the host
-
-The DB ports are published, so host-side pytest/scripts work against the containers:
-
-```bash
-pip install -r requirements-dev.txt   # adds pytest, python-dotenv
-pytest tests/ -q                      # uses POSTGRES_URL=postgresql://localhost:5433 from .env
+pip install -r requirements-dev.txt
+pytest tests/ -q                   # each DB test gets its own throwaway SQLite file
 ```
 
 ## Troubleshooting
 
-- **`POSTGRES_PASSWORD` error on `compose up`** — create `.env` first (see above).
-- **Streamlit shows a DB exception at startup** — Postgres not healthy yet; `docker compose ps`,
-  wait for `(healthy)`, then `docker compose restart streamlit`.
-- **Web UI can't reach API from the browser** — `NEXT_PUBLIC_API_BASE_URL` is baked at build time;
-  if the API is not at `http://localhost:8000` from the browser's perspective, rebuild:
-  `docker compose build --build-arg NEXT_PUBLIC_API_BASE_URL=<browser-reachable-url> web`.
-- **Slow first run analysis** — docling's first paper conversion is ~90s and the Quality Engine
-  toggle needs it; the API and Streamlit boot fine without it.
-- **LLM errors in runs** — key missing/invalid: check `NVIDIA_API_KEY` in `.env` was set
-  *before* `docker compose up` (or paste it in the Streamlit sidebar).
+- **`database is locked`** — another process holds the file open for writing;
+  SQLite allows one writer at a time. Close the other session or point
+  `RESGAP_DB_PATH` elsewhere.
+- **LLM errors in runs** — key missing/invalid: check `NVIDIA_API_KEY` /
+  `GEMINI_API_KEY` in `.env`, or paste it in the Streamlit sidebar.

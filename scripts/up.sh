@@ -14,12 +14,10 @@ if [ ! -f .env ]; then
 fi
 
 docker compose config --quiet
-echo "▶ Building and starting (first run downloads a lot — docling/torch + Next.js build)…"
+echo "▶ Building and starting (first run installs the Python deps)…"
 docker compose up -d --build --wait
 echo ""
 echo "✔ Stack is up:"
 docker compose ps
 echo ""
-echo "  Web UI:      http://localhost:3000"
 echo "  Streamlit:   http://localhost:8501"
-echo "  API docs:    http://localhost:8000/docs"

@@ -1,102 +1,143 @@
 """
-Postgres Run History + Research Artifact Registry (Clinova Phase 4, Epic
-4.1/4.2). Replaces the pre-Phase-4 SQLite backend entirely -- every public
-function below keeps its exact pre-migration signature (save_run, load_run,
+SQLite Run History + Research Artifact Registry (Clinova Phase 4, Epic
+4.1/4.2). A single local file -- no server, no Docker, 0 MB of extra
+dependencies (sqlite3 ships with Python), which is what lets the app run on
+Streamlit Cloud. This replaced a Postgres backend (psycopg) on 2026-10-09;
+every public function below keeps its exact signature (save_run, load_run,
 list_runs, delete_run, get_run_papers, the six get_cached_X/save_cached_X
-pairs, compute_cache_key), so no call site anywhere else in the pipeline
-needed to change (confirmed: utils/database.py was the only module touching
-SQLite directly).
+pairs, compute_cache_key, the artifact/manifest functions), so no call site
+elsewhere changed.
 
-Requires a local PostgreSQL server running -- no Docker, no admin rights
-(portable EnterpriseDB ZIP binaries, same no-installer pattern as
-ArcadeDB/JDK; see amendments/2026-08-20-environment-constraints.md and
-POSTGRES_* in .env). Migrations live in migrations/*.sql, applied
-idempotently and in order by _apply_migrations() -- forward-only, per
-ADR-005/FR-21: nothing here drops or rewrites a prior migration in place.
+The file lives at $RESGAP_DB_PATH, default data/run_history.db. On Streamlit
+Cloud the local disk is ephemeral (wiped on reboot/redeploy), so history
+there lasts only until the app restarts.
 
-One real, deliberate change from the SQLite schema, not just a port: `runs.
-results_gz BLOB` (manually gzip-compressed JSON) became `runs.results_json
-JSONB` (native). Postgres TOAST-compresses large JSONB internally, so the
-manual gzip step was no longer doing useful work -- see migrations/
-0001_initial_schema.sql's own comment.
+Migrations live in migrations/*.sql, applied idempotently and in order by
+_apply_migrations() -- forward-only: nothing here drops or rewrites a prior
+migration in place. They are SQLite dialect; JSON is stored as TEXT and
+encoded/decoded here (_json_dumps / _decode_json_cols), where Postgres used
+native JSONB.
 """
 import json
 import os
+import sqlite3
+import threading
 import uuid
 import hashlib
-from datetime import datetime
+from datetime import datetime, date
 from pathlib import Path
 
-import psycopg
-from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
-
 MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
+DEFAULT_DB_PATH = Path(__file__).parent.parent / "data" / "run_history.db"
 
-# Test isolation hook (Epic 4.1): tests/pg_test_utils.py monkeypatches this
-# to a throwaway schema name via patch.object(db, "_SCHEMA", ...), giving
-# each test class its own fully-isolated set of tables -- the same
-# isolation the pre-migration tests got from a fresh tmpdir SQLite file
-# per test class, just via a Postgres schema instead of a separate file.
-# None (the default) means "use Postgres's normal 'public' schema," i.e.
-# real production behavior is completely unaffected by this hook existing.
+# Test isolation hook: tests/pg_test_utils.py monkeypatches this (the name is
+# historical -- it used to be a Postgres schema) to the path of a throwaway
+# SQLite file via patch.object(db, "_SCHEMA", ...), giving each test class its
+# own fully-isolated database. None (the default) means "use the real DB
+# path," so production behavior is unaffected by this hook existing.
 _SCHEMA: str | None = None
 
+# Paths whose migrations have already run in this process -- every public
+# function calls init_db(), so without this each call would re-check them.
+_INITIALIZED: set[str] = set()
+_INIT_LOCK = threading.Lock()
 
-def _config() -> dict:
-    return {
-        "host_and_port": os.environ.get("POSTGRES_URL", "postgresql://localhost:5433")
-                          .removeprefix("postgresql://"),
-        "user": os.environ.get("POSTGRES_USER", "clinova_app"),
-        "password": os.environ.get("POSTGRES_PASSWORD", ""),
-        "database": os.environ.get("POSTGRES_DATABASE", "clinova"),
-    }
+# JSON columns, per table, stored as TEXT and decoded back on read.
+_JSON_COLS = {
+    "research_artifacts": ("metadata",),
+    "run_manifests": ("parser_versions", "search_providers", "output_artifacts",
+                      "evaluation_metrics", "warnings", "quality_gate_results", "token_usage"),
+}
 
-
-def _get_conn() -> psycopg.Connection:
-    c = _config()
-    kwargs = {"row_factory": dict_row}
-    if _SCHEMA:
-        kwargs["options"] = f"-c search_path={_SCHEMA}"
-    return psycopg.connect(
-        f"postgresql://{c['user']}:{c['password']}@{c['host_and_port']}/{c['database']}",
-        **kwargs,
-    )
+# SQLite caps bound variables per statement (999 on older builds).
+_IN_CHUNK = 500
 
 
-def _apply_migrations(conn: psycopg.Connection) -> None:
+def _db_path() -> str:
+    return _SCHEMA or os.environ.get("RESGAP_DB_PATH") or str(DEFAULT_DB_PATH)
+
+
+def _get_conn() -> sqlite3.Connection:
+    path = _db_path()
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")   # off by default in SQLite
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.DatabaseError:
+        pass  # some network/virtual filesystems refuse WAL -- default journal is fine
+    return conn
+
+
+def _json_dumps(value) -> str:
+    return json.dumps(value, default=str)
+
+
+def _decode_json_cols(row, table: str) -> dict:
+    d = dict(row)
+    for col in _JSON_COLS.get(table, ()):
+        if isinstance(d.get(col), str):
+            try:
+                d[col] = json.loads(d[col])
+            except json.JSONDecodeError:
+                pass
+    return d
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
     """Idempotent, forward-only, in filename order. Safe to call every time
-    init_db() runs -- an already-applied migration is a no-op, matching the
-    same discipline as pipeline/graph_persistence.py's ensure_schema()."""
-    cur = conn.cursor()
-    cur.execute("""
+    init_db() runs -- an already-applied migration is a no-op."""
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS schema_migrations (
             version    TEXT PRIMARY KEY,
-            applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
         )
     """)
     conn.commit()
 
-    cur.execute("SELECT version FROM schema_migrations")
-    applied = {row["version"] for row in cur.fetchall()}
+    applied = {row["version"] for row in conn.execute("SELECT version FROM schema_migrations")}
 
     for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
         version = path.name
         if version in applied:
             continue
-        sql = path.read_text(encoding="utf-8")
-        cur.execute(sql)
-        cur.execute("INSERT INTO schema_migrations (version) VALUES (%s)", (version,))
+        try:
+            conn.executescript(path.read_text(encoding="utf-8"))
+        except sqlite3.OperationalError:
+            # Another process may have applied this migration between our
+            # SELECT and here (ALTER TABLE ADD COLUMN is not idempotent). If it
+            # is now recorded, that is fine; otherwise it is a real failure.
+            if conn.in_transaction:
+                conn.rollback()
+            done = conn.execute("SELECT 1 FROM schema_migrations WHERE version = ?", (version,)).fetchone()
+            if not done:
+                raise
+            continue
+        # OR IGNORE: another process (a second Streamlit session) may have
+        # recorded the same migration between our SELECT and here. Every
+        # migration is CREATE ... IF NOT EXISTS, so re-running it is harmless.
+        conn.execute("INSERT OR IGNORE INTO schema_migrations (version) VALUES (?)", (version,))
         conn.commit()
 
 
 def init_db() -> None:
-    """Create/upgrade tables if needed. Safe to call multiple times."""
-    conn = _get_conn()
-    try:
-        _apply_migrations(conn)
-    finally:
-        conn.close()
+    """Create/upgrade tables if needed. Safe to call multiple times and from
+    several threads at once (the pipeline's worker threads all reach this on a
+    fresh database): the lock makes the first caller do the work while the
+    others wait, then skip it."""
+    path = _db_path()
+    if path in _INITIALIZED and Path(path).exists():
+        return
+    with _INIT_LOCK:
+        if path in _INITIALIZED and Path(path).exists():
+            return
+        conn = _get_conn()
+        try:
+            _apply_migrations(conn)
+        finally:
+            conn.close()
+        _INITIALIZED.add(path)
 
 
 def compute_cache_key(
@@ -153,7 +194,7 @@ def get_cached_wiki_page(cache_key: str) -> dict | None:
     init_db()
     conn = _get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT wiki_json FROM wiki_pages WHERE cache_key = %s", (cache_key,))
+    cur.execute("SELECT wiki_json FROM wiki_pages WHERE cache_key = ?", (cache_key,))
     row = cur.fetchone()
     conn.close()
     if not row:
@@ -177,7 +218,7 @@ def save_cached_wiki_page(
     cur.execute(
         """INSERT INTO wiki_pages
            (cache_key, content_hash, domain_hash, stage_logic_version, wiki_json)
-           VALUES (%s,%s,%s,%s,%s)
+           VALUES (?,?,?,?,?)
            ON CONFLICT (cache_key) DO UPDATE SET
                content_hash = EXCLUDED.content_hash,
                domain_hash = EXCLUDED.domain_hash,
@@ -197,7 +238,7 @@ def get_cached_parameters(cache_key: str) -> list | None:
     init_db()
     conn = _get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT params_json FROM parameters WHERE cache_key = %s", (cache_key,))
+    cur.execute("SELECT params_json FROM parameters WHERE cache_key = ?", (cache_key,))
     row = cur.fetchone()
     conn.close()
     if not row:
@@ -220,7 +261,7 @@ def save_cached_parameters(
     cur = conn.cursor()
     cur.execute(
         """INSERT INTO parameters (cache_key, content_hash, stage_logic_version, params_json)
-           VALUES (%s,%s,%s,%s)
+           VALUES (?,?,?,?)
            ON CONFLICT (cache_key) DO UPDATE SET
                content_hash = EXCLUDED.content_hash,
                stage_logic_version = EXCLUDED.stage_logic_version,
@@ -240,7 +281,7 @@ def get_cached_docling_extraction(cache_key: str) -> dict | None:
     init_db()
     conn = _get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT extraction_json FROM docling_extractions WHERE cache_key = %s", (cache_key,))
+    cur.execute("SELECT extraction_json FROM docling_extractions WHERE cache_key = ?", (cache_key,))
     row = cur.fetchone()
     conn.close()
     if not row:
@@ -262,7 +303,7 @@ def save_cached_docling_extraction(
     cur = conn.cursor()
     cur.execute(
         """INSERT INTO docling_extractions (cache_key, content_hash, stage_logic_version, extraction_json)
-           VALUES (%s,%s,%s,%s)
+           VALUES (?,?,?,?)
            ON CONFLICT (cache_key) DO UPDATE SET
                content_hash = EXCLUDED.content_hash,
                stage_logic_version = EXCLUDED.stage_logic_version,
@@ -280,7 +321,7 @@ def get_cached_evidence_objects(cache_key: str) -> list | None:
     init_db()
     conn = _get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT evidence_json FROM evidence_objects WHERE cache_key = %s", (cache_key,))
+    cur.execute("SELECT evidence_json FROM evidence_objects WHERE cache_key = ?", (cache_key,))
     row = cur.fetchone()
     conn.close()
     if not row:
@@ -303,7 +344,7 @@ def save_cached_evidence_objects(
     cur = conn.cursor()
     cur.execute(
         """INSERT INTO evidence_objects (cache_key, content_hash, stage_logic_version, evidence_json)
-           VALUES (%s,%s,%s,%s)
+           VALUES (?,?,?,?)
            ON CONFLICT (cache_key) DO UPDATE SET
                content_hash = EXCLUDED.content_hash,
                stage_logic_version = EXCLUDED.stage_logic_version,
@@ -321,7 +362,7 @@ def get_cached_reference(cache_key: str) -> dict | None:
     init_db()
     conn = _get_conn()
     cur = conn.cursor()
-    cur.execute('SELECT enriched_json FROM "references" WHERE cache_key = %s', (cache_key,))
+    cur.execute('SELECT enriched_json FROM "references" WHERE cache_key = ?', (cache_key,))
     row = cur.fetchone()
     conn.close()
     if not row:
@@ -345,7 +386,7 @@ def save_cached_reference(
     cur = conn.cursor()
     cur.execute(
         """INSERT INTO "references" (cache_key, doi_or_title_hash, stage_logic_version, enriched_json)
-           VALUES (%s,%s,%s,%s)
+           VALUES (?,?,?,?)
            ON CONFLICT (cache_key) DO UPDATE SET
                doi_or_title_hash = EXCLUDED.doi_or_title_hash,
                stage_logic_version = EXCLUDED.stage_logic_version,
@@ -370,7 +411,7 @@ def get_cached_gap_validation(cache_key: str) -> dict | None:
     init_db()
     conn = _get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT validation_json FROM gap_validations WHERE cache_key = %s", (cache_key,))
+    cur.execute("SELECT validation_json FROM gap_validations WHERE cache_key = ?", (cache_key,))
     row = cur.fetchone()
     conn.close()
     if not row:
@@ -397,7 +438,7 @@ def save_cached_gap_validation(
     cur.execute(
         """INSERT INTO gap_validations
            (cache_key, gap_hash, domain_hash, stage_logic_version, validation_json)
-           VALUES (%s,%s,%s,%s,%s)
+           VALUES (?,?,?,?,?)
            ON CONFLICT (cache_key) DO UPDATE SET
                gap_hash = EXCLUDED.gap_hash,
                domain_hash = EXCLUDED.domain_hash,
@@ -413,13 +454,18 @@ def _run_id(name: str, ts: str) -> str:
     return hashlib.md5(f"{name}{ts}".encode()).hexdigest()[:12]
 
 
+DEFAULT_PROJECT_ID = "default"
+
+
 def save_run(
     name: str,
     results: dict,
     comp_results: dict | None = None,
+    project_id: str | None = None,
 ) -> str:
     """
-    Persist a full pipeline run to the database.
+    Persist a full pipeline run to the database, under `project_id` (the
+    always-present default project when omitted).
     Returns the run_id for later retrieval.
     """
     init_db()
@@ -434,8 +480,7 @@ def save_run(
     proposals   = results.get("proposals", [])
     papers_list = results.get("papers", [])
 
-    # Pack everything into one JSONB value -- native, no manual gzip (see
-    # migrations/0001_initial_schema.sql's comment for why).
+    # Pack everything into one JSON text value (see migrations/0001).
     blob_data = {"results": results}
     if comp_results:
         blob_data["comp_results"] = comp_results
@@ -446,14 +491,14 @@ def save_run(
         cur.execute(
             """INSERT INTO runs
                (id, name, created_at, domain, interest, n_papers, n_gaps,
-                n_proposals, has_comp, results_json)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                n_proposals, has_comp, results_json, project_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT (id) DO UPDATE SET
                    name = EXCLUDED.name, created_at = EXCLUDED.created_at,
                    domain = EXCLUDED.domain, interest = EXCLUDED.interest,
                    n_papers = EXCLUDED.n_papers, n_gaps = EXCLUDED.n_gaps,
                    n_proposals = EXCLUDED.n_proposals, has_comp = EXCLUDED.has_comp,
-                   results_json = EXCLUDED.results_json""",
+                   results_json = EXCLUDED.results_json, project_id = EXCLUDED.project_id""",
             (
                 rid, name, ts,
                 context.get("domain", ""),
@@ -462,17 +507,18 @@ def save_run(
                 len(gaps),
                 len(proposals),
                 1 if comp_results else 0,
-                Jsonb(json.loads(json.dumps(blob_data, default=str))),
+                _json_dumps(blob_data),
+                project_id or DEFAULT_PROJECT_ID,
             ),
         )
         # Idempotent re-save (same run_id): clear any prior papers rows
-        # before re-inserting, same intent as SQLite's INSERT OR REPLACE.
-        cur.execute("DELETE FROM papers WHERE run_id = %s", (rid,))
+        # before re-inserting.
+        cur.execute("DELETE FROM papers WHERE run_id = ?", (rid,))
         for p in papers_list:
             wiki  = p.get("wiki", {})
             title = wiki.get("title") or p.get("filename", "")
             cur.execute(
-                "INSERT INTO papers (run_id, filename, title, tier) VALUES (%s,%s,%s,%s)",
+                "INSERT INTO papers (run_id, filename, title, tier) VALUES (?,?,?,?)",
                 (rid, p.get("filename", ""), title, p.get("tier", 1)),
             )
         conn.commit()
@@ -482,16 +528,59 @@ def save_run(
     return rid
 
 
-def list_runs(limit: int = 20) -> list[dict]:
-    """Return recent runs (metadata only, no blob)."""
+def attach_comp_results(run_id: str, comp_results: dict) -> bool:
+    """Stores Computational Lab results on the run they were computed from, so
+    one analysis is one run (rather than a second, near-identical run).
+    Replaces earlier Lab results on that run. Returns False if the run does
+    not exist."""
+    init_db()
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT results_json FROM runs WHERE id = ?", (run_id,)).fetchone()
+        if row is None:
+            return False
+        blob = json.loads(row["results_json"])
+        blob["comp_results"] = comp_results
+        conn.execute("UPDATE runs SET results_json = ?, has_comp = 1 WHERE id = ?",
+                     (_json_dumps(blob), run_id))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def update_run_proposals(run_id: str, proposals: list) -> bool:
+    """Replaces a saved run's proposals (and its proposal count), for a run
+    whose proposal step failed and was repeated on its own. False if the run
+    does not exist."""
+    init_db()
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT results_json FROM runs WHERE id = ?", (run_id,)).fetchone()
+        if row is None:
+            return False
+        blob = json.loads(row["results_json"])
+        blob.setdefault("results", {})["proposals"] = proposals
+        conn.execute("UPDATE runs SET results_json = ?, n_proposals = ? WHERE id = ?",
+                     (_json_dumps(blob), len(proposals), run_id))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def list_runs(limit: int = 20, project_id: str | None = None) -> list[dict]:
+    """Return recent runs (metadata only, no blob), newest first. With
+    `project_id`, only that project's runs."""
     init_db()
     conn = _get_conn()
     cur = conn.cursor()
+    where, params = ("WHERE project_id = ?", [project_id]) if project_id else ("", [])
     cur.execute(
-        """SELECT id, name, created_at, domain, n_papers, n_gaps,
-                  n_proposals, has_comp
-           FROM runs ORDER BY created_at DESC LIMIT %s""",
-        (limit,),
+        f"""SELECT id, name, created_at, domain, n_papers, n_gaps,
+                   n_proposals, has_comp, project_id
+            FROM runs {where} ORDER BY created_at DESC, rowid DESC LIMIT ?""",
+        (*params, limit),
     )
     rows = cur.fetchall()
     conn.close()
@@ -508,8 +597,8 @@ def get_run_row(run_id: str) -> dict | None:
     cur = conn.cursor()
     cur.execute(
         """SELECT id, name, created_at, domain, n_papers, n_gaps,
-                  n_proposals, has_comp
-           FROM runs WHERE id = %s""",
+                  n_proposals, has_comp, project_id
+           FROM runs WHERE id = ?""",
         (run_id,),
     )
     row = cur.fetchone()
@@ -525,12 +614,12 @@ def load_run(run_id: str) -> dict:
     init_db()
     conn = _get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT results_json FROM runs WHERE id = %s", (run_id,))
+    cur.execute("SELECT results_json FROM runs WHERE id = ?", (run_id,))
     row = cur.fetchone()
     conn.close()
     if not row:
         return {}
-    return row["results_json"]
+    return json.loads(row["results_json"])
 
 
 def load_run_gate_fields_bulk(run_ids: list[str]) -> dict[str, dict]:
@@ -540,33 +629,42 @@ def load_run_gate_fields_bulk(run_ids: list[str]) -> dict[str, dict]:
     Additive: load_run() is unchanged and remains what app.py and every
     full-run reader use.
 
-    Two separate savings, and the second is the one that mattered. Deriving a
-    run's status reads only results.gate_blocked / results.gate_block_reasons,
-    while load_run() ships the whole results JSONB (papers, sections, graph,
-    evidence) to get them -- so this extracts just those keys server-side.
-    But measurement showed payload was NOT the bottleneck: _get_conn() opens
-    and closes a fresh connection per call at ~0.75s each, so a 5-run list
-    spent ~7.5s in connection setup alone. Hence bulk: one connection and one
-    query for the whole list instead of one per run.
+    Deriving a run's status reads only results.gate_blocked /
+    results.gate_block_reasons, while load_run() returns the whole results
+    JSON (papers, sections, graph, evidence) -- so this extracts just those
+    keys inside SQLite with json_extract, in one query for the whole list.
     """
     if not run_ids:
         return {}
     init_db()
+    run_ids = list(run_ids)
     conn = _get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT id, "
-        "       results_json->'results'->'gate_blocked'       AS gate_blocked, "
-        "       results_json->'results'->'gate_block_reasons' AS gate_block_reasons "
-        "FROM runs WHERE id = ANY(%s)",
-        (list(run_ids),),
-    )
-    rows = cur.fetchall()
+    rows = []
+    for i in range(0, len(run_ids), _IN_CHUNK):
+        chunk = run_ids[i:i + _IN_CHUNK]
+        rows += conn.execute(
+            "SELECT id, "
+            "       json_extract(results_json, '$.results.gate_blocked')       AS gate_blocked, "
+            "       json_extract(results_json, '$.results.gate_block_reasons') AS gate_block_reasons "
+            f"FROM runs WHERE id IN ({','.join('?' * len(chunk))})",
+            chunk,
+        ).fetchall()
     conn.close()
+
+    def _reasons(raw):
+        # json_extract returns arrays/objects as JSON text.
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError:
+                return []
+        return raw or []
+
     return {
         r["id"]: {
-            "gate_blocked": r["gate_blocked"],
-            "gate_block_reasons": r["gate_block_reasons"] or [],
+            # json_extract returns JSON true/false as 1/0; None stays None.
+            "gate_blocked": None if r["gate_blocked"] is None else bool(r["gate_blocked"]),
+            "gate_block_reasons": _reasons(r["gate_block_reasons"]),
         }
         for r in rows
     }
@@ -581,24 +679,26 @@ def get_run_manifests_bulk(run_ids: list[str]) -> dict[str, dict]:
     if not run_ids:
         return {}
     init_db()
+    run_ids = list(run_ids)
     conn = _get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM run_manifests WHERE run_id = ANY(%s)", (list(run_ids),))
-    rows = cur.fetchall()
+    rows = []
+    for i in range(0, len(run_ids), _IN_CHUNK):
+        chunk = run_ids[i:i + _IN_CHUNK]
+        rows += conn.execute(
+            f"SELECT * FROM run_manifests WHERE run_id IN ({','.join('?' * len(chunk))})", chunk,
+        ).fetchall()
     conn.close()
-    return {r["run_id"]: dict(r) for r in rows}
+    return {r["run_id"]: _decode_json_cols(r, "run_manifests") for r in rows}
 
 
 def delete_run(run_id: str) -> None:
     init_db()
     conn = _get_conn()
     cur = conn.cursor()
-    # Postgres enforces the papers.run_id FK (ON DELETE CASCADE) for real,
-    # unlike SQLite -- this manual delete is now defensive-but-redundant,
-    # kept for clarity/symmetry with the pre-migration behavior rather than
-    # relying solely on the cascade.
-    cur.execute("DELETE FROM papers WHERE run_id = %s", (run_id,))
-    cur.execute("DELETE FROM runs   WHERE id     = %s", (run_id,))
+    # papers.run_id is ON DELETE CASCADE and _get_conn() turns foreign_keys
+    # on, so this manual delete is defensive-but-redundant.
+    cur.execute("DELETE FROM papers WHERE run_id = ?", (run_id,))
+    cur.execute("DELETE FROM runs   WHERE id     = ?", (run_id,))
     conn.commit()
     conn.close()
 
@@ -607,7 +707,7 @@ def get_run_papers(run_id: str) -> list[dict]:
     init_db()
     conn = _get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT filename, title, tier FROM papers WHERE run_id = %s", (run_id,))
+    cur.execute("SELECT filename, title, tier FROM papers WHERE run_id = ?", (run_id,))
     rows = cur.fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -661,7 +761,7 @@ def record_artifact(
            (artifact_id, artifact_type, artifact_version, schema_version,
             parent_artifact, project_id, run_id, content_hash, storage_uri,
             status, metadata)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT (artifact_id) DO UPDATE SET
                artifact_version = EXCLUDED.artifact_version,
                schema_version = EXCLUDED.schema_version,
@@ -671,7 +771,7 @@ def record_artifact(
                status = EXCLUDED.status, metadata = EXCLUDED.metadata""",
         (artifact_id, artifact_type, artifact_version, schema_version,
          parent_artifact, project_id, run_id, content_hash, storage_uri,
-         status, Jsonb(metadata) if metadata is not None else None),
+         status, _json_dumps(metadata) if metadata is not None else None),
     )
     conn.commit()
     conn.close()
@@ -682,10 +782,10 @@ def get_artifact(artifact_id: str) -> dict | None:
     init_db()
     conn = _get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM research_artifacts WHERE artifact_id = %s", (artifact_id,))
+    cur.execute("SELECT * FROM research_artifacts WHERE artifact_id = ?", (artifact_id,))
     row = cur.fetchone()
     conn.close()
-    return dict(row) if row else None
+    return _decode_json_cols(row, "research_artifacts") if row else None
 
 
 def list_artifacts(artifact_type: str = None, project_id: str = None, status: str = None) -> list[dict]:
@@ -694,16 +794,17 @@ def list_artifacts(artifact_type: str = None, project_id: str = None, status: st
     cur = conn.cursor()
     clauses, params = [], []
     if artifact_type:
-        clauses.append("artifact_type = %s"); params.append(artifact_type)
+        clauses.append("artifact_type = ?"); params.append(artifact_type)
     if project_id:
-        clauses.append("project_id = %s"); params.append(project_id)
+        clauses.append("project_id = ?"); params.append(project_id)
     if status:
-        clauses.append("status = %s"); params.append(status)
+        clauses.append("status = ?"); params.append(status)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    cur.execute(f"SELECT * FROM research_artifacts {where} ORDER BY created_at DESC", params)
+    # rowid breaks ties between rows created within the same millisecond.
+    cur.execute(f"SELECT * FROM research_artifacts {where} ORDER BY created_at DESC, rowid DESC", params)
     rows = cur.fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    return [_decode_json_cols(r, "research_artifacts") for r in rows]
 
 
 def promote_artifact(artifact_id: str, new_status: str) -> dict:
@@ -715,7 +816,7 @@ def promote_artifact(artifact_id: str, new_status: str) -> dict:
     init_db()
     conn = _get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT status FROM research_artifacts WHERE artifact_id = %s", (artifact_id,))
+    cur.execute("SELECT status FROM research_artifacts WHERE artifact_id = ?", (artifact_id,))
     row = cur.fetchone()
     if not row:
         conn.close()
@@ -725,13 +826,15 @@ def promote_artifact(artifact_id: str, new_status: str) -> dict:
         conn.close()
         raise InvalidArtifactTransitionError(current, new_status)
     cur.execute(
-        "UPDATE research_artifacts SET status = %s WHERE artifact_id = %s RETURNING *",
+        "UPDATE research_artifacts SET status = ? WHERE artifact_id = ?",
         (new_status, artifact_id),
     )
-    updated = cur.fetchone()
+    updated = conn.execute(
+        "SELECT * FROM research_artifacts WHERE artifact_id = ?", (artifact_id,),
+    ).fetchone()
     conn.commit()
     conn.close()
-    return dict(updated)
+    return _decode_json_cols(updated, "research_artifacts")
 
 
 # ── Run Manifest (Clinova Phase 4, Epic 4.2, FR-23) ─────────────────────────
@@ -750,14 +853,20 @@ def record_run_manifest(run_id: str, project_id: str, **fields) -> str:
     actually have; anything omitted is stored as NULL, never fabricated
     (see module docstring on token_usage specifically)."""
     init_db()
-    jsonb_fields = {"parser_versions", "search_providers", "output_artifacts",
-                     "evaluation_metrics", "warnings", "quality_gate_results", "token_usage"}
+    json_fields = set(_JSON_COLS["run_manifests"])
+
+    def _encode(k, v):
+        if v is None:
+            return None
+        if k in json_fields:
+            return _json_dumps(v)
+        if isinstance(v, (date, datetime)):  # academic_search_date is stored as ISO text
+            return v.isoformat()
+        return v
+
     columns = ["run_id", "project_id"] + list(fields.keys())
-    values = [run_id, project_id] + [
-        Jsonb(v) if k in jsonb_fields and v is not None else v
-        for k, v in fields.items()
-    ]
-    placeholders = ", ".join(["%s"] * len(values))
+    values = [run_id, project_id] + [_encode(k, v) for k, v in fields.items()]
+    placeholders = ", ".join(["?"] * len(values))
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -776,7 +885,172 @@ def get_run_manifest(run_id: str) -> dict | None:
     init_db()
     conn = _get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM run_manifests WHERE run_id = %s", (run_id,))
+    cur.execute("SELECT * FROM run_manifests WHERE run_id = ?", (run_id,))
     row = cur.fetchone()
     conn.close()
+    return _decode_json_cols(row, "run_manifests") if row else None
+
+
+# ── Projects, project files and feedback ────────────────────────────────────
+# Schema: migrations/0005_projects.sql. Filesystem work (creating the folder,
+# writing papers and artifacts) lives in utils/project_store.py; this module is
+# only the database side.
+
+FEEDBACK_TARGETS = ("gap", "proposal", "run")
+
+
+def insert_project(project_id: str, name: str, description: str, folder: str) -> dict:
+    """Records a project row. The folder itself is created by project_store."""
+    init_db()
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "INSERT INTO projects (id, name, description, folder) VALUES (?,?,?,?)",
+            (project_id, name.strip(), (description or "").strip(), folder),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_project(project_id)
+
+
+def get_project(project_id: str) -> dict | None:
+    init_db()
+    conn = _get_conn()
+    row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+    conn.close()
     return dict(row) if row else None
+
+
+def list_projects(include_archived: bool = False) -> list[dict]:
+    """Projects with their run and file counts, default project first, then
+    newest first."""
+    init_db()
+    conn = _get_conn()
+    rows = conn.execute(
+        f"""SELECT p.*,
+                   (SELECT COUNT(*) FROM runs r WHERE r.project_id = p.id)          AS run_count,
+                   (SELECT COUNT(*) FROM project_files f WHERE f.project_id = p.id
+                                                        AND f.kind = 'paper')       AS paper_count
+            FROM projects p
+            {'' if include_archived else 'WHERE p.archived = 0'}
+            ORDER BY (p.id = ?) DESC, p.created_at DESC, p.rowid DESC""",
+        (DEFAULT_PROJECT_ID,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def add_project_file(project_id: str, kind: str, filename: str, rel_path: str,
+                     sha256: str, size_bytes: int) -> int:
+    """Records a file stored under the project's folder and returns its id.
+    Idempotent per (project, rel_path): re-saving returns the existing row's
+    id, and refreshes its hash and size when the file at that path was
+    rewritten (a regenerated report)."""
+    init_db()
+    conn = _get_conn()
+    try:
+        conn.execute(
+            """INSERT OR IGNORE INTO project_files
+               (project_id, kind, filename, rel_path, sha256, size_bytes)
+               VALUES (?,?,?,?,?,?)""",
+            (project_id, kind, filename, rel_path, sha256, size_bytes),
+        )
+        conn.execute(
+            "UPDATE project_files SET sha256 = ?, size_bytes = ? WHERE project_id = ? AND rel_path = ?",
+            (sha256, size_bytes, project_id, rel_path),
+        )
+        row = conn.execute(
+            "SELECT id FROM project_files WHERE project_id = ? AND rel_path = ?",
+            (project_id, rel_path),
+        ).fetchone()
+        conn.commit()
+    finally:
+        conn.close()
+    return row["id"]
+
+
+def link_run_file(run_id: str, file_id: int) -> None:
+    init_db()
+    conn = _get_conn()
+    try:
+        conn.execute("INSERT OR IGNORE INTO run_files (run_id, file_id) VALUES (?,?)", (run_id, file_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_project_files(project_id: str, kind: str | None = None, run_id: str | None = None) -> list[dict]:
+    """A project's files, optionally only one kind and/or only those a given
+    run used or produced."""
+    init_db()
+    clauses, params = ["f.project_id = ?"], [project_id]
+    if kind:
+        clauses.append("f.kind = ?"); params.append(kind)
+    join = ""
+    if run_id:
+        join = "JOIN run_files rf ON rf.file_id = f.id"
+        clauses.append("rf.run_id = ?"); params.append(run_id)
+    conn = _get_conn()
+    rows = conn.execute(
+        f"SELECT f.* FROM project_files f {join} WHERE {' AND '.join(clauses)} ORDER BY f.id",
+        params,
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def upsert_feedback(project_id: str, run_id: str, target_type: str, target_id: str = "",
+                    *, rating: int | None = None, reason: str = "", comment: str = "",
+                    target_label: str = "") -> dict | None:
+    """Saves the user's feedback on a gap, proposal or run. One row per
+    (run, target): calling again updates it. A call with no rating, reason or
+    comment clears the feedback instead (returns None). `rating` is 1 (useful),
+    -1 (not useful) or None."""
+    if target_type not in FEEDBACK_TARGETS:
+        raise ValueError(f"Unknown feedback target type: {target_type}")
+    if rating not in (1, -1, None):
+        raise ValueError("rating must be 1, -1 or None")
+    target_id = target_id or ""
+    reason, comment = (reason or "").strip(), (comment or "").strip()
+    init_db()
+    conn = _get_conn()
+    try:
+        if rating is None and not reason and not comment:
+            conn.execute("DELETE FROM feedback WHERE run_id = ? AND target_type = ? AND target_id = ?",
+                         (run_id, target_type, target_id))
+            conn.commit()
+            return None
+        conn.execute(
+            """INSERT INTO feedback
+               (project_id, run_id, target_type, target_id, target_label, rating, reason, comment)
+               VALUES (?,?,?,?,?,?,?,?)
+               ON CONFLICT (run_id, target_type, target_id) DO UPDATE SET
+                   target_label = EXCLUDED.target_label, rating = EXCLUDED.rating,
+                   reason = EXCLUDED.reason, comment = EXCLUDED.comment,
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')""",
+            (project_id, run_id, target_type, target_id, target_label, rating, reason, comment),
+        )
+        row = conn.execute(
+            "SELECT * FROM feedback WHERE run_id = ? AND target_type = ? AND target_id = ?",
+            (run_id, target_type, target_id),
+        ).fetchone()
+        conn.commit()
+    finally:
+        conn.close()
+    return dict(row)
+
+
+def list_feedback(*, run_id: str | None = None, project_id: str | None = None,
+                  target_type: str | None = None) -> list[dict]:
+    """Feedback for one run and/or a whole project, newest first."""
+    init_db()
+    clauses, params = [], []
+    for col, val in (("run_id", run_id), ("project_id", project_id), ("target_type", target_type)):
+        if val:
+            clauses.append(f"{col} = ?"); params.append(val)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    conn = _get_conn()
+    rows = conn.execute(f"SELECT * FROM feedback {where} ORDER BY updated_at DESC, id DESC", params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]

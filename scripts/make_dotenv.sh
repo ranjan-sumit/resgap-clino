@@ -10,28 +10,18 @@ fi
 
 cat > .env <<'EOF'
 # ── Required for real pipeline runs ──────────────────────────────────────
-# Get a key at https://build.nvidia.com — used by the FastAPI runs endpoint
-# and the Gap Challenger reranker. In the Streamlit UI you can also paste it
-# in the sidebar; the API reads it from this file via the container env.
+# Get a key at https://build.nvidia.com — used by the Gap Challenger reranker.
+# In the Streamlit UI you can also paste it in the sidebar.
 NVIDIA_API_KEY=paste-your-nvidia-key-here
 
 # Optional: raises Semantic Scholar rate limits (works unauthenticated at low rate)
 SEMANTIC_SCHOLAR_API_KEY=
 
-# ── Local service passwords (safe dev defaults; change if exposing ports) ──
-POSTGRES_PASSWORD=clinova_dev_pw
-ARCADEDB_PASSWORD=clinova_arcade_dev
+# Optional: other model providers (Provider dropdown in the sidebar)
+GEMINI_API_KEY=
 
-# ── Host-side defaults ────────────────────────────────────────────────────
-# (containers override hosts with service names via docker-compose.yml;
-#  these values are what you use when running pytest/scripts on the host)
-POSTGRES_URL=postgresql://localhost:5433
-POSTGRES_USER=clinova_app
-POSTGRES_DATABASE=clinova
-
-ARCADEDB_URL=http://localhost:2480
-ARCADEDB_USER=root
-ARCADEDB_DATABASE=clinova_graphs
+# Optional: SQLite file for run history + graph snapshots (default data/run_history.db)
+# RESGAP_DB_PATH=
 EOF
 
 echo "Created .env — now edit it and replace paste-your-nvidia-key-here with your real key."

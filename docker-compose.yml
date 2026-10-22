@@ -1,47 +1,13 @@
 name: clinova
 
-# Streamlit-only local stack — see _bmad-output/clinova/08-local-deployment-architecture.md
-# Usage:  docker compose up -d --build
+# Streamlit-only local stack. Usage:  docker compose up -d --build
 #
-# The Next.js/FastAPI services (api, web) were archived under
-# _archive/react-fastapi-stack/ (refactor/streamlit-simplification-oct1) —
-# the stakeholder preferred the Streamlit UI, and FastAPI had no consumer
-# besides that web app. Restore both services from git history if needed.
+# No database service: run history and graph snapshots live in one SQLite
+# file (data/run_history.db, utils/database.py), persisted by the ./data bind
+# mount below. Postgres and ArcadeDB were removed 2026-10-09; the Next.js/
+# FastAPI services were archived earlier under _archive/react-fastapi-stack/.
 
 services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-clinova_app}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
-      POSTGRES_DB: ${POSTGRES_DATABASE:-clinova}
-    ports:
-      - "5433:5432"          # code default is localhost:5433 (utils/database.py)
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
-      interval: 5s
-      timeout: 3s
-      retries: 12
-    restart: unless-stopped
-
-  arcadedb:
-    image: arcadedata/arcadedb:latest
-    environment:
-      JAVA_OPTS: "-Darcadedb.server.rootPassword=${ARCADEDB_PASSWORD:-clinova_arcade_dev}"
-    ports:
-      - "2480:2480"          # HTTP API only (pipeline/graph_persistence.py)
-    volumes:
-      - arcadedata:/home/arcadedb/databases
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:2480/api/v1/ready || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 40s
-    restart: unless-stopped
-
   streamlit:
     image: clinova-python:latest
     build:
@@ -50,18 +16,10 @@ services:
     command: streamlit run app.py --server.address=0.0.0.0 --server.port=8501 --server.enableCORS false --server.enableXsrfProtection false
     working_dir: /app
     env_file: .env
-    environment:
-      POSTGRES_URL: postgresql://postgres:5432
-      ARCADEDB_URL: http://arcadedb:2480
     volumes:
       - .:/app
     ports:
       - "8501:8501"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      arcadedb:
-        condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8501/healthz',timeout=3)"]
       interval: 15s
@@ -69,7 +27,3 @@ services:
       retries: 6
       start_period: 30s
     restart: unless-stopped
-
-volumes:
-  pgdata:
-  arcadedata:

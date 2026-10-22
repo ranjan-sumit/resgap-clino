@@ -13,12 +13,10 @@ if (-not (Test-Path .env)) {
 }
 
 docker compose config --quiet
-Write-Output "Building and starting (first run downloads a lot -- docling/torch + Next.js build)..."
+Write-Output "Building and starting (first run installs the Python deps)..."
 docker compose up -d --build --wait
 Write-Output ''
 Write-Output "Stack is up:"
 docker compose ps
 Write-Output ''
-Write-Output "  Web UI:      http://localhost:3000"
 Write-Output "  Streamlit:   http://localhost:8501"
-Write-Output "  API docs:    http://localhost:8000/docs"

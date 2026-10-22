@@ -378,6 +378,22 @@ def parse_domain_selection(display_str: str) -> str:
     return "General AI/ML"
 
 
+# The UI offers two choices: Healthcare (the domain with tuned prompts and the
+# built-in healthcare gap patterns) and General (everything else). The other
+# DOMAINS entries stay defined so existing saved runs and callers that pass
+# them keep working -- they are just no longer offered in the dropdown.
+# Each entry is (label shown to the user, key into DOMAINS).
+UI_DOMAIN_CHOICES = (
+    ("Healthcare", "Healthcare AI"),
+    ("General", "General AI/ML"),
+)
+
+
+def get_ui_domain_choices() -> list[tuple[str, str]]:
+    """[(label, domain_key), ...] for the sidebar dropdown, Healthcare first."""
+    return list(UI_DOMAIN_CHOICES)
+
+
 def inject_domain_into_wiki_prompt(base_prompt: str, domain_config: dict) -> str:
     """Inject domain-specific focus into wiki compilation prompt."""
     focus = domain_config.get("wiki_focus", "")

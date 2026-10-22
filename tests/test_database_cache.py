@@ -107,7 +107,7 @@ class WikiPagesCacheTests(_IsolatedSchemaTestCase):
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO wiki_pages (cache_key, content_hash, domain_hash, "
-            "stage_logic_version, wiki_json) VALUES (%s,%s,%s,%s,%s)",
+            "stage_logic_version, wiki_json) VALUES (?,?,?,?,?)",
             ("corrupt-key", "ch", "dh", 1, "{not valid json"),
         )
         conn.commit()
@@ -136,7 +136,7 @@ class ParametersCacheTests(_IsolatedSchemaTestCase):
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO parameters (cache_key, content_hash, stage_logic_version, params_json) "
-            "VALUES (%s,%s,%s,%s)",
+            "VALUES (?,?,?,?)",
             ("corrupt-key", "ch", 1, "[not valid json"),
         )
         conn.commit()
@@ -165,7 +165,7 @@ class ReferencesCacheTests(_IsolatedSchemaTestCase):
         cur = conn.cursor()
         cur.execute(
             'INSERT INTO "references" (cache_key, doi_or_title_hash, stage_logic_version, enriched_json) '
-            "VALUES (%s,%s,%s,%s)",
+            "VALUES (?,?,?,?)",
             ("corrupt-key", "ch", 1, "{not valid json"),
         )
         conn.commit()
@@ -177,7 +177,7 @@ class ReferencesCacheTests(_IsolatedSchemaTestCase):
         cur = conn.cursor()
         cur.execute(
             'INSERT INTO "references" (cache_key, doi_or_title_hash, stage_logic_version, enriched_json) '
-            "VALUES (%s,%s,%s,%s)",
+            "VALUES (?,?,?,?)",
             ("null-key", "ch", 1, None),
         )
         conn.commit()
@@ -189,7 +189,7 @@ class ReferencesCacheTests(_IsolatedSchemaTestCase):
         cur = conn.cursor()
         cur.execute(
             'INSERT INTO "references" (cache_key, doi_or_title_hash, stage_logic_version, enriched_json) '
-            "VALUES (%s,%s,%s,%s)",
+            "VALUES (?,?,?,?)",
             ("list-key", "ch", 1, "[1, 2, 3]"),
         )
         conn.commit()
@@ -220,7 +220,7 @@ class GapValidationsCacheTests(_IsolatedSchemaTestCase):
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO gap_validations (cache_key, gap_hash, domain_hash, "
-            "stage_logic_version, validation_json) VALUES (%s,%s,%s,%s,%s)",
+            "stage_logic_version, validation_json) VALUES (?,?,?,?,?)",
             ("incomplete-key", "gh", "dh", 1, json.dumps({"validation_status": "open"})),
         )
         conn.commit()
@@ -232,7 +232,7 @@ class GapValidationsCacheTests(_IsolatedSchemaTestCase):
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO gap_validations (cache_key, gap_hash, domain_hash, "
-            "stage_logic_version, validation_json) VALUES (%s,%s,%s,%s,%s)",
+            "stage_logic_version, validation_json) VALUES (?,?,?,?,?)",
             ("corrupt-key", "gh", "dh", 1, "{not valid json"),
         )
         conn.commit()
@@ -244,7 +244,7 @@ class GapValidationsCacheTests(_IsolatedSchemaTestCase):
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO gap_validations (cache_key, gap_hash, domain_hash, "
-            "stage_logic_version, validation_json) VALUES (%s,%s,%s,%s,%s)",
+            "stage_logic_version, validation_json) VALUES (?,?,?,?,?)",
             ("null-key", "gh", "dh", 1, None),
         )
         conn.commit()
@@ -256,7 +256,7 @@ class GapValidationsCacheTests(_IsolatedSchemaTestCase):
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO gap_validations (cache_key, gap_hash, domain_hash, "
-            "stage_logic_version, validation_json) VALUES (%s,%s,%s,%s,%s)",
+            "stage_logic_version, validation_json) VALUES (?,?,?,?,?)",
             ("list-key", "gh", "dh", 1, "[1, 2, 3]"),
         )
         conn.commit()

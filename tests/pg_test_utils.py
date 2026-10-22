@@ -1,45 +1,28 @@
 """
-Shared Postgres test-isolation helper (Clinova Phase 4, Epic 4.1). Gives
-each test class its own throwaway schema -- the same full isolation the
-pre-migration SQLite tests got from a fresh tmpdir *.db file per test
-class, just via a Postgres schema instead of a separate file. Requires a
-real local Postgres server (see .env's POSTGRES_* / RESUME.md setup notes)
--- utils/database.py has no other backend anymore, so this is the same
-hard requirement the app itself now has, not a new one invented for tests.
+Shared test-isolation helper (Clinova Phase 4, Epic 4.1). Gives each test
+class its own throwaway SQLite database file. The file keeps its historical
+name (and new_test_schema/drop_test_schema keep theirs) because a dozen test
+modules import them and patch `utils.database._SCHEMA`; that hook now holds
+the path of a temp SQLite file instead of a Postgres schema name.
+
+No server needed -- sqlite3 ships with Python.
 """
+import os
 import sys
-import uuid
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from dotenv import load_dotenv
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-
-import psycopg
-import utils.database as db
-
 
 def new_test_schema() -> str:
-    """Creates a fresh, empty, randomly-named schema and returns its name.
-    Uses a plain connection (default 'public' search_path) since the
-    schema doesn't exist yet for db._get_conn() to target."""
-    name = f"test_{uuid.uuid4().hex[:12]}"
-    c = db._config()
-    conn = psycopg.connect(
-        f"postgresql://{c['user']}:{c['password']}@{c['host_and_port']}/{c['database']}"
-    )
-    conn.autocommit = True
-    conn.execute(f'CREATE SCHEMA "{name}"')
-    conn.close()
-    return name
+    """Returns the path of a fresh, empty, throwaway SQLite database file."""
+    fd, path = tempfile.mkstemp(suffix=".db", prefix="resgap_test_")
+    os.close(fd)
+    os.unlink(path)  # sqlite creates it on first connect
+    return path
 
 
-def drop_test_schema(name: str) -> None:
-    c = db._config()
-    conn = psycopg.connect(
-        f"postgresql://{c['user']}:{c['password']}@{c['host_and_port']}/{c['database']}"
-    )
-    conn.autocommit = True
-    conn.execute(f'DROP SCHEMA IF EXISTS "{name}" CASCADE')
-    conn.close()
+def drop_test_schema(path: str) -> None:
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        Path(path + suffix).unlink(missing_ok=True)

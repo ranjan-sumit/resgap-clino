@@ -12,12 +12,7 @@ WORKDIR /app
 # host's older overlay filesystem/kernel combo (unrelated to disk space).
 RUN rm -f /etc/apt/apt.conf.d/docker-clean
 
-# Runtime libs some docling/torch transitive wheels expect on slim images
-RUN apt-get update \
- && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
- && rm -rf /var/lib/apt/lists/*
-
-# requirements-clinova.txt includes -r requirements.txt and adds fastapi/uvicorn (+docling)
+# requirements-clinova.txt just includes -r requirements.txt (docling removed)
 COPY requirements.txt requirements-clinova.txt ./
 RUN pip install --no-cache-dir -r requirements-clinova.txt
 

@@ -1,21 +1,14 @@
--- Clinova Phase 4, Epic 4.1: Postgres port of the pre-existing SQLite schema
--- (utils/database.py, pre-migration). Forward-only -- see migrations/README.md.
+-- Clinova Phase 4, Epic 4.1: run history + LLM-output cache tables.
+-- Forward-only -- see migrations/README.md.
 --
--- One real, deliberate change from the SQLite version: `runs.results_gz BLOB`
--- (manually gzip-compressed JSON) becomes `runs.results_json JSONB` (native).
--- Postgres TOAST-compresses large JSONB values internally, so the manual
--- gzip step this code carried under SQLite is no longer doing useful work --
--- dropping it is a real simplification, not just a rename. Every other
--- table is a direct, unchanged port (SQLite TEXT/INTEGER map cleanly to
--- Postgres TEXT/INTEGER; no other column needed a type change).
+-- SQLite dialect (the project moved Postgres -> SQLite on 2026-10-09 so it
+-- can run on Streamlit Cloud with no database server). `runs.results_json`
+-- holds the whole results blob as JSON TEXT; utils/database.py encodes and
+-- decodes it (Postgres used native JSONB here).
 --
--- Real, deliberate improvement #2: `papers.run_id` now has an ENFORCED
--- foreign key with ON DELETE CASCADE. SQLite declared this FK too, but
--- SQLite does not enforce foreign keys unless `PRAGMA foreign_keys=ON` is
--- set per-connection (it never was here) -- so delete_run() always had to
--- manually delete from `papers` before `runs` as a result. Postgres
--- enforces FKs by default; the cascade now does real work, and the manual
--- pre-delete in delete_run() becomes defensive-but-redundant, not required.
+-- `papers.run_id` has an ENFORCED foreign key with ON DELETE CASCADE:
+-- utils/database.py's _get_conn() sets PRAGMA foreign_keys = ON per
+-- connection, which SQLite requires and does not do by default.
 
 CREATE TABLE IF NOT EXISTS runs (
     id           TEXT PRIMARY KEY,
@@ -27,7 +20,7 @@ CREATE TABLE IF NOT EXISTS runs (
     n_gaps       INTEGER,
     n_proposals  INTEGER,
     has_comp     INTEGER DEFAULT 0,
-    results_json JSONB NOT NULL
+    results_json TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS papers (
