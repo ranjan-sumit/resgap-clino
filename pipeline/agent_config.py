@@ -76,7 +76,6 @@ class AgentConfig:
     max_tool_calls: int = 0
     max_search_calls: int = 0
     allowed_tools: tuple = ()
-    model: str = ""
     prompt_version: str = "1"
     # Honest None -- see module docstring's "does NOT do" section.
     input_schema: str | None = None
@@ -107,7 +106,6 @@ EVIDENCE_EXTRACTOR = AgentConfig(
     max_tokens=1500,
     timeout_seconds=300,
     max_retries=3,
-    model="openai/gpt-oss-20b",  # MASTER_MODEL, utils/azure_client.py
 )
 
 # Reads a whole paper (~15-20k tokens in) and returns up to ~45 quoted items, so the
@@ -139,7 +137,7 @@ GAP_GENERATOR = AgentConfig(
     max_tokens=4000,
     timeout_seconds=300,
     max_retries=3,
-    model="openai/gpt-oss-20b",
+
 )
 
 GAP_CHALLENGER = AgentConfig(
@@ -151,8 +149,29 @@ GAP_CHALLENGER = AgentConfig(
     timeout_seconds=300,
     max_retries=3,
     max_search_calls=2,  # Semantic Scholar + arXiv, per query family
-    model="openai/gpt-oss-20b",
+
 )
+
+
+def all_agent_configs() -> dict:
+    """Every AgentConfig defined in this module, by constant name."""
+    return {name: cfg for name, cfg in globals().items() if isinstance(cfg, AgentConfig)}
+
+
+def agent_versions() -> dict:
+    """{agent role: {"prompt_version", "config_hash"}} for the run manifest. The hash covers every
+    field (limits and version), so a changed token budget or retry count shows up as a different
+    agent even when nobody bumped prompt_version. (Which MODEL ran is recorded separately, from
+    the run's model settings: an agent has no fixed model.)"""
+    import hashlib
+    import json
+    from dataclasses import asdict
+    out = {}
+    for cfg in all_agent_configs().values():
+        blob = json.dumps(asdict(cfg), sort_keys=True, default=str)
+        out[cfg.role] = {"prompt_version": cfg.prompt_version,
+                         "config_hash": hashlib.sha256(blob.encode()).hexdigest()[:10]}
+    return out
 
 
 _SPAWN_DEPTH_LIMIT = 1  # Research Chair -> one capped re-run, never open-ended (§3)

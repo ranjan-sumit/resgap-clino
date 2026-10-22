@@ -1,0 +1,5 @@
+{
+  "_note": "Set from the agentic 3-paper cystic-fibrosis run (quote_rate 0.984, paper_coverage 1.0, no unsupported numbers, no duplicate gaps) with room for run-to-run variation. Raise them as quality improves.",
+  "min": {"quote_rate": 0.9, "paper_coverage": 0.9},
+  "max": {"unsupported_number_rate": 0.1, "duplicate_gap_rate": 0.15}
+}

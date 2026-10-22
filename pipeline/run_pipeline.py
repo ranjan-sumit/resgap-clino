@@ -51,6 +51,8 @@ from pipeline.graph_structural_gaps import detect_graph_structural_gaps
 from pipeline.lineage import record_run_lineage
 from pipeline.page_index import build_tree, tree_to_summary
 from pipeline.paper_manager import assign_tiers, corpus_stats
+from pipeline.agent_config import agent_versions
+from pipeline.run_quality import compute_run_quality
 from pipeline.pdf_parser import check_pdf_readable, parse_pdf
 from pipeline.proposal_generator import generate_proposals, review_proposals
 from pipeline.reference_extractor import (
@@ -108,6 +110,7 @@ class RunOptions:
     project_id: str | None = None         # None = the default project
     domain_config: dict | None = None
     git_commit: str | None = None
+    token_cap: int | None = None          # stop the run when its estimated token use passes this
 
 
 @dataclass
@@ -228,15 +231,25 @@ def run_full_pipeline(
     call_log = CallLog(secrets=secrets)
     if isinstance(client, ModelRouter):
         client.call_log = call_log
-    audit = {"call_log": call_log, "warnings": []}
+    audit = {"call_log": call_log, "warnings": [], "budget": None}
 
     def _warn(msg: str) -> None:
         stage = client.current_stage if isinstance(client, ModelRouter) else None
         audit["warnings"].append({"stage": stage, "message": call_log.redact(msg)})
         warn(msg)
 
+    from utils.cost_guard import TokenBudget
+    budget = TokenBudget(options.token_cap, on_warn=_warn)
+    audit["budget"] = budget
+    if isinstance(client, ModelRouter):
+        client.budget = budget
+
+    def _progress(msg: str, pct: int) -> None:
+        budget.check()                  # between stages: a passed cap stops the run here, cleanly
+        progress(msg, pct)
+
     try:
-        return _run_full_pipeline(papers, context, client, options, name, progress=progress,
+        return _run_full_pipeline(papers, context, client, options, name, progress=_progress,
                                   trace=trace, warn=_warn, token_meter=token_meter, _audit=audit)
     except BaseException as e:
         _dump_failed_run_log(options, call_log, e)
@@ -775,7 +788,11 @@ def _run_full_pipeline(
         "model_fallbacks": list(getattr(client, "fallback_events", []) or []),
         "gate_blocked": gate_blocked,
         "gate_block_reasons": gate_block_reasons,
+        "agent_versions": agent_versions(),
     }
+    results["run_quality"] = compute_run_quality(
+        results, duration_seconds=round(time.time() - run_start, 1),
+        call_summary=_audit["call_log"].summary(), tokens_estimated=_audit["budget"].used)
 
     # Auto-save regardless of gate_blocked, so a FAIL-gated run's fetched
     # data is never lost (B23).
@@ -874,6 +891,9 @@ def _run_full_pipeline(
                 },
                 "gate_blocked": gate_blocked,
                 "duration_seconds": round(time.time() - run_start, 1),
+                "run_quality": results["run_quality"],
+                "agent_versions": results["agent_versions"],
+                "token_cap": options.token_cap,
                 "llm_call_summary": _audit["call_log"].summary(),
                 "llm_call_errors": _audit["call_log"].failures()[:100],
                 "warnings": _audit["warnings"],

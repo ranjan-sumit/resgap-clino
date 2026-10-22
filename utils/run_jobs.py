@@ -214,7 +214,7 @@ def start_job(*, papers, context, client, options, name: str = "", token_meter=N
             })
         except BaseException as e:        # a worker must always leave a final state behind
             tb = "".join(traceback.format_exception_only(type(e), e)).strip()
-            fail_job(job_id, tb if type(e).__name__ == "PipelineInputError" else
+            fail_job(job_id, tb if type(e).__name__ in ("PipelineInputError", "BudgetExceededError") else
                      f"{tb}\n\n{traceback.format_exc()[-1500:]}")
         finally:
             _THREADS.pop(job_id, None)

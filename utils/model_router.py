@@ -228,6 +228,7 @@ class ModelRouter:
         self.fallback_events: list = []
         self.call_log = None            # a utils.call_log.CallLog, set by the pipeline
         self.limiter = RateLimiter(MODEL_RPM_LIMITS)   # shared by every thread using this router
+        self.budget = None              # a utils.cost_guard.TokenBudget, set by the pipeline
 
     # -- clients ---------------------------------------------------------------
     def client_for(self, spec: ModelSpec):
@@ -304,6 +305,8 @@ class ModelRouter:
         kwargs = dict(kwargs)
         kwargs["max_tokens"] = int(kwargs["max_tokens"] * token_boost(spec.model, spec.provider))
         client.set_stage(self.current_stage)
+        if self.budget is not None:
+            self.budget.check()          # over the cap: no further spend
         self.limiter.acquire(spec.provider, spec.model)
         started = time.time()
         try:
@@ -311,6 +314,8 @@ class ModelRouter:
         except Exception as e:
             self._log(spec, method, system, user, started, False, "exception", f"{type(e).__name__}: {e}")
             raise
+        if self.budget is not None:
+            self.budget.add(self.budget.tokens_of(system, user, str(result.value or "") if isinstance(result, Success) else ""))
         if isinstance(result, Success):
             self._log(spec, method, system, user, started, True, response_chars=len(str(result.value or "")))
         else:

@@ -187,8 +187,21 @@ for _k, _v in _DEFAULTS.items():
 from ui.viewmodels import (keys_line, off_note, overview, run_header, saved_trace, trace_summary,
                            trace_rows, stage_status)
 from ui.compat import plotly_full_width, table_full_width
+import hashlib
 from utils.run_storage import to_local_display
 from utils.database import with_sections
+from utils.cost_guard import DEFAULT_CAP_TOKENS, describe_estimate, estimate_cost, estimate_run
+
+
+@st.cache_data(show_spinner=False)
+def _pdf_text_chars(_sha: str, data: bytes) -> int:
+    """Characters of text in a PDF (cached per file), for the pre-run estimate."""
+    try:
+        import fitz
+        with fitz.open(stream=data, filetype="pdf") as doc:
+            return sum(len(page.get_text()) for page in doc)
+    except Exception:
+        return len(data) // 10
 
 
 def _local_time(ts: str) -> str:
@@ -1358,6 +1371,17 @@ with st.expander("New analysis", expanded=not _has_run_on_screen):
     _model_issues = _render_model_picker()      # which model does which job, and a test, in the same step as Run
 
     _n_files = len(_papers)
+    # Rough cost before the run, and a cap that stops it cleanly (utils/cost_guard.py).
+    _token_cap = int(st.number_input(
+        "Stop the run if it uses more than (tokens)", min_value=50_000, max_value=50_000_000,
+        value=DEFAULT_CAP_TOKENS, step=100_000, key="token_cap",
+        help="A safety limit on the estimated tokens one run may use. The run stops between stages "
+             "(results so far are kept in the call log) instead of spending more."))
+    if _papers:
+        _est = estimate_run([_pdf_text_chars(hashlib.sha256(d).hexdigest(), d) for _, d in _papers],
+                            extract_refs=extract_refs, gap_challenger=enable_gap_challenger)
+        _ms = st.session_state["model_config"].spec_for(ROLE_ANALYSIS)
+        st.caption(describe_estimate(_est, _token_cap, estimate_cost(_est["tokens"], _ms.provider, _ms.model)))
     _job_active = bool(run_jobs.list_jobs(project_id=_cur_project["id"], active_only=True, limit=1))
     st.session_state.setdefault("bg_runs", True)
     st.checkbox("Keep running in the background (safe to refresh the page)", key="bg_runs",
@@ -1424,6 +1448,7 @@ if run_btn and _papers:
         ss_api_key=ss_api_key,
         domain_config=domain_cfg,
         git_commit=_GIT_COMMIT,
+        token_cap=_token_cap,
     )
 
     # In the background the run survives a refresh of this page; progress is polled from the database.
