@@ -261,11 +261,11 @@ class ReasoningEffortTests(unittest.TestCase):
     """Gemini's thinking models need a low reasoning effort or their strict-JSON
     output is cut off / malformed and a single call can take minutes."""
 
-    def _create_kwargs(self, model):
+    def _create_kwargs(self, model, base_url="https://generativelanguage.googleapis.com/v1beta/openai/"):
         from utils.azure_client import AzureOpenAIClient
         with patch("utils.azure_client.OpenAI") as openai_cls, \
                 patch("utils.azure_client._collect_stream", return_value="{}"):
-            c = AzureOpenAIClient(api_key="k", base_url="https://example.test/v1", model=model, fallback_model=None)
+            c = AzureOpenAIClient(api_key="k", base_url=base_url, model=model, fallback_model=None)
             c.chat("s", "u")
             return openai_cls.return_value.chat.completions.create.call_args.kwargs
 

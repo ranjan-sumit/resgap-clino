@@ -35,7 +35,8 @@ from dataclasses import dataclass
 import requests
 
 from utils.azure_client import AzureOpenAIClient, ErrorInfo, Failure, Success, _retry_after_seconds
-from utils.model_providers import PROVIDER_REGISTRY, _MODEL_TOP_P_OVERRIDES, get_provider
+from utils.model_providers import MODEL_RPM_LIMITS, PROVIDER_REGISTRY, _MODEL_TOP_P_OVERRIDES, get_provider
+from utils.rate_limiter import RateLimiter
 
 CUSTOM_PROVIDER = "custom"
 
@@ -103,11 +104,14 @@ COUNCIL_KEY_ROLE = {
 # calls broken; the real fix is the low reasoning effort sent in
 # utils/azure_client._MODEL_EXTRA_BODY (7 of 7 valid, 5-7 s). The headroom stays
 # as cheap insurance for the occasional long reasoning chain.
-_TOKEN_BOOST = {"gemini-3.6-flash": 2.0, "gemini-3.7-flash": 2.0}
+_TOKEN_BOOST = {("gemini", "gemini-3.6-flash"): 2.0, ("gemini", "gemini-3.7-flash"): 2.0}
 
 
-def token_boost(model: str) -> float:
-    return _TOKEN_BOOST.get(model, 1.0)
+def token_boost(model: str, provider: str = "gemini") -> float:
+    """Output-token headroom for a model on a provider (keyed by both, so the same
+    model name elsewhere does not inherit it). `provider` defaults to Gemini, the
+    only provider with entries today."""
+    return _TOKEN_BOOST.get((provider, model), 1.0)
 
 
 def role_for_stage(stage: str) -> str:
@@ -223,6 +227,7 @@ class ModelRouter:
         self.current_stage = None
         self.fallback_events: list = []
         self.call_log = None            # a utils.call_log.CallLog, set by the pipeline
+        self.limiter = RateLimiter(MODEL_RPM_LIMITS)   # shared by every thread using this router
 
     # -- clients ---------------------------------------------------------------
     def client_for(self, spec: ModelSpec):
@@ -297,8 +302,9 @@ class ModelRouter:
     # -- routing + cross-provider fallback ---------------------------------------
     def _invoke(self, client, spec: ModelSpec, method: str, system: str, user: str, kwargs: dict):
         kwargs = dict(kwargs)
-        kwargs["max_tokens"] = int(kwargs["max_tokens"] * token_boost(spec.model))
+        kwargs["max_tokens"] = int(kwargs["max_tokens"] * token_boost(spec.model, spec.provider))
         client.set_stage(self.current_stage)
+        self.limiter.acquire(spec.provider, spec.model)
         started = time.time()
         try:
             result = getattr(client, method)(system, user, **kwargs)
@@ -309,6 +315,10 @@ class ModelRouter:
             self._log(spec, method, system, user, started, True, response_chars=len(str(result.value or "")))
         else:
             self._log(spec, method, system, user, started, False, result.error.kind, result.error.detail)
+            if result.error.kind == "rate_limit":
+                # One caller hitting a quota means every caller should back off.
+                self.limiter.penalize(spec.provider, spec.model,
+                                      _retry_after_seconds(result.error.detail) or 15.0)
         return result
 
     def _log(self, spec, method, system, user, started, ok, kind="", detail="", response_chars=0):
@@ -412,7 +422,7 @@ def _test_one(spec: ModelSpec, keys: dict, roles: list, factory, timeout: int) -
     if spec.provider == CUSTOM_PROVIDER and not spec.base_url:
         out["error"] = "The custom endpoint needs a base URL."
         return out
-    boost = token_boost(spec.model)
+    boost = token_boost(spec.model, spec.provider)
     try:
         client = factory(spec, key, None)
         t0 = time.time()

@@ -221,13 +221,25 @@ def _stream_options_error(err: str) -> bool:
 # breaks strict-JSON stages (cut-off or malformed output) and, for
 # gemini-3.7-flash, makes a single call take ~135 s. A low reasoning effort
 # keeps the reasoning small. Sent as extra_body so it works on any SDK version.
+# Keyed by (provider host, model): the same model name served by two providers
+# (e.g. gpt-oss-20b on NVIDIA and on Groq) must not share request options.
+_GEMINI_HOST = "generativelanguage.googleapis.com"
+_NVIDIA_HOST = "integrate.api.nvidia.com"
 _MODEL_EXTRA_BODY = {
-    "gemini-3.6-flash": {"reasoning_effort": "low"},
-    "gemini-3.7-flash": {"reasoning_effort": "low"},
+    (_GEMINI_HOST, "gemini-3.6-flash"): {"reasoning_effort": "low"},
+    (_GEMINI_HOST, "gemini-3.7-flash"): {"reasoning_effort": "low"},
     # NVIDIA's thinking model took 92 s for a one-line JSON reply with thinking
     # on, 13 s with it off (measured 2026-10-20).
-    "nvidia/nemotron-3.5-super-vl-120b-a12b": {"chat_template_kwargs": {"enable_thinking": False}},
+    (_NVIDIA_HOST, "nvidia/nemotron-3.5-super-vl-120b-a12b"): {"chat_template_kwargs": {"enable_thinking": False}},
 }
+
+
+def extra_body_for(base_url: str, model: str) -> dict | None:
+    """Request options a model needs on THIS provider (matched on the base URL's host)."""
+    for (host, name), body in _MODEL_EXTRA_BODY.items():
+        if name == model and host in (base_url or ""):
+            return body
+    return None
 
 
 def make_nvidia_client(api_key: str) -> OpenAI:
@@ -366,8 +378,9 @@ class AzureOpenAIClient:
         )
         if want_usage:
             create_kwargs["stream_options"] = {"include_usage": True}
-        if model in _MODEL_EXTRA_BODY:
-            create_kwargs["extra_body"] = _MODEL_EXTRA_BODY[model]
+        extra = extra_body_for(self._base_url, model)
+        if extra:
+            create_kwargs["extra_body"] = extra
 
         try:
             # See _collect_stream()'s docstring: the SDK's own `timeout=`

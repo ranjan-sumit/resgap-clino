@@ -156,6 +156,14 @@ _MODEL_TOP_P_OVERRIDES = {
 }
 
 
+# Documented request-per-minute limits of models known to be tight (free tier).
+# Anything not listed is not throttled; the router still honours Retry-After.
+# Keyed by (provider, model).
+MODEL_RPM_LIMITS = {
+    ("gemini", "gemini-3.6-flash"): 5,
+}
+
+
 def get_provider(provider_key: str) -> ProviderConfig:
     if provider_key not in PROVIDER_REGISTRY:
         raise ValueError(
