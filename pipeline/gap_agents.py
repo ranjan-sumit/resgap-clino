@@ -270,13 +270,16 @@ def _run_finder(client, lens: str, system: str, user: str, by_handle: dict, titl
     return out, diag
 
 
-def _critic(client, candidates: list):
+def _critic(client, candidates: list, feedback_text: str = ""):
     """Returns ({id: review}, error). Reviews are advisory: if the critic fails the caller ranks by grounding."""
     brief = [{"id": c["_cid"], "lens": c["lens"], "title": c["title"], "description": c["description"],
               "why_important": c.get("why_important", ""), "papers": c.get("supporting_papers", []),
               "grounded_quotes": len(c.get("motivating_evidence_ids") or [])} for c in candidates]
     try:
-        raw = unwrap(client.chat_json(_CRITIC_PROMPT, "Candidate gaps:\n" + json.dumps(brief, indent=1, ensure_ascii=False),
+        user = "Candidate gaps:\n" + json.dumps(brief, indent=1, ensure_ascii=False)
+        if feedback_text:
+            user += "\n\n" + feedback_text
+        raw = unwrap(client.chat_json(_CRITIC_PROMPT, user,
                                       max_tokens=GAP_CRITIC.max_tokens, timeout_seconds=GAP_CRITIC.timeout_seconds,
                                       max_retries=GAP_CRITIC.max_retries))
     except LLMCallError as e:
@@ -300,8 +303,18 @@ def _score(review: dict | None, gap: dict) -> float:
     return 0.30 * n("importance") + 0.30 * n("novelty") + 0.20 * n("feasibility") + 0.20 * grounding
 
 
+def paper_support(gaps: list, evidence_objects: dict, titles: dict) -> dict:
+    """{filename: number of gaps that cite it} (by supporting-paper title or filename)."""
+    from pipeline.coverage import _is_paper
+    return {pid: sum(1 for g in gaps if any(_is_paper(ref, pid, titles.get(pid, pid))
+                                            for ref in (g.get("supporting_papers") or [])))
+            for pid in evidence_objects}
+
+
 def find_gaps(wiki: dict, graph: dict, context: dict, client, evidence_objects: dict,
-              paper_profiles: dict | None = None, max_gaps: int = MAX_GAPS) -> dict:
+              paper_profiles: dict | None = None, max_gaps: int = MAX_GAPS,
+              feedback_items: list | None = None, feedback_text: str = "",
+              min_gaps_per_paper: int = 0) -> dict:
     """Returns {"gaps": [...ranked, each with scores/critique/rank], "rejected": [...], "diagnostics": {...}}.
     Raises nothing: failed agents are recorded in diagnostics and the rest carry on."""
     paper_profiles = paper_profiles or {}
@@ -345,7 +358,7 @@ def find_gaps(wiki: dict, graph: dict, context: dict, client, evidence_objects: 
         return {"gaps": [], "rejected": [], "diagnostics": diagnostics}
 
     client.set_stage("Stage 4c — Gap Critic")
-    reviews, critic_error = _critic(client, candidates)
+    reviews, critic_error = _critic(client, candidates, feedback_text)
     diagnostics["critic_error"] = critic_error
 
     by_cid = {c["_cid"]: c for c in candidates}
@@ -372,13 +385,39 @@ def find_gaps(wiki: dict, graph: dict, context: dict, client, evidence_objects: 
                     target["evidence"].append(line)
         else:
             live.append(c)
+    from pipeline.feedback_context import feedback_adjustment
+    adjusted = []
     for c in live:
-        c["composite_score"] = round(_score(reviews.get(c["_cid"]), c), 2)
+        base = round(_score(reviews.get(c["_cid"]), c), 2)
+        delta, note = feedback_adjustment(c["title"], feedback_items or [])
+        c["composite_score"] = round(base + delta, 2)
+        if note:
+            c["feedback_note"] = note
+            adjusted.append({"title": c["title"], "change": delta})
     live.sort(key=lambda g: -g["composite_score"])
     final, overflow = live[:max_gaps], live[max_gaps:]
+
+    # Coverage rule: a paper that supports no gap is reported, and with a minimum set the best
+    # gaps citing it are promoted from below the cut (the list may then exceed max_gaps).
+    promoted = []
+    if min_gaps_per_paper > 0:
+        for pid in evidence_objects:
+            while paper_support(final, {pid: 1}, titles)[pid] < min_gaps_per_paper:
+                pick = next((c for c in overflow if paper_support([c], {pid: 1}, titles)[pid]), None)
+                if pick is None:
+                    break
+                overflow.remove(pick)
+                final.append(pick)
+                promoted.append({"paper": pid, "title": pick["title"]})
+        final.sort(key=lambda g: -g["composite_score"])
     for c in overflow:
         c["rejected_reason"] = f"ranked below the top {max_gaps}"
         rejected.append(c)
+    support = paper_support(final, evidence_objects, titles)
+    diagnostics["paper_support"] = support
+    diagnostics["papers_without_gaps"] = [titles.get(pid, pid) for pid, n in support.items() if n == 0]
+    diagnostics["promoted_for_coverage"] = promoted
+    diagnostics["feedback_adjusted"] = adjusted
 
     for rank, g in enumerate(final, 1):
         g["rank"] = rank

@@ -239,7 +239,7 @@ class ScoutTests(_DB):
     def test_progress_is_reported_for_every_gap(self):
         seen = []
         self._run([gap(1), gap(2)], FakeClient(planner=plan(["a"], ["b"])), progress_callback=lambda d, n: seen.append((d, n)))
-        self.assertEqual(seen, [(0, 2), (1, 2)])
+        self.assertEqual(seen, [(0, 2), (1, 2), (2, 2)])      # starts at 0, ends at all done
 
     def test_gaps_keep_their_order(self):
         gaps = [gap(1), gap(2), gap(3)]

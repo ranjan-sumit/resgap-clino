@@ -19,7 +19,7 @@ GAP_VALIDATION_STAGE_VERSION = 3
 SEMANTIC_SCHOLAR_BASE = "https://api.semanticscholar.org/graph/v1/paper/search"
 ARXIV_BASE = "http://export.arxiv.org/api/query"
 
-FIELDS = "title,year,abstract,citationCount,authors"
+FIELDS = "title,year,abstract,citationCount,authors,url,externalIds"
 
 
 def _is_retryable_search_error(exc: BaseException) -> bool:
@@ -98,6 +98,8 @@ def _search_semantic_scholar_with_status(query: str, limit: int = 5, api_key: st
             "citations": p.get("citationCount", 0),
             "authors": [a.get("name", "") for a in (p.get("authors") or [])[:3]],
             "source": "Semantic Scholar",
+            "doi": (p.get("externalIds") or {}).get("DOI"),
+            "url": p.get("url"),
         })
     return results, True
 

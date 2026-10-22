@@ -232,7 +232,8 @@ def _gap_context_for(proposal: dict, gaps_by_id: dict) -> dict:
     }
 
 
-def review_proposals(proposals: list, gaps: list, client, domain_config: dict = None) -> tuple[list, dict]:
+def review_proposals(proposals: list, gaps: list, client, domain_config: dict = None,
+                     feedback_text: str = "") -> tuple[list, dict]:
     """Proposal Reviewer agent + one revision pass. Returns (proposals, diagnostics).
     Each kept proposal gets `review` = {scores, verdict, issues}; "reject" proposals are removed
     (listed in diagnostics), "revise" ones are rewritten once from the reviewer's required changes.
@@ -250,7 +251,9 @@ def review_proposals(proposals: list, gaps: list, client, domain_config: dict = 
 
     client.set_stage("Stage 6b — Proposal Review")
     try:
-        raw = unwrap(client.chat_json(_REVIEWER_PROMPT, "Proposals to review:\n" + json.dumps(brief, indent=1, ensure_ascii=False),
+        raw = unwrap(client.chat_json(_REVIEWER_PROMPT,
+                                      "Proposals to review:\n" + json.dumps(brief, indent=1, ensure_ascii=False)
+                                      + ("\n\n" + feedback_text if feedback_text else ""),
                                       max_tokens=PROPOSAL_REVIEWER.max_tokens, timeout_seconds=PROPOSAL_REVIEWER.timeout_seconds,
                                       max_retries=PROPOSAL_REVIEWER.max_retries))
     except LLMCallError as e:

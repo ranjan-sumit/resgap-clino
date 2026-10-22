@@ -20,6 +20,7 @@ The scout:
 import json
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 
 import requests
@@ -28,7 +29,9 @@ from pipeline import academic_search as acad
 from utils.azure_client import LLMCallError, unwrap
 from utils.database import compute_cache_key, get_cached_gap_validation, save_cached_gap_validation
 
-SCOUT_STAGE_VERSION = 4            # its own cache namespace: v3 entries include false "open" verdicts
+SCOUT_STAGE_VERSION = 5            # v5: entries carry cached_at (expire) and papers carry url/doi
+CACHE_TTL_SECONDS = 30 * 24 * 3600   # a literature verdict goes stale: new papers appear
+GAP_WORKERS = 4                    # gaps checked at the same time (Semantic Scholar still paced)
 EUROPE_PMC_BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 MAX_PAPERS_ASSESSED = 10
 QUERIES_PER_GAP = 3
@@ -84,19 +87,38 @@ def _search_europepmc(query: str, limit: int = 6) -> tuple[list, bool]:
             "citations": r.get("citedByCount"),
             "authors": [a.strip() for a in (r.get("authorString") or "").split(",")[:3] if a.strip()],
             "source": "Europe PMC",
+            "doi": r.get("doi"),
+            "url": (f"https://doi.org/{r['doi']}" if r.get("doi") else
+                    (f"https://europepmc.org/article/{r['source']}/{r['id']}" if r.get("source") and r.get("id") else None)),
         })
     return out, True
 
 
+def _norm_doi(doi) -> str:
+    return re.sub(r"^https?://(dx\.)?doi\.org/", "", str(doi or "").strip().lower())
+
+
 def _merge(papers: list) -> list:
-    """De-duplicate by normalised title, keeping the entry with the longest abstract."""
-    best = {}
+    """De-duplicate by DOI when there is one, else by normalised title; keep the entry with the
+    longest abstract and fill its url/doi from the duplicates."""
+    best, by_doi = {}, {}
     for p in papers:
-        key = re.sub(r"[^a-z0-9]+", "", (p.get("title") or "").lower())
+        title_key = re.sub(r"[^a-z0-9]+", "", (p.get("title") or "").lower())
+        doi = _norm_doi(p.get("doi"))
+        key = by_doi.get(doi) if doi and doi in by_doi else (title_key or None)
         if not key:
             continue
-        if key not in best or len(p.get("abstract") or "") > len(best[key].get("abstract") or ""):
-            best[key] = p
+        if doi:
+            by_doi.setdefault(doi, key)
+        if key not in best:
+            best[key] = dict(p)
+            continue
+        cur = best[key]
+        if len(p.get("abstract") or "") > len(cur.get("abstract") or ""):
+            cur = best[key] = {**p, **{k: cur[k] for k in ("doi", "url") if cur.get(k) and not p.get(k)}}
+        for k in ("doi", "url"):
+            if not cur.get(k) and p.get(k):
+                cur[k] = p[k]
     return list(best.values())
 
 
@@ -187,11 +209,50 @@ def _assess(gap: dict, papers: list, client) -> tuple[dict, bool]:
 
 # ── orchestration ───────────────────────────────────────────────────────────
 
+def _search_gap(queries: list, ss_api_key: str, use_arxiv: bool) -> tuple[list, dict]:
+    """All providers for one gap. Semantic Scholar queries run one after another (it is paced);
+    Europe PMC runs beside them, so neither waits for the other."""
+    flags = {"semantic_scholar": [], "europe_pmc": [], "arxiv": []}
+    found: list = []
+
+    def s2():
+        out = []
+        for q in queries:
+            papers, ok = _search_s2(q, ss_api_key)
+            out += papers
+            flags["semantic_scholar"].append(ok)
+        return out
+
+    def epmc():
+        out = []
+        for q in queries:
+            papers, ok = _search_europepmc(q)
+            out += papers
+            flags["europe_pmc"].append(ok)
+        return out
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(s2), pool.submit(epmc)]
+        for f in futures:
+            found += f.result()
+    if use_arxiv and queries:
+        papers, ok = acad._search_arxiv_with_status(queries[0], limit=3)
+        found += papers
+        flags["arxiv"].append(ok)
+    return found, {name: v for name, v in flags.items() if v}
+
+
+def _is_fresh(hit: dict, now: float) -> bool:
+    """A cached verdict counts only while it is younger than the TTL (entries without a date are stale)."""
+    saved = hit.get("cached_at")
+    return isinstance(saved, (int, float)) and now - saved < CACHE_TTL_SECONDS
+
+
 def scout_gaps(gaps: list, client, domain_config: dict = None, ss_api_key: str = "", use_arxiv: bool = False,
-               progress_callback=None) -> dict:
+               progress_callback=None, now=time.time) -> dict:
     """Validates `gaps` in place (validation_status, validation_reasoning, existing_papers,
     search_query_used, search_providers). Returns {"gaps": gaps, "diagnostics": {...}}."""
-    diag = {"planner_error": None, "unverified": 0, "cache_hits": 0, "searched": 0}
+    diag = {"planner_error": None, "unverified": 0, "cache_hits": 0, "cache_expired": 0, "searched": 0}
     cached_ids, to_search = set(), []
     keyed = {}
     for g in gaps:
@@ -203,7 +264,7 @@ def scout_gaps(gaps: list, client, domain_config: dict = None, ss_api_key: str =
                                                        SCOUT_STAGE_VERSION)
         keyed[id(g)] = (key, gap_hash, domain_hash)
         hit = get_cached_gap_validation(key)
-        if hit is not None:
+        if hit is not None and _is_fresh(hit, now()):
             g["validation_status"] = hit.get("validation_status", "open")
             g["validation_reasoning"] = hit.get("validation_reasoning", "")
             g["existing_papers"] = hit.get("existing_papers", [])
@@ -212,40 +273,23 @@ def scout_gaps(gaps: list, client, domain_config: dict = None, ss_api_key: str =
             cached_ids.add(id(g))
             diag["cache_hits"] += 1
         else:
+            if hit is not None:
+                diag["cache_expired"] += 1         # too old: search again
             to_search.append(g)
 
     queries_by_gap, planner_error = plan_queries(to_search, client) if to_search else ({}, None)
     diag["planner_error"] = planner_error
+    lock = threading.Lock()
 
-    for idx, g in enumerate(gaps):
-        if progress_callback:
-            try:
-                progress_callback(idx, len(gaps))
-            except Exception:
-                pass
-        if id(g) in cached_ids:
-            continue
+    def check(g: dict) -> None:
         queries = queries_by_gap.get(g.get("gap_id")) or _fallback_queries(g)
-        flags = {"semantic_scholar": [], "europe_pmc": [], "arxiv": []}
-        found = []
-        for q in queries:
-            papers, ok = _search_s2(q, ss_api_key)
-            found += papers
-            flags["semantic_scholar"].append(ok)
-            papers, ok = _search_europepmc(q)
-            found += papers
-            flags["europe_pmc"].append(ok)
-        if use_arxiv and queries:
-            papers, ok = acad._search_arxiv_with_status(queries[0], limit=3)
-            found += papers
-            flags["arxiv"].append(ok)
-            time.sleep(0.4)
-        flags = {name: v for name, v in flags.items() if v}
+        found, flags = _search_gap(queries, ss_api_key, use_arxiv)
         providers = {name: (all(v) if v else None) for name, v in flags.items()}
         any_ok = any(any(v) for v in flags.values())
         degraded = any(not all(v) for v in flags.values())
         merged = _merge(found)
-        diag["searched"] += 1
+        with lock:
+            diag["searched"] += 1
 
         g["search_query_used"] = " | ".join(queries)
         g["search_providers"] = providers
@@ -254,8 +298,9 @@ def scout_gaps(gaps: list, client, domain_config: dict = None, ss_api_key: str =
             g["validation_reasoning"] = ("The literature search was unavailable (all providers failed), "
                                          "so this gap could not be checked against published work.")
             g["existing_papers"] = []
-            diag["unverified"] += 1
-            continue
+            with lock:
+                diag["unverified"] += 1
+            return
 
         result, genuine = _assess(g, merged, client)
         shown = merged[:MAX_PAPERS_ASSESSED]
@@ -275,6 +320,23 @@ def scout_gaps(gaps: list, client, domain_config: dict = None, ss_api_key: str =
             save_cached_gap_validation(key[0], key[1], key[2], SCOUT_STAGE_VERSION, {
                 "validation_status": g["validation_status"], "validation_reasoning": g["validation_reasoning"],
                 "existing_papers": g["existing_papers"], "search_query_used": g["search_query_used"],
-                "search_providers": providers,
+                "search_providers": providers, "cached_at": now(),
             })
+
+    pending = [g for g in gaps if id(g) not in cached_ids]
+    done = len(gaps) - len(pending)
+    if progress_callback:
+        _safe_progress(progress_callback, done, len(gaps))
+    with ThreadPoolExecutor(max_workers=max(1, min(GAP_WORKERS, len(pending) or 1))) as pool:
+        for _ in pool.map(check, pending):
+            done += 1
+            if progress_callback:
+                _safe_progress(progress_callback, done, len(gaps))
     return {"gaps": gaps, "diagnostics": diag}
+
+
+def _safe_progress(cb, done: int, total: int) -> None:
+    try:
+        cb(done, total)
+    except Exception:
+        pass

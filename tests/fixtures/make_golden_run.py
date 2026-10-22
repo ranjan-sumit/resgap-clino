@@ -20,14 +20,29 @@ def golden_results() -> dict:
     papers = [{"title": t, "filename": f, "sections": {"Methods": "Synthetic text."}}
               for t, f in _PAPERS]
     gaps = [
-        {"id": "G1", "gap_id": "g1", "motivating_evidence_ids": ["e1", "e3"], "title": "No long-term follow-up", "description": "Follow-up under 6 months.",
-         "papers": [_PAPERS[0][0], _PAPERS[1][0]], "rank": 1, "status": "open",
-         "evidence": [{"paper": _PAPERS[0][0], "quote": "Follow-up was 3 months.", "page": 4}]},
-        {"id": "G2", "title": "Single-centre data", "description": "Only one site enrolled.",
-         "papers": [_PAPERS[1][0]], "rank": 2, "status": "open", "evidence": []},
+        {"id": "G1", "gap_id": "g1", "motivating_evidence_ids": ["e1", "e3"], "title": "No long-term follow-up",
+         "description": "Follow-up under 6 months.", "papers": [_PAPERS[0][0], _PAPERS[1][0]],
+         "supporting_papers": [_PAPERS[0][0], _PAPERS[1][0]], "rank": 1, "status": "open", "validation_status": "open",
+         "confidence": "high", "lens": "limitation_miner", "source": "agent:limitation_miner", "composite_score": 4.2,
+         "validation_reasoning": "No paper follows patients for two years.",
+         "existing_papers": [{"title": "A related long-term study", "year": 2020, "url": "https://doi.org/10.1/rel"},
+                             {"title": "A related paper without a link", "year": 2019}],
+         "evidence": ["Alpha trial (p.4): Follow-up was 3 months."],
+         "evidence_list": [{"paper": _PAPERS[0][0], "quote": "Follow-up was 3 months.", "page": 4}]},
+        {"id": "G2", "gap_id": "g2", "title": "Single-centre data", "description": "Only one site enrolled.",
+         "papers": [_PAPERS[1][0]], "supporting_papers": [_PAPERS[1][0]], "rank": 2, "status": "open",
+         "validation_status": "partial", "confidence": "medium", "lens": "methodology_auditor",
+         "source": "agent:methodology_auditor", "composite_score": 3.4, "evidence": [], "existing_papers": []},
     ]
-    proposals = [{"gap_id": "G1", "title": "Two-year extension cohort",
-                  "objective": "Measure durability.", "status": "reviewed"}]
+    proposals = [{"gap_id": "G1", "addresses_gap_id": "g1", "title": "Two-year extension cohort",
+                  "objective": "Measure durability.", "problem_statement": "Durability is unknown.",
+                  "methodology": "Follow the cohort for two years.", "novelty": "First long follow-up.",
+                  "confidence": "high", "effort_estimate": "medium", "risk": "attrition", "status": "reviewed",
+                  "suggested_experiments": ["Annual spirometry"], "builds_on": ["Alpha trial of drug X"],
+                  "review": {"verdict": "accept", "scores": {"specificity": 4, "novelty": 4, "feasibility": 3, "impact": 4}}},
+                 {"gap_id": "G2", "addresses_gap_id": "g2", "title": "Multi-centre replication",
+                  "problem_statement": "One site only.", "methodology": "Enrol three sites.", "novelty": "Replication.",
+                  "confidence": "medium", "effort_estimate": "long", "risk": "cost"}]
     return {
         "context": {"domain": "synthetic", "run_name": "golden"},
         "papers": papers,

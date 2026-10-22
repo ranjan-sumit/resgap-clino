@@ -3,9 +3,9 @@ Turns the feedback users give on a project's gaps and runs into text a prompt
 can carry -- the hook for giving that feedback to the Gap Challenger judge and
 to the agents (gap generator, evidence extractor) later.
 
-NOT wired into any prompt yet, on purpose: feedback is captured and stored now,
-and these functions are the stable, tested seam the judge/agents will call
-(`build_feedback_context(project_id, role="judge")`) when that work is done.
+Wired into the gap critic and the proposal reviewer (prompt text) and into gap ranking
+(`feedback_adjustment`: a gap like one the user marked not useful is ranked lower, one like a
+useful gap slightly higher). The pipeline records in its trace what feedback was applied.
 
 Feedback is keyed by the stable gap_id (packages/research_schemas/gap_identity),
 so a verdict on a gap in one run is still found when the same gap reappears in
@@ -114,3 +114,39 @@ def build_feedback_context(project_id: str, role: str = "all", *, max_items: int
         out.append(line)
         size += len(line) + 1
     return "\n".join(out) if len(out) > 1 else ""
+
+
+# ── effect on ranking ──────────────────────────────────────────────────────────────────────
+_SIMILAR = 0.6              # word-overlap (Jaccard) at which two gap titles are "the same kind of gap"
+PENALTY = -1.0
+BOOST = 0.5
+_MAX_PENALTY, _MAX_BOOST = -1.5, 1.0
+
+
+def _title_words(text: str) -> set:
+    import re
+    return {w for w in re.findall(r"[a-z0-9]+", (text or "").lower()) if len(w) > 3}
+
+
+def feedback_adjustment(gap_title: str, items: list[dict]) -> tuple[float, str]:
+    """(score change, note) for a gap, from earlier ratings of similar gaps in this project.
+    Negative ratings lower the score, positive ones raise it a little; the total is capped so
+    feedback steers the ranking without ever deciding it alone."""
+    words = _title_words(gap_title)
+    if not words:
+        return 0.0, ""
+    delta, notes = 0.0, []
+    for it in items:
+        if it.get("kind") != "gap" or it.get("rating") not in (1, -1):
+            continue
+        other = _title_words(it.get("title", ""))
+        if not other or len(words & other) / len(words | other) < _SIMILAR:
+            continue
+        if it["rating"] == -1:
+            delta += PENALTY
+            notes.append(f"similar to a gap you marked not useful ({it.get('reason') or 'no reason'})")
+        else:
+            delta += BOOST
+            notes.append("similar to a gap you marked useful")
+    delta = max(_MAX_PENALTY, min(_MAX_BOOST, delta))
+    return delta, "; ".join(dict.fromkeys(notes))

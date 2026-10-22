@@ -52,6 +52,7 @@ from pipeline.lineage import record_run_lineage
 from pipeline.page_index import build_tree, tree_to_summary
 from pipeline.paper_manager import assign_tiers, corpus_stats
 from pipeline.agent_config import agent_versions
+from pipeline.feedback_context import build_feedback_context, get_feedback_items
 from pipeline.run_quality import compute_run_quality
 from pipeline.pdf_parser import check_pdf_readable, parse_pdf
 from pipeline.proposal_generator import generate_proposals, review_proposals
@@ -111,6 +112,7 @@ class RunOptions:
     domain_config: dict | None = None
     git_commit: str | None = None
     token_cap: int | None = None          # stop the run when its estimated token use passes this
+    min_gaps_per_paper: int = 0           # 0 = off; else promote gaps so every paper supports at least this many
 
 
 @dataclass
@@ -597,7 +599,16 @@ def _run_full_pipeline(
         progress("Stage 4 — Finding research gaps (finder agents + critic)…", 50)
         client.set_stage("Stage 4 — Gap Detection")
         gap_detection_error = None
-        agent_out = find_gaps(wiki, graph, context, client, evidence_objects, paper_profiles)
+        # What this project's user said about earlier gaps steers the critic, the ranking and the reviewer.
+        try:
+            _fb_items = get_feedback_items(project_id, "all", max_items=30)
+            _fb_text = build_feedback_context(project_id, "agent")
+        except Exception as e:                      # feedback is a bonus: never stop a run for it
+            _fb_items, _fb_text = [], ""
+            warn(f"Earlier feedback could not be read ({e}).")
+        agent_out = find_gaps(wiki, graph, context, client, evidence_objects, paper_profiles,
+                              feedback_items=_fb_items, feedback_text=_fb_text,
+                              min_gaps_per_paper=options.min_gaps_per_paper)
         gaps = agent_out["gaps"]
         rejected_gaps = agent_out["rejected"]
         agent_diag = agent_out["diagnostics"]
@@ -607,6 +618,17 @@ def _run_full_pipeline(
                f"{len(rejected_gaps)} merged/dropped"
                + (f"; critic: {agent_diag['critic_error']}" if agent_diag.get("critic_error") else ""),
                "⚠️" if agent_diag.get("critic_error") else "✅")
+        if _fb_items:
+            _adj = agent_diag.get("feedback_adjusted", [])
+            _trace("  Feedback applied", f"{len(_fb_items)} earlier rating(s) in this project",
+                   f"{sum(1 for a in _adj if a['change'] < 0)} gap(s) ranked lower, "
+                   f"{sum(1 for a in _adj if a['change'] > 0)} higher; ratings also sent to the critic and reviewer")
+        for _t in agent_diag.get("papers_without_gaps", []):
+            warn(f"No gap rests on “{_t}”. The final list is built from the other papers.")
+            _trace("  Paper coverage", "gap support per paper", f"“{_t}” supports no gap", "⚠️")
+        for _pr in agent_diag.get("promoted_for_coverage", []):
+            _trace("  Paper coverage", f"minimum {options.min_gaps_per_paper} gap(s) per paper",
+                   f"promoted “{_pr['title'][:60]}” so {_pr['paper']} is represented")
         for fd in agent_diag.get("finders", []):
             if fd.get("error"):
                 _trace(f"  Gap finder: {fd['lens']}" + (f" ({fd['paper']})" if fd.get("paper") else ""),
@@ -712,7 +734,8 @@ def _run_full_pipeline(
             _trace("Stage 6 — Proposals", f"{len(validated_gaps)} gaps", f"{len(proposals)} drafted")
             progress("Stage 6b — Reviewing proposals…", 72)
             drafted = len(proposals)
-            reviewed, review_diag = review_proposals(proposals, validated_gaps, client, domain_config=domain_cfg)
+            reviewed, review_diag = review_proposals(proposals, validated_gaps, client, domain_config=domain_cfg,
+                                                   feedback_text=_fb_text)
             if reviewed:
                 proposals = reviewed
             else:

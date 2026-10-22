@@ -187,6 +187,8 @@ for _k, _v in _DEFAULTS.items():
 from ui.viewmodels import (keys_line, off_note, overview, run_header, saved_trace, trace_summary,
                            trace_rows, stage_status)
 from ui.compat import plotly_full_width, table_full_width
+from ui.gaps_view import (SORTS as GAP_SORTS, compare_proposals, filter_gaps, gap_rows, proposal_rows,
+                          sort_gaps)
 from ui.evidence_view import (citation, evidence_rows, filter_evidence, match_evidence, paper_titles,
                               quality_chips, study_type_label, top_gaps, top_proposal, warnings_summary)
 import hashlib
@@ -1136,6 +1138,11 @@ def _option_widgets(store: dict, prefix: str) -> None:
             help="A failed check blocks the run by default. Tick this to proceed anyway; the warning is still recorded.")
     else:
         store["override_quality_gate"] = False
+    store["min_gaps_per_paper"] = int(st.number_input(
+        "Each paper supports at least this many gaps (0 = off)", min_value=0, max_value=3,
+        value=store["min_gaps_per_paper"], key=f"{prefix}_mingaps",
+        help="After ranking, gaps are promoted from below the cut so no paper is left without one. "
+             "The list can then run slightly longer."))
     store["enable_gap_challenger"] = st.checkbox(
         "Deep gap validation", value=store["enable_gap_challenger"], key=f"{prefix}_challenger",
         help="Adds an extra literature search and a six-level status for each gap. Slower: roughly 30 seconds per gap.")
@@ -1540,6 +1547,7 @@ if _req:
     extract_refs, ref_limit = _o["extract_refs"], _o["ref_limit"]
     enable_quality_engine, override_quality_gate = _o["enable_quality_engine"], _o["override_quality_gate"]
     enable_gap_challenger, use_vision = _o["enable_gap_challenger"], _o["use_vision"]
+    min_gaps_per_paper = _o["min_gaps_per_paper"]
     _token_cap, _run_in_background = _req["cap"], _req["bg"]
     _model_issues_now = _model_issues()
 
@@ -1585,6 +1593,7 @@ if run_btn and _papers:
         domain_config=domain_cfg,
         git_commit=_GIT_COMMIT,
         token_cap=_token_cap,
+        min_gaps_per_paper=min_gaps_per_paper,
     )
 
     # In the background the run survives a refresh of this page; progress is polled from the database.
@@ -1786,6 +1795,222 @@ def _fact(text: str, evidence: list, color: str = "#0b1f3a") -> None:
                  f"{('“' + html.escape(hit['quote'][:160]) + '”') if hit['quote'] else 'evidence item'}</span>")
     st.markdown(f'<div class="wiki-item" style="color:{color};margin-bottom:0.3rem;">• {html.escape(str(text))}{extra}</div>',
                 unsafe_allow_html=True)
+
+
+# ── Gaps and Proposals screens ──────────────────────────────────────────────────────────────────
+_STATUS_BADGES = {
+    "open": ("Open", "#087f5b", "#e7f8f1", "#83d7b1"), "partial": ("Partial", "#b7791f", "#fff7e6", "#f0c36a"),
+    "solved": ("Solved", "#c81e1e", "#fff1f1", "#f0a0a0"), "pending": ("Pending", "#55708f", "#f2f5f8", "#c9dff5"),
+    "unverified": ("Not checked", "#8a5a00", "#fff4d6", "#e8c66a"),
+}
+_CHALLENGER_BADGES = {
+    "INSUFFICIENT_EVIDENCE": ("Insufficient evidence", "#55708f", "#f2f5f8", "#c9dff5"),
+    "OPEN": ("Challenger: open", "#087f5b", "#e7f8f1", "#83d7b1"),
+    "PARTIALLY_OPEN": ("Partially open", "#b7791f", "#fff7e6", "#f0c36a"),
+    "CONTESTED": ("Contested", "#a94ba0", "#f9edf8", "#dcaad9"),
+    "LIKELY_CLOSED": ("Likely closed", "#c8681e", "#fff1e6", "#f0b380"),
+    "CLOSED": ("Closed", "#c81e1e", "#fff1f1", "#f0a0a0"),
+}
+_STATUS_HELP = {
+    "open": "No published paper found that already does this.", "partial": "Related work exists, but not this exactly.",
+    "solved": "A published paper already does what this gap proposes.",
+    "pending": "Not yet checked against the literature.",
+    "unverified": "The literature search was unavailable, so this was not checked.",
+}
+
+
+def _go_evidence() -> None:
+    st.session_state["result_tab"] = "Evidence"
+    st.session_state["ev_cited"] = True
+
+
+def _go_gaps() -> None:
+    st.session_state["result_tab"] = "Gaps"
+
+
+def _render_gaps(res: dict) -> None:
+    rows = gap_rows(res)
+    st.markdown("### Research gaps")
+    if not rows:
+        st.info("This run has no gaps." if not res.get("gate_blocked") else "Gap analysis was skipped (quality gate).")
+    else:
+        counts = {s: sum(1 for r in rows if r["status"] == s) for s in ("open", "partial", "solved")}
+        st.caption(f"{len(rows)} gaps · {counts['open']} open · {counts['partial']} partial · {counts['solved']} solved. "
+                   "Status says whether published work already covers the gap.")
+        c1, c2, c3, c4 = st.columns([1.2, 1.4, 1.4, 1.6])
+        how = c1.selectbox("Sort by", list(GAP_SORTS), key="gap_sort")
+        statuses = c2.multiselect("Status", sorted({r["status"] for r in rows}), key="gap_status",
+                                  format_func=lambda s: _STATUS_BADGES.get(s, (s.title(),))[0])
+        finders = c3.multiselect("Found by", sorted({r["finder"] for r in rows}), key="gap_finders")
+        titles = paper_titles(res)
+        paper = c4.selectbox("Paper", ["All papers", *sorted(titles)], key="gap_paper",
+                             format_func=lambda p: p if p == "All papers" else titles[p][:40])
+        query = st.text_input("Search gaps", key="gap_query", placeholder="words in a title or description")
+        shown = sort_gaps(filter_gaps(rows, statuses=tuple(statuses), finders=tuple(finders),
+                                      paper=None if paper == "All papers" else paper, query=query), how)
+        st.caption(f"Showing {len(shown)} of {len(rows)}")
+
+        _fb_run = st.session_state.current_run_id
+        _fb_project = (get_run_row(_fb_run) or {}).get("project_id") if _fb_run else None
+        _fb_existing = ({f["target_id"]: f for f in list_feedback(run_id=_fb_run, target_type="gap")} if _fb_run else {})
+        for r in shown[:40]:
+            g = r["gap"]
+            label, color, bg, border = _STATUS_BADGES.get(r["status"], (r["status"].title() or "—", "#55708f", "#f2f5f8", "#c9dff5"))
+            chips = "".join(_badge(html.escape(str(p)[:28]), "#004b93", "#e5f2ff", "#7ab8f5") for p in r["papers"][:4])
+            score = f" · {r['score']}/5" if r["score"] is not None else ""
+            ch = _CHALLENGER_BADGES.get(g.get("challenger_status"))
+            st.markdown(
+                f'<div class="gap-card {r["status"]}"><div class="gap-title">'
+                f'{("#" + str(r["rank"]) + " ") if r["rank"] else ""}{html.escape(r["title"])}</div>'
+                f'<div class="gap-meta">{_badge(label, color, bg, border)}'
+                f'{_badge(html.escape(r["finder"]) + score, "#55708f", "#f2f5f8", "#c9dff5")}'
+                f'{_badge(*ch) if ch else ""}</div><div style="margin-top:0.3rem;">{chips}</div></div>',
+                unsafe_allow_html=True)
+            with st.expander("Details, evidence and sources"):
+                st.markdown(html.escape(str(g.get("description", ""))))
+                st.caption(_STATUS_HELP.get(r["status"], ""))
+                if g.get("validation_reasoning"):
+                    st.markdown(f"**Literature check:** {html.escape(str(g['validation_reasoning']))}")
+                if g.get("critique"):
+                    _sc = g.get("scores") or {}
+                    st.caption(f"Critic: {g['critique']} · novelty {_sc.get('novelty', '–')} · importance "
+                               f"{_sc.get('importance', '–')} · feasibility {_sc.get('feasibility', '–')} (1–5)")
+                if g.get("feedback_note"):
+                    st.caption(f"Ranking adjusted by your earlier feedback: {g['feedback_note']}.")
+                if g.get("confidence_caveat"):
+                    st.caption(f"⚠️ {g['confidence_caveat']}")
+                if g.get("evidence"):
+                    st.markdown("**Evidence from the papers**")
+                    for line in g["evidence"][:6]:
+                        st.markdown(f"- {html.escape(str(line))}")
+                if r["n_evidence"]:
+                    st.button(f"See the {r['n_evidence']} evidence items", key=f"gap_ev_{r['index']}", on_click=_go_evidence)
+                if r["links"]:
+                    st.markdown("**Closest published work**")
+                    for l in r["links"][:5]:
+                        year = f" ({l['year']})" if l["year"] else ""
+                        st.markdown(f"- [{l['title']}]({l['url']}){year}" if l["url"] else f"- {l['title']}{year} · no link")
+                if g.get("search_query_used"):
+                    st.caption("Searched: " + g["search_query_used"])
+                funnel = g.get("challenge_funnel")
+                if funnel:
+                    st.caption(f"Gap Challenger: coverage {funnel.get('search_coverage_score', 0):.2f} (threshold 0.60) · "
+                               f"{funnel.get('candidate_count', 0)} found → {funnel.get('relevant_count', 0)} relevant · "
+                               f"{funnel.get('contradiction_count', 0)} contradicting")
+                elif g.get("challenger_error"):
+                    st.caption(f"Gap Challenger failed for this gap: {g['challenger_error']}")
+            if _fb_project:
+                _gap_feedback(g, r["index"], _fb_run, _fb_project, _fb_existing)
+        if len(shown) > 40:
+            st.caption(f"Showing the first 40 of {len(shown)}; narrow the filters to see the rest.")
+
+    _rejected = res.get("rejected_gaps") or []
+    if _rejected:
+        with st.expander(f"Considered and set aside by the critic ({len(_rejected)})"):
+            st.caption("Candidates the finder agents proposed that the critic merged into another gap, judged generic "
+                       "or already answered, or ranked below the top list.")
+            for g in _rejected:
+                _item(f"{html.escape(g.get('title', 'Untitled'))} — {html.escape(str(g.get('rejected_reason', '')))}")
+    _supp = res.get("supplementary_gaps") or []
+    if _supp:
+        with st.expander(f"Supplementary signals — not validated ({len(_supp)})"):
+            st.caption("Rule-based checks and knowledge-graph hints. They are leads, not findings: they are not "
+                       "searched against the literature or used for proposals.")
+            for g in _supp:
+                _item(f"{html.escape(g.get('title', 'Untitled'))}: {html.escape(str(g.get('description', '')))}")
+
+
+def _render_proposals(res: dict, proposals: list) -> None:
+    rows = proposal_rows(res)
+    st.markdown("### Research proposals")
+    _open_gaps = [g for g in res.get("gaps", []) if g.get("validation_status") in ("open", "partial")]
+    if not proposals and _open_gaps:
+        # A run can finish with no proposals (the model's reply was unreadable);
+        # fill them in for this run instead of repeating the whole analysis.
+        st.warning(f"This run has no proposals, although it found {len(_open_gaps)} open or partial gaps.")
+        if st.button("Generate proposals now", key="gen_proposals_now", type="primary",
+                     help="Runs only the proposal step on this run's gaps (about 10–30 seconds)."):
+            try:
+                with st.spinner("Generating proposals…"):
+                    _pclient = ModelRouter(st.session_state["model_config"], _keys)
+                    _new = redo_proposal_step(res, res.get("context", {}), _pclient, domain_config=get_domain_config(
+                        res.get("context", {}).get("domain", "General AI/ML")))
+                if not _new:
+                    st.error("The model returned nothing usable. Try again, or choose another Analysis model.")
+                else:
+                    res["proposals"] = _new
+                    st.session_state.results = res
+                    _rid = st.session_state.current_run_id
+                    if _rid:
+                        update_run_proposals(_rid, _new)
+                        try:
+                            project_store.refresh_run_results(st.session_state.current_project_id, _rid, res,
+                                                              res.get("context", {}), st.session_state.comp_results)
+                        except Exception:
+                            pass
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Could not generate proposals: {e}")
+    if not rows:
+        return
+    st.caption(f"{len(rows)} proposals. Star the ones worth pursuing: starred and unstarred choices feed later runs.")
+    _fb_run = st.session_state.current_run_id
+    _fb_project = (get_run_row(_fb_run) or {}).get("project_id") if _fb_run else None
+    _stars = ({f["target_id"]: f for f in list_feedback(run_id=_fb_run, target_type="proposal")} if _fb_run else {})
+
+    def _toggle_star(key: str, label: str, on: bool) -> None:
+        if on:
+            upsert_feedback(_fb_project, _fb_run, "proposal", key)                  # clear
+        else:
+            upsert_feedback(_fb_project, _fb_run, "proposal", key, rating=1, reason="Useful and well supported",
+                            target_label=label)
+
+    for r in rows:
+        p = r["proposal"]
+        starred = (_stars.get(r["key"]) or {}).get("rating") == 1
+        verdict = f" · {r['verdict']}" if r["verdict"] else ""
+        head = f"{'★ ' if starred else ''}#{r['index'] + 1} {r['title']}{verdict}"
+        with st.expander(head):
+            effort = r["effort"]
+            ec = {"short": "#087f5b", "medium": "#b7791f", "long": "#c81e1e"}.get(
+                (effort.split()[0].lower() if effort else ""), "#55708f")
+            st.markdown(_badge((r["confidence"] or "–").title() + " confidence", "#004b93", "#e5f2ff", "#7ab8f5")
+                        + (_badge(html.escape(effort), ec, "#e7f8f1", ec) if effort else "")
+                        + (_badge("Risk: " + html.escape(str(r["risk"]))[:30], "#55708f", "#f2f5f8", "#c9dff5") if r["risk"] else ""),
+                        unsafe_allow_html=True)
+            if r["gap_title"]:
+                st.markdown(f"**Addresses gap #{r['gap_rank'] or '–'}:** {html.escape(r['gap_title'])}")
+                st.button("Show the gaps", key=f"prop_gap_{r['index']}", on_click=_go_gaps)
+            for label, key in (("Problem", "problem_statement"), ("Methodology", "methodology"),
+                               ("Novelty", "novelty"), ("Expected contribution", "expected_contribution")):
+                if p.get(key):
+                    st.markdown(f"**{label}**  \n{html.escape(str(p[key]))}")
+            _rv = p.get("review")
+            if _rv:
+                _rs = _rv.get("scores") or {}
+                st.caption(f"Reviewer: {'revised after review' if _rv.get('revised') else _rv.get('verdict', '')} · "
+                           f"specificity {_rs.get('specificity', '–')} · novelty {_rs.get('novelty', '–')} · "
+                           f"feasibility {_rs.get('feasibility', '–')} · impact {_rs.get('impact', '–')} (1–5)"
+                           + (f"  \nIssues raised: {'; '.join(_rv['issues'])}" if _rv.get("issues") else ""))
+            if p.get("suggested_experiments"):
+                st.markdown("**Suggested experiments**")
+                for exp in p["suggested_experiments"]:
+                    st.markdown(f"- {html.escape(str(exp))}")
+            if p.get("builds_on"):
+                st.markdown("**Builds on:** " + "; ".join(html.escape(str(b)) for b in p["builds_on"]))
+            if _fb_project:
+                st.button("Remove star" if starred else "★ Star this proposal", key=f"star_{r['index']}",
+                          on_click=_toggle_star, args=(r["key"], r["title"], starred))
+
+    if len(rows) >= 2:
+        st.markdown("#### Compare two proposals")
+        labels = {r["index"]: f"#{r['index'] + 1} {r['title'][:60]}" for r in rows}
+        picked = st.multiselect("Choose two", list(labels), key="prop_compare", format_func=labels.get, max_selections=2)
+        if len(picked) == 2:
+            import pandas as pd
+            a, b = rows[picked[0]], rows[picked[1]]
+            _table(pd.DataFrame([{"": c["field"], labels[picked[0]]: c["a"], labels[picked[1]]: c["b"]}
+                                 for c in compare_proposals(a, b)]), hide_index=True)
 
 
 # ── Results ────────────────────────────────────────────────────────────────────
@@ -2186,188 +2411,11 @@ if st.session_state.results:
 
     # ── Tab 4: Research Gaps ───────────────────────────────────────────────────
     if _tab == "Gaps":
-        st.markdown("### Identified Research Gaps")
-        open_n    = sum(1 for g in gaps if g.get("validation_status")=="open")
-        partial_n = sum(1 for g in gaps if g.get("validation_status")=="partial")
-        solved_n  = sum(1 for g in gaps if g.get("validation_status")=="solved")
-        f1,f2,f3 = st.columns(3)
-        for col,(lbl,cnt,color) in zip([f1,f2,f3],[
-            ("🟢 Open",open_n,"#087f5b"),
-            ("🟡 Partial",partial_n,"#b7791f"),
-            ("🔴 Solved",solved_n,"#c81e1e"),
-        ]):
-            with col:
-                st.markdown(f'<div class="stat-box"><span class="stat-number" '
-                            f'style="color:{color};font-size:1.5rem;">{cnt}</span>'
-                            f'<span class="stat-label">{lbl}</span></div>',
-                            unsafe_allow_html=True)
-        st.markdown("")
-
-        status_badge = {
-            "open":    _badge("Open","#087f5b","#e7f8f1","#83d7b1"),
-            "partial": _badge("Partial","#b7791f","#fff7e6","#f0c36a"),
-            "solved":  _badge("Solved","#c81e1e","#fff1f1","#f0a0a0"),
-            "pending": _badge("Pending","#55708f","#f2f5f8","#c9dff5"),
-            "unverified": _badge("Not checked — search unavailable","#8a5a00","#fff4d6","#e8c66a"),
-        }
-        # Clinova Phase 3, Epic 3.4 -- only present when the opt-in Gap
-        # Challenger toggle ran; additive to status_badge above, not a
-        # replacement (Stage 5's simple validation_status still renders too).
-        challenger_badge = {
-            "INSUFFICIENT_EVIDENCE": _badge("Insufficient Evidence","#55708f","#f2f5f8","#c9dff5"),
-            "OPEN":                  _badge("Challenger: Open","#087f5b","#e7f8f1","#83d7b1"),
-            "PARTIALLY_OPEN":        _badge("Partially Open","#b7791f","#fff7e6","#f0c36a"),
-            "CONTESTED":             _badge("Contested","#a94ba0","#f9edf8","#dcaad9"),
-            "LIKELY_CLOSED":         _badge("Likely Closed","#c8681e","#fff1e6","#f0b380"),
-            "CLOSED":                _badge("Closed","#c81e1e","#fff1f1","#f0a0a0"),
-        }
-        _gap_fb_run = st.session_state.current_run_id
-        _gap_fb_project = (get_run_row(_gap_fb_run) or {}).get("project_id") if _gap_fb_run else None
-        _gap_fb_existing = ({f["target_id"]: f for f in list_feedback(run_id=_gap_fb_run, target_type="gap")}
-                            if _gap_fb_run else {})
-        for gap_idx, gap in enumerate(gaps):
-            status = gap.get("validation_status","pending")
-            conf   = gap.get("confidence","medium")
-            source = gap.get("source", "semantic")
-            _lens = source.split(":", 1)[1] if source.startswith("agent:") else source
-            source_badge = _badge(_GAP_LENS_LABELS.get(_lens, _lens.replace("_", " ").title()),
-                                  "#55708f", "#f2f5f8", "#c9dff5")
-            rank_badge = (_badge(f"#{gap['rank']} · {gap['composite_score']}/5", "#0b1f3a", "#eaf1fb", "#9db8d6")
-                          if gap.get("rank") and gap.get("composite_score") is not None else "")
-            challenger_status = gap.get("challenger_status")
-            st.markdown(
-                f'<div class="gap-card {status}">'
-                f'<div class="gap-title">{gap.get("title","Untitled")}</div>'
-                f'<div class="gap-meta">{rank_badge} {status_badge.get(status,"")} '
-                f'{_badge(conf.title()+" Conf","#004b93","#e5f2ff","#7ab8f5")} '
-                f'{source_badge}'
-                f'{challenger_badge.get(challenger_status, "")}</div>'
-                f'<div class="gap-desc">{gap.get("description","")}</div></div>',
-                unsafe_allow_html=True)
-            if gap.get("critique"):
-                _sc = gap.get("scores") or {}
-                st.caption(f"Critic: {gap['critique']}  \n"
-                           f"novelty {_sc.get('novelty', '–')} · importance {_sc.get('importance', '–')} · "
-                           f"feasibility {_sc.get('feasibility', '–')} (1–5)")
-            if gap.get("confidence_caveat"):
-                st.caption(f"⚠️ {gap['confidence_caveat']}")
-            with st.expander("Evidence + validation"):
-                ec1,ec2 = st.columns(2)
-                with ec1:
-                    _section_label("Evidence from Papers")
-                    for ev in gap.get("evidence",[]): _item(f"📎 {ev}")
-                    if gap.get("search_query_used"):
-                        st.markdown("")
-                        _section_label("Search Query Used")
-                        st.code(gap["search_query_used"], language=None)
-                with ec2:
-                    for ep in gap.get("existing_papers",[])[:4]:
-                        _item(f"📄 {ep.get('title','N/A')} ({ep.get('year','')}) [{ep.get('source','')}]")
-
-                funnel = gap.get("challenge_funnel")
-                if funnel:
-                    st.markdown("")
-                    _section_label("Gap Challenger — Search Coverage Funnel")
-                    st.markdown(
-                        f"Coverage score: **{funnel.get('search_coverage_score', 0):.2f}** "
-                        f"(threshold 0.60) · candidates found: {funnel.get('candidate_count', 0)} → "
-                        f"deduped: {funnel.get('post_dedup_count', 0)} · "
-                        f"relevant: {funnel.get('relevant_count', 0)} · "
-                        f"contradicting: {funnel.get('contradiction_count', 0)} · "
-                        f"converging (high-conf, direct): {funnel.get('converging_count', 0)}"
-                    )
-                    providers = funnel.get("provider_success", {})
-                    if providers:
-                        st.markdown(
-                            "Providers: " + ", ".join(
-                                f"{'✅' if ok else '❌'} {name.replace('_', ' ')}"
-                                for name, ok in providers.items()
-                            )
-                        )
-                    for q in funnel.get("query_families", []):
-                        st.code(q, language=None)
-                elif gap.get("challenger_error"):
-                    st.caption(f"Gap Challenger failed for this gap: {gap['challenger_error']}")
-            if _gap_fb_project:
-                _gap_feedback(gap, gap_idx, _gap_fb_run, _gap_fb_project, _gap_fb_existing)
-
-        _rejected = res.get("rejected_gaps") or []
-        if _rejected:
-            with st.expander(f"Considered and set aside by the critic ({len(_rejected)})"):
-                st.caption("Candidates the finder agents proposed that the critic merged into another gap, "
-                           "judged generic or already answered, or ranked below the top list.")
-                for g in _rejected:
-                    _item(f"{g.get('title', 'Untitled')} — {g.get('rejected_reason', '')}")
-        _supp = res.get("supplementary_gaps") or []
-        if _supp:
-            with st.expander(f"Supplementary signals — not validated ({len(_supp)})"):
-                st.caption("Rule-based checks (only for papers whose study type they fit) and knowledge-graph hints. "
-                           "They are leads, not findings: they are not searched against the literature or used for proposals.")
-                for g in _supp:
-                    _item(f"{g.get('title', 'Untitled')}: {g.get('description', '')}")
+        _render_gaps(res)
 
     # ── Tab 5: Proposals ───────────────────────────────────────────────────────
     if _tab == "Proposals":
-        st.markdown("### Research Proposals")
-        _open_gaps = [g for g in res.get("gaps", []) if g.get("validation_status") in ("open", "partial")]
-        if not proposals and _open_gaps:
-            # A run can finish with no proposals (the model's reply was unreadable);
-            # fill them in for this run instead of repeating the whole analysis.
-            st.warning(f"This run has no proposals, although it found {len(_open_gaps)} open or partial gaps.")
-            if st.button("Generate proposals now", key="gen_proposals_now", type="primary",
-                         help="Runs only the proposal step on this run's gaps (about 10–30 seconds)."):
-                try:
-                    with st.spinner("Generating proposals…"):
-                        _pclient = ModelRouter(st.session_state["model_config"], _keys)
-                        _new = redo_proposal_step(res, context, _pclient, domain_config=domain_cfg)
-                    if not _new:
-                        st.error("The model returned nothing usable. Try again, or choose another Analysis model.")
-                    else:
-                        res["proposals"] = _new
-                        st.session_state.results = res
-                        _rid = st.session_state.current_run_id
-                        if _rid:
-                            update_run_proposals(_rid, _new)
-                            try:
-                                project_store.refresh_run_results(
-                                    st.session_state.current_project_id, _rid, res, context,
-                                    st.session_state.comp_results)
-                            except Exception:
-                                pass
-                        st.rerun()
-                except Exception as e:
-                    st.error(f"Could not generate proposals: {e}")
-        for i, proposal in enumerate(proposals, 1):
-            conf   = proposal.get("confidence","medium")
-            effort = proposal.get("effort_estimate","")
-            ec     = {"short":"#087f5b","medium":"#b7791f","long":"#c81e1e"}.get(
-                (effort.split()[0].lower() if effort else ""), "#55708f")
-            st.markdown(
-                f'<div class="proposal-card">'
-                f'<div class="proposal-title">#{i}  {proposal.get("title","Untitled")}</div>'
-                f'<div>{_badge(conf.title()+" Conf","#004b93","#e5f2ff","#7ab8f5")}'
-                f'{_badge(effort,ec,"#e7f8f1",ec)}</div>'
-                f'<div class="proposal-section">Problem Statement</div>'
-                f'<div class="proposal-body">{proposal.get("problem_statement","")}</div>'
-                f'<div class="proposal-section">Proposed Methodology</div>'
-                f'<div class="proposal-body">{proposal.get("methodology","")}</div>'
-                f'<div class="proposal-section">Novelty</div>'
-                f'<div class="proposal-body">{proposal.get("novelty","")}</div></div>',
-                unsafe_allow_html=True)
-            _rv = proposal.get("review")
-            if _rv:
-                _rs = _rv.get("scores") or {}
-                st.caption(
-                    f"Reviewer: {'revised after review' if _rv.get('revised') else _rv.get('verdict', '')} · "
-                    f"specificity {_rs.get('specificity', '–')} · novelty {_rs.get('novelty', '–')} · "
-                    f"feasibility {_rs.get('feasibility', '–')} · impact {_rs.get('impact', '–')} (1–5)"
-                    + (f"  \nIssues raised: {'; '.join(_rv['issues'])}" if _rv.get("issues") else ""))
-            with st.expander("Experiments + datasets"):
-                e1,e2 = st.columns(2)
-                with e1:
-                    for exp in proposal.get("suggested_experiments",[]): _item(f"🧪 {exp}")
-                with e2:
-                    for src in proposal.get("builds_on",[]): _item(f"📎 {src}")
+        _render_proposals(res, proposals)
 
     # ── Tab 6: Computational Lab ───────────────────────────────────────────────
     if _tab == "Lab":

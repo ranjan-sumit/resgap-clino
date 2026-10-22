@@ -16,6 +16,7 @@ DEFAULT_OPTIONS = {
     "enable_quality_engine": False,
     "override_quality_gate": False,
     "enable_gap_challenger": False,
+    "min_gaps_per_paper": 0,
     "use_vision": False,
 }
 

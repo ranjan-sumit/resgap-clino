@@ -58,7 +58,7 @@ class FakeClient:
             self.calls.append("critic")
             if "critic" in self.fail:
                 return Failure(ErrorInfo(kind="timeout", detail="x"))
-            cands = json.loads(user.split("Candidate gaps:\n", 1)[1])
+            cands, _ = json.JSONDecoder().raw_decode(user.split("Candidate gaps:\n", 1)[1])   # feedback text may follow
             return Success(json.dumps({"reviews": self.critic(cands) if callable(self.critic) else self.critic or []}))
         for lens in ("Limitation Miner", "Cross-Paper Synthesizer", "Methodology Auditor"):
             if lens in system:
