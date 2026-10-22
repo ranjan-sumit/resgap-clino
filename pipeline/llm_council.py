@@ -1,85 +1,12 @@
 """
-LLM Council — Redesigned for Novel Finding generation.
-Council question changed from "interpret simulation" to
-"what NEW thing have we discovered that no paper said?"
+LLM Council: what NEW thing have we discovered that no paper said?
 
-Council composition (NVIDIA NIM):
-  Agent 1 — Dr. Statistician       → openai/gpt-oss-20b
-  Agent 2 — Dr. Epidemiologist     → moonshotai/kimi-k3
-  Agent 3 — Dr. Analyst/Critic     → nvidia/nemotron-3-nano-omni-30b-a3b-reasoning
-  Chair   — Consensus Synthesiser  → moonshotai/kimi-k3 (master)
-
-B28/B29 fixes (2026-09-08), both found live, not assumed:
-- Chair was openai/gpt-oss-120b -- NVIDIA end-of-life since 2026-09-03
-  (live HTTP 410 Gone). Tried deepseek-ai/deepseek-v4-flash-0731 next; a
-  live test call to it timed out (see utils/azure_client.py's MASTER_MODEL
-  comment for the full story: this NVIDIA account is only entitled to a
-  small fixed model allowlist, confirmed by live-testing 8 other
-  candidates that all returned 404). Settled on moonshotai/kimi-k3 --
-  live-tested HTTP 200, fast, and this account is confirmed entitled to
-  it. Not yet independently re-verified in this Council-chair role
-  specifically (its `has_reasoning: True`/streamed reasoning_content
-  behavior here is inherited, not reconfirmed for this model) -- flagged,
-  not hidden.
-- Agent 2 was meta/llama-3.2-3b-instruct -- separately discovered dead
-  (NVIDIA end-of-life since 2026-08-26, live HTTP 410) while live-testing
-  candidates for the Chair fix above. This was broken independently of
-  anything above; not previously noticed since nothing in this session had
-  exercised the Council feature. Swapped to kimi-k3 for the same
-  confirmed-entitled reason as the Chair; kept Agent 2's original low
-  temperature (0.2) since that's a real tuned epidemiologist-role
-  parameter, not tied to model identity.
+Three seats and a chair each answer on the model the user chose for that role (see utils/model_router.py,
+whose CouncilBackend this module calls). The seat keys below ("gpt_20b", "llama_3b", "nemotron", "gpt_120b")
+are historical names that the router maps to roles; they do not name a provider or model.
 """
 import json
 import re
-from openai import OpenAI
-
-NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
-
-COUNCIL_MODELS = {
-    "gpt_20b": {
-        "model": "openai/gpt-oss-20b",
-        "temperature": 1.0, "top_p": 1.0, "max_tokens": 4096,
-        "extra_body": None, "has_reasoning": True,
-    },
-    "llama_3b": {
-        # B29 fix (2026-09-08): meta/llama-3.2-3b-instruct is NVIDIA
-        # end-of-life since 2026-08-26 (live HTTP 410) -- dict key kept as
-        # "llama_3b" since MODEL_SELECTION_AGENTS references it by key.
-        # top_p raised 0.7 -> 0.95 (kimi-k3 requirement, see module
-        # docstring); temperature/max_tokens/has_reasoning are the real
-        # tuned epidemiologist-role values, left unchanged.
-        "model": "moonshotai/kimi-k3",
-        "temperature": 0.2, "top_p": 0.95, "max_tokens": 1024,
-        "extra_body": None, "has_reasoning": False,
-    },
-    "nemotron": {
-        "model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
-        "temperature": 0.6, "top_p": 0.95, "max_tokens": 8192,
-        "extra_body": {
-            "chat_template_kwargs": {"enable_thinking": True},
-            "reasoning_budget": 4096,
-        },
-        "has_reasoning": True,
-    },
-    "gpt_120b": {
-        # B28 fix (2026-09-08): openai/gpt-oss-120b is NVIDIA end-of-life
-        # (410 Gone since 2026-09-03).
-        # B29 fix (2026-09-08): tried deepseek-v4-flash-0731 next, but a
-        # live test call to it timed out (see utils/azure_client.py's
-        # MASTER_MODEL comment for the full account-entitlement story) --
-        # swapped to moonshotai/kimi-k3 instead, live-tested HTTP 200 and
-        # fast. kimi-k3 needs top_p=0.95, not the standard 1.0 (rejects it
-        # with a 400) -- unlike utils/azure_client.py's shared client, this
-        # file's _call_model() already reads top_p per-model from this
-        # dict, so no separate override mechanism is needed here.
-        # Dict key kept as "gpt_120b" since MODEL_SELECTION_AGENTS/the chair
-        # call site below reference it by key, not by model string.
-        "model": "moonshotai/kimi-k3",
-        "temperature": 1.0, "top_p": 0.95, "max_tokens": 4096,
-        "extra_body": None, "has_reasoning": True,
-    },
-}
 
 MODEL_SELECTION_AGENTS = [
     {
@@ -200,34 +127,6 @@ Return ONLY JSON:
 }"""
 
 
-def _call_model(api_key: str, model_key: str, system: str, user: str) -> str:
-    cfg    = COUNCIL_MODELS[model_key]
-    client = OpenAI(base_url=NVIDIA_BASE_URL, api_key=api_key)
-    kwargs = dict(
-        model=cfg["model"],
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        temperature=cfg["temperature"],
-        top_p=cfg["top_p"],
-        max_tokens=cfg["max_tokens"],
-        stream=True,
-    )
-    if cfg.get("extra_body"):
-        kwargs["extra_body"] = cfg["extra_body"]
-
-    parts = []
-    try:
-        stream = client.chat.completions.create(**kwargs)
-        for chunk in stream:
-            if not getattr(chunk, "choices", None):
-                continue
-            content = getattr(chunk.choices[0].delta, "content", None)
-            if content:
-                parts.append(content)
-    except Exception as e:
-        return {"_failed": True, "error": str(e), "model": cfg["model"]}
-    return "".join(parts).strip()
-
-
 def _robust_parse(raw: str, expected: type = dict):
     # The trailing-comma repair is deliberately LAST: applied to strict JSON
     # it can corrupt string values containing ",}" into wrong-but-parseable
@@ -260,33 +159,13 @@ def _robust_parse(raw: str, expected: type = dict):
     return {} if expected == dict else []
 
 
-class _LegacyBackend:
-    """The original behaviour: every council seat is an NVIDIA model from
-    COUNCIL_MODELS, called with one NVIDIA key. Used when no model router is
-    supplied (existing callers and tests)."""
-
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-
-    def label(self, model_key: str) -> str:
-        return COUNCIL_MODELS[model_key]["model"]
-
-    def call(self, model_key: str, system: str, user: str):
-        return _call_model(self.api_key, model_key, system, user)
-
-
 def _backend_for(client) -> object:
     """The council backend for a client: a ModelRouter supplies one (each seat and
-    the chair on whichever provider/model the user chose); a plain client falls
-    back to the original NVIDIA-only table."""
-    if hasattr(client, "council_backend"):
-        return client.council_backend()
-    return _LegacyBackend(getattr(client, "api_key", ""))
+    the chair on whichever provider/model the user chose)."""
+    return client.council_backend()
 
 
-def run_council(agents: list, context: str, final_prompt: str,
-                api_key: str = "", master_key: str = "gpt_120b", backend=None) -> dict:
-    backend = backend or _LegacyBackend(api_key)
+def run_council(agents: list, context: str, final_prompt: str, backend, master_key: str = "gpt_120b") -> dict:
     agent_responses = []
     failures = []
     transcript_lines = []

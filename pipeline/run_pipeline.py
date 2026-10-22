@@ -41,7 +41,6 @@ from pipeline.evidence_reader import study_type_of
 from pipeline.extraction_reconciler import reconcile_paper
 from pipeline.gap_challenger import GAP_CHALLENGER_STAGE_VERSION, run_challenge
 from pipeline.gap_agents import find_gaps
-from pipeline.gap_detector import GapDetectionError, detect_gaps
 from pipeline.graph_builder import build_knowledge_graph
 from pipeline.graph_persistence import (
     GRAPH_PERSISTENCE_VERSION, connect_ok as graph_store_connect_ok, save_graph_snapshot,
@@ -55,6 +54,7 @@ from pipeline.agent_config import agent_versions
 from pipeline.feedback_context import build_feedback_context, get_feedback_items
 from pipeline.run_quality import compute_run_quality
 from pipeline.variance import calibration_report, compare_with_previous, self_preference_note
+from pipeline import pdf_limits
 from pipeline.pdf_parser import check_pdf_readable, parse_pdf
 from pipeline.proposal_generator import generate_proposals, review_proposals
 from pipeline.reference_extractor import (
@@ -370,11 +370,18 @@ def _run_full_pipeline(
                     continue
                 if options.use_vision:
                     client.set_stage("Stage 1 — Figure analysis")
-                paper = parse_pdf(tmp_path, filename,
-                                  client=client if options.use_vision else None,
-                                  use_vision=options.use_vision,
-                                  on_progress=lambda msg, _f=filename: progress(
-                                      f"Stage 1 — Analysing figures in {_f} ({msg})…", 8))
+                try:
+                    paper = pdf_limits.run_limited(
+                        parse_pdf, tmp_path, filename,
+                        client=client if options.use_vision else None,
+                        use_vision=options.use_vision,
+                        isolate=False if options.use_vision else None,    # a model client cannot cross processes
+                        on_progress=lambda msg, _f=filename: progress(
+                            f"Stage 1 — Analysing figures in {_f} ({msg})…", 8))
+                except pdf_limits.ParseTimeout as e:
+                    unreadable.append((filename, f"reading it {e}"))
+                    warn(f"'{filename}' was skipped: reading it {e}.")
+                    continue
                 paper["tier"] = 1
                 all_papers.append(paper)
                 all_trees.append(build_tree(paper))
@@ -655,17 +662,8 @@ def _run_full_pipeline(
                 _trace(f"  Gap finder: {fd['lens']}" + (f" ({fd['paper']})" if fd.get("paper") else ""),
                        "evidence brief", fd["error"], "⚠️")
         if not gaps:
-            # Agents produced nothing usable (all calls failed or nothing grounded): fall back to
-            # the single-call detector so a run is not left without gaps by one bad round of calls.
-            client.set_stage("Stage 4 — Gap Detection")
-            try:
-                gaps = detect_gaps(wiki, graph, context, client, domain_config=domain_cfg,
-                                   evidence_objects=evidence_objects)
-                gap_detection_error = "gap agents returned nothing; used the single-call detector"
-            except GapDetectionError as e:
-                gap_detection_error = str(e)
-                warn(f"Gap detection failed ({e}).")
-                gaps = []
+            gap_detection_error = "gap agents returned nothing usable (all calls failed or nothing was grounded)"
+            warn(f"Gap detection failed ({gap_detection_error}).")
         # Supplementary candidates, kept OUT of the main gap list: rule-based checks only for
         # papers whose study type they fit (a review or a lab study has no calibration curve),
         # and graph-structure hints, de-duplicated. They are shown separately and are not
@@ -678,7 +676,7 @@ def _run_full_pipeline(
         for g in supplementary_gaps:
             g["supplementary"] = True
         if not gaps:
-            # Last resort: neither the agents nor the single-call detector produced a gap, so
+            # Last resort: the agents produced no gap, so
             # promote the rule-based and graph-structure leads (ungated) rather than end the run
             # with nothing. They are marked as degraded so nobody mistakes them for findings.
             lead_gaps = _dedupe_supplementary(

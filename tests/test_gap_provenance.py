@@ -1,7 +1,7 @@
 """
 Tests for Clinova Phase 4, Epic 4.4's Scientific Lineage plumbing across
-all three gap-producing sources (deterministic pattern library, graph-
-structural signals, semantic/LLM detection): every gap gets a real
+the rule-based gap sources (deterministic pattern library, graph-
+structural signals): every gap gets a real
 gap_id, and motivating_evidence_ids/motivating_relationship_ids/
 motivating_entity_ids + evidence_basis correctly reflect whether the gap
 has real, traceable evidence or fires on an absence of it.
@@ -16,7 +16,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.azure_client import Success
 from pipeline.deterministic_gap_patterns import detect_deterministic_gaps
 from pipeline.graph_structural_gaps import detect_graph_structural_gaps
-from pipeline.gap_detector import detect_gaps
 
 
 def _ev(evidence_type, text, paper_id="P1", confidence="medium", evidence_id=None):
@@ -116,59 +115,6 @@ class GraphStructuralGapsProvenanceTests(unittest.TestCase):
         if gap:  # connection_count guard requires each entity connected elsewhere
             self.assertEqual(gap["evidence_basis"], "absence_of_evidence")
             self.assertEqual(gap["motivating_evidence_ids"], [])
-
-
-def _wiki_with_source_files():
-    return {
-        "pages": [{"title": "Paper One", "source_file": "paper1.pdf", "contributions": [], "methods": [],
-                    "limitations": [], "future_work": [], "evaluated_on": [], "comparison_gap": ""}],
-        "cross_links": {},
-    }
-
-
-class SemanticGapProvenanceTests(unittest.TestCase):
-    def test_semantic_gap_always_positive_evidence_even_when_unlinked(self):
-        raw = (
-            '[{"title": "Gap", "description": "desc", "gap_type": "methodology", '
-            '"confidence": "high", "evidence": ["Paper One (Section: Limitations): unrelated cooking text"], '
-            '"supporting_papers": [], "missing_connection": "", "why_important": ""}]'
-        )
-        client = MagicMock()
-        client.chat_json.return_value = Success(raw)
-        evidence_objects = {"paper1.pdf": [{"evidence_id": "ev1", "text": "a completely different sentence about brains"}]}
-        gaps = detect_gaps(_wiki_with_source_files(), {"communities": []}, {}, client,
-                            evidence_objects=evidence_objects)
-        gap = gaps[0]
-        self.assertEqual(gap["evidence_basis"], "positive_evidence")
-        # LLM claimed evidence that didn't resolve to anything real -- an
-        # honest, meaningful "unlinked" signal, not hidden.
-        self.assertEqual(gap["motivating_evidence_ids"], [])
-        self.assertTrue(gap["gap_id"])
-
-    def test_semantic_gap_links_real_evidence_when_it_resolves(self):
-        raw = (
-            '[{"title": "Gap", "description": "desc", "gap_type": "methodology", '
-            '"confidence": "high", "evidence": ["Paper One (Section: Limitations): small sample size limits generalizability"], '
-            '"supporting_papers": [], "missing_connection": "", "why_important": ""}]'
-        )
-        client = MagicMock()
-        client.chat_json.return_value = Success(raw)
-        evidence_objects = {"paper1.pdf": [{"evidence_id": "ev1", "text": "small sample size limits generalizability of these findings"}]}
-        gaps = detect_gaps(_wiki_with_source_files(), {"communities": []}, {}, client,
-                            evidence_objects=evidence_objects)
-        self.assertIn("ev1", gaps[0]["motivating_evidence_ids"])
-
-    def test_without_evidence_objects_no_linking_attempted(self):
-        raw = (
-            '[{"title": "Gap", "description": "desc", "gap_type": "methodology", '
-            '"confidence": "high", "evidence": [], "supporting_papers": [], '
-            '"missing_connection": "", "why_important": ""}]'
-        )
-        client = MagicMock()
-        client.chat_json.return_value = Success(raw)
-        gaps = detect_gaps(_wiki_with_source_files(), {"communities": []}, {}, client)
-        self.assertTrue(gaps[0]["gap_id"])
-        self.assertEqual(gaps[0]["motivating_evidence_ids"], [])
 
 
 if __name__ == "__main__":

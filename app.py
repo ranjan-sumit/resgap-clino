@@ -102,11 +102,12 @@ from utils.database import (
 from utils import project_store, run_jobs
 from utils.run_jobs import start_job
 from pipeline.feedback_context import POSITIVE_REASONS, NEGATIVE_REASONS
+from pipeline import pdf_limits
 from pipeline.pdf_parser import parse_pdf
+from utils.backup import backup_bytes
 from pipeline.page_index import build_tree, tree_to_summary
 from pipeline.wiki_compiler import build_wiki
 from pipeline.graph_builder import build_knowledge_graph
-from pipeline.gap_detector import detect_gaps
 from pipeline.deterministic_gap_patterns import detect_deterministic_gaps
 from pipeline.graph_structural_gaps import detect_graph_structural_gaps
 from pipeline.graph_quality import score_graph_quality, apply_graph_quality_to_gaps
@@ -120,7 +121,6 @@ from pipeline.graph_persistence import (
     list_graph_snapshots, diff_graph_snapshots, GRAPH_PERSISTENCE_VERSION,
 )
 from pipeline.relevance_ranking import EMBEDDING_MODEL, RERANK_MODEL
-from pipeline.academic_search import validate_gaps
 from pipeline.coverage import paper_coverage
 from pipeline.run_lab import run_computational_lab
 from pipeline.param_extractor import (
@@ -206,7 +206,7 @@ from utils.run_management import (best_to_keep, delete_project as delete_project
 from utils.cost_guard import DEFAULT_CAP_TOKENS, describe_estimate, estimate_cost, estimate_run
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=64, ttl=3600)     # capped: one small number per file, but never unbounded
 def _pdf_text_chars(_sha: str, data: bytes) -> int:
     """Characters of text in a PDF (cached per file), for the pre-run estimate."""
     try:
@@ -227,12 +227,20 @@ from ui.components import (collapse_sidebar_on_phones, empty_state, error_state,
                            section_label as _section_label, item as _item, skeleton as _skeleton)
 
 
+def _free_report_bytes(keep_run_id: str | None = None) -> None:
+    """Drop a generated report (HTML and PDF bytes, often megabytes) unless it belongs to the run now on screen."""
+    bundle = st.session_state.get("report_bundle")
+    if bundle and bundle.get("run_id") != keep_run_id:
+        st.session_state.report_bundle = None
+
+
 def _load_run_into_session(run_id: str, run_name: str) -> bool:
     """Make a saved run the one on screen. Returns False if it has no results
     (nothing is changed in that case)."""
     loaded = load_run(run_id, sections=False)      # section text is only needed by the Lab; added then
     if not loaded.get("results"):
         return False
+    _free_report_bytes(keep_run_id=run_id)
     st.session_state.results      = loaded["results"]
     st.session_state.comp_results = loaded.get("comp_results")
     st.session_state.ref_papers   = loaded["results"].get("ref_papers", [])
@@ -246,6 +254,7 @@ def _load_run_into_session(run_id: str, run_name: str) -> bool:
 
 def _clear_results() -> None:
     """Nothing on screen (e.g. after switching to a project with no runs)."""
+    _free_report_bytes()
     st.session_state.results = None
     st.session_state.comp_results = None
     st.session_state.ref_papers = []
@@ -1265,7 +1274,8 @@ def _fmt_bytes(n: int) -> str:
 def _render_settings() -> None:
     st.button("← Back", key="settings_back", on_click=_go, args=("main",))
     st.markdown("## Settings")
-    t_keys, t_models, t_defaults, t_cache = st.tabs(["API keys", "Models", "Analysis defaults", "Saved results"])
+    t_keys, t_models, t_defaults, t_cache, t_backup = st.tabs(
+        ["API keys", "Models", "Analysis defaults", "Saved results", "Backup"])
 
     with t_keys:
         st.caption("Keys stay in this browser session's memory and are never written to disk. A key set in the "
@@ -1313,6 +1323,32 @@ def _render_settings() -> None:
         if not hide_paths():
             st.caption(f"Database: {db_path_for_display()}")
 
+    with t_backup:
+        st.caption("A backup is one file with every run, paper and report. Keep it somewhere other than this "
+                   "computer or server. To restore, stop the app and run `python scripts/backup.py restore <file>`.")
+        if st.button("Create backup", key="make_backup"):
+            try:
+                st.session_state["_backup"] = backup_bytes()
+            except Exception as e:
+                show_error("The backup could not be created", exc=e)
+        _bk = st.session_state.get("_backup")
+        if _bk:
+            st.download_button(f"Download {_bk[0]} ({_fmt_bytes(len(_bk[1]))})", _bk[1], file_name=_bk[0],
+                               mime="application/zip", key="download_backup",
+                               on_click=lambda: st.session_state.pop("_backup", None))
+
+
+def _within_size_limit(files: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]:
+    """Keep the files under the size limit; say plainly which ones were refused and why."""
+    kept = []
+    for name, data in files:
+        problem = pdf_limits.size_problem(len(data))
+        if problem:
+            show_warning(f"'{name}' was not added: it is {problem}.")
+        else:
+            kept.append((name, data))
+    return kept
+
 
 def _render_new_project() -> None:
     st.button("← Back", key="newproject_back", on_click=_go, args=("main",))
@@ -1337,7 +1373,8 @@ def _render_new_project() -> None:
             return
         _ids = []
         if _files:
-            _ids = project_store.save_papers(_project["id"], [(f.name, f.getvalue()) for f in _files])
+            _ids = project_store.save_papers(
+                _project["id"], _within_size_limit([(f.name, f.getvalue()) for f in _files]))
         if _rec and _available:
             _apply_preset("recommended")
         _clear_results()
@@ -1400,12 +1437,15 @@ def _render_new_analysis() -> None:
     papers_ok = 2 <= len(papers) <= 5
 
     if step == 1:
-        st.caption("Add 2–5 PDFs (up to 200 MB each). Gap detection compares papers against each other.")
+        st.caption(f"Add 2–5 PDFs (up to {pdf_limits.max_pdf_bytes() // 1024 // 1024} MB and "
+                   f"{pdf_limits.max_pdf_pages()} pages each). Gap detection compares papers against each other.")
         up = st.file_uploader("Research papers (PDF)", type=["pdf"], accept_multiple_files=True,
                               key=f"wiz_up_{w['up_n']}", label_visibility="collapsed")
         known = {hashlib.sha256(d).hexdigest() for _, d in w["uploads"]}
         for f in up or []:
             data = f.getvalue()
+            if not _within_size_limit([(f.name, data)]):
+                continue
             if hashlib.sha256(data).hexdigest() not in known:
                 w["uploads"].append((f.name, data))
                 known.add(hashlib.sha256(data).hexdigest())
@@ -2936,11 +2976,14 @@ if st.session_state.results:
         st.markdown("---")
         st.markdown("#### Active prompts")
         from pipeline.wiki_compiler import WIKI_SYSTEM_PROMPT
-        from pipeline.gap_detector import GAP_DETECTION_PROMPT
+        from pipeline.gap_agents import _CRITIC_PROMPT, _FINDER_PROMPTS
         with st.expander("Wiki compiler prompt"):
             st.code(WIKI_SYSTEM_PROMPT, language=None)
-        with st.expander("Gap detection prompt"):
-            st.code(GAP_DETECTION_PROMPT, language=None)
+        for _lens, _prompt in _FINDER_PROMPTS.items():
+            with st.expander(f"Gap finder prompt: {_lens}"):
+                st.code(_prompt, language=None)
+        with st.expander("Gap critic prompt"):
+            st.code(_CRITIC_PROMPT, language=None)
 
     # ── Tab 8: Export ──────────────────────────────────────────────────────────
     if _tab == "Export":

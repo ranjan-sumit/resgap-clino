@@ -14,3 +14,5 @@ toolbarMode = "minimal"
 
 [server]
 headless = true
+# Matches the per-file limit in pipeline/pdf_limits.py (RESGAP_MAX_PDF_MB); a bigger upload is refused by the browser.
+maxUploadSize = 50

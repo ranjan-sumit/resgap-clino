@@ -5,21 +5,17 @@ before finally falling back to an empty result -- retrying only genuinely
 transient conditions (network errors, 429, 5xx), never a permanent 4xx
 client error. Semantic Scholar calls carry an optional x-api-key header.
 """
-import shutil
 import sys
-import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import utils.database as db
 from pipeline import academic_search
-from pipeline.academic_search import _search_semantic_scholar, _search_arxiv, validate_gaps
-from tests.pg_test_utils import new_test_schema, drop_test_schema
+from pipeline.academic_search import _search_semantic_scholar, _search_arxiv
 
 
 class _FakeResponse:
@@ -110,28 +106,6 @@ class ArxivResilienceTests(unittest.TestCase):
             results = _search_arxiv("query", limit=3)
         self.assertEqual(results, [])
         self.assertEqual(mock_get.call_count, 1)
-
-
-class ValidateGapsApiKeyThreadingTests(unittest.TestCase):
-    def setUp(self):
-        self.schema = new_test_schema()
-        self.patcher = patch.object(db, "_SCHEMA", self.schema)
-        self.patcher.start()
-        db.init_db()
-
-    def tearDown(self):
-        self.patcher.stop()
-        drop_test_schema(self.schema)
-
-    def test_ss_api_key_is_passed_through_to_search(self):
-        client = MagicMock()
-        with patch("pipeline.academic_search._search_semantic_scholar_with_status", return_value=([], True)) as mock_ss, \
-             patch("pipeline.academic_search._search_arxiv_with_status", return_value=([], True)), \
-             patch("pipeline.academic_search.time.sleep"):
-            gap = {"title": "A Gap Title", "description": "A description."}
-            validate_gaps([gap], client, domain_config=None, ss_api_key="my-ss-key")
-        mock_ss.assert_called_once()
-        self.assertEqual(mock_ss.call_args.kwargs.get("api_key"), "my-ss-key")
 
 
 if __name__ == "__main__":

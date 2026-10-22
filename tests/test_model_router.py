@@ -250,12 +250,6 @@ class CouncilTests(unittest.TestCase):
         self.assertNotIn("kimi", out["transcript"])
         self.assertTrue(all(a["response"] for a in out["agents"]))
 
-    def test_run_council_without_a_backend_still_uses_the_legacy_table(self):
-        with patch("pipeline.llm_council._call_model", return_value="legacy reply") as call:
-            out = run_council(MODEL_SELECTION_AGENTS, "ctx", "final", api_key="k")
-        self.assertTrue(call.called)
-        self.assertEqual(out["agents"][0]["model"], "openai/gpt-oss-20b")
-
 
 class ReasoningEffortTests(unittest.TestCase):
     """Gemini's thinking models need a low reasoning effort or their strict-JSON

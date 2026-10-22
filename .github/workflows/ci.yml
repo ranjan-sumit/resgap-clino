@@ -64,6 +64,8 @@ jobs:
           python-version: "3.11"
       - run: pip install -r requirements-dev.txt && playwright install --with-deps chromium
       - run: python -m pytest tests/ui -q -m e2e -o addopts=""
+      - name: Memory and load budgets
+        run: python -m pytest tests -q -m slow -o addopts=""
       - uses: actions/upload-artifact@v4
         if: always()
         with:

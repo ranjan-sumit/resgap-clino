@@ -3,8 +3,10 @@ Stage 1: Multimodal PDF Parser
 Extracts text by section, tables, and optionally figures via GPT-4o Vision.
 """
 import io
+import os
 import re
 import pdfplumber
+from pipeline import pdf_limits
 from utils.azure_client import unwrap
 
 # PyMuPDF — needed for page-to-image conversion (vision analysis).
@@ -261,16 +263,25 @@ def check_pdf_readable(pdf_path: str) -> str | None:
     """Returns None when the PDF has a usable text layer, otherwise a short
     reason it cannot be analysed (so the wiki model is never given nothing)."""
     try:
+        too_big = pdf_limits.size_problem(os.path.getsize(pdf_path))
+        if too_big:
+            return too_big
         if FITZ_AVAILABLE:
             doc = fitz.open(pdf_path)
             try:
                 if doc.needs_pass or doc.is_encrypted:
                     return "password-protected (encrypted)"
+                too_long = pdf_limits.page_problem(len(doc))      # before any page is read
+                if too_long:
+                    return too_long
                 chars = sum(len(page.get_text().strip()) for page in doc)
             finally:
                 doc.close()
         else:
             with pdfplumber.open(pdf_path) as pdf:
+                too_long = pdf_limits.page_problem(len(pdf.pages))
+                if too_long:
+                    return too_long
                 chars = sum(len((p.extract_text() or "").strip()) for p in pdf.pages)
     except Exception as e:
         msg = str(e).lower()

@@ -11,7 +11,6 @@ import json
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -39,6 +38,19 @@ class RobustParseTests(unittest.TestCase):
         self.assertEqual(result, {"a": 1})
 
 
+class _FakeBackend:
+    """A council backend whose replies come from a function (model_key, system, user)."""
+
+    def __init__(self, reply):
+        self._reply = reply
+
+    def label(self, model_key):
+        return f"fake-{model_key}"
+
+    def call(self, model_key, system, user):
+        return self._reply("key", model_key, system, user)
+
+
 def _fake_call_factory(calls):
     def _fake(api_key, model_key, system, user):
         calls.append({"model_key": model_key, "system": system, "user": user})
@@ -57,10 +69,8 @@ def _fake_call_factory(calls):
 class FailedAgentTests(unittest.TestCase):
     def test_failed_agent_contributes_no_opinion_text_to_chair(self):
         calls = []
-        with patch("pipeline.llm_council._call_model", side_effect=_fake_call_factory(calls)):
-            result = run_council(
-                MODEL_SELECTION_AGENTS, "ctx", MODEL_COUNCIL_FINAL_PROMPT, "key"
-            )
+        result = run_council(
+            MODEL_SELECTION_AGENTS, "ctx", MODEL_COUNCIL_FINAL_PROMPT, _FakeBackend(_fake_call_factory(calls)))
 
         # The failed agent is flagged, with no opinion text.
         failed = [a for a in result["agents"] if a.get("failed")]
@@ -85,10 +95,8 @@ class FailedAgentTests(unittest.TestCase):
 
     def test_transcript_marks_failure_without_error_text_as_opinion(self):
         calls = []
-        with patch("pipeline.llm_council._call_model", side_effect=_fake_call_factory(calls)):
-            result = run_council(
-                MODEL_SELECTION_AGENTS, "ctx", MODEL_COUNCIL_FINAL_PROMPT, "key"
-            )
+        result = run_council(
+            MODEL_SELECTION_AGENTS, "ctx", MODEL_COUNCIL_FINAL_PROMPT, _FakeBackend(_fake_call_factory(calls)))
         self.assertIn("CALL FAILED", result["transcript"])
         self.assertNotIn(_AGENT_ERROR, result["transcript"])
 

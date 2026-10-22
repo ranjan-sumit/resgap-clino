@@ -13,7 +13,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.azure_client import Success, Failure, ErrorInfo, LLMCallError
 from pipeline.paper_manager import compile_tier2_batch
-from pipeline.gap_detector import detect_gaps
 
 
 class Group_A_BatchResilienceTests(unittest.TestCase):
@@ -39,20 +38,6 @@ class Group_A_BatchResilienceTests(unittest.TestCase):
         self.assertEqual(wikis[1]["tier"], 3)               # degraded stub, not a crash
         self.assertEqual(wikis[1]["confidence"], "title_only")
         self.assertEqual(wikis[2]["contributions"], ["z"])  # third ref unaffected by second's failure
-
-
-class Group_C_PropagationTests(unittest.TestCase):
-    def test_detect_gaps_lets_llm_call_error_propagate(self):
-        client = MagicMock()
-        client.chat_json.return_value = Failure(ErrorInfo(kind="api_error", detail="connection refused"))
-
-        with self.assertRaises(LLMCallError):
-            detect_gaps(
-                wiki={"pages": [], "cross_links": {}},
-                graph={"communities": [], "orphan_concepts": [], "missing_bridges": []},
-                context={"domain": "Test", "interest": "General"},
-                client=client,
-            )
 
 
 if __name__ == "__main__":
