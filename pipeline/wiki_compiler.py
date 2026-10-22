@@ -212,7 +212,15 @@ def build_wiki(papers: list, trees: list, client, domain_config: dict = None) ->
             lambda pt: compile_wiki_page(pt[0], pt[1], client, domain_config=domain_config),
             zip(papers, trees)))
 
-    cross_links = compile_cross_links(pages, client)
+    # Cross-links are a bonus on top of the per-paper pages: if that one call
+    # fails the run carries on with no links and says so.
+    warnings: list[str] = []
+    try:
+        cross_links = compile_cross_links(pages, client)
+    except Exception as e:
+        cross_links = {}
+        warnings.append(f"Cross-paper links were skipped because the model call failed "
+                        f"({type(e).__name__}: {e}).")
 
     # Build the index (table of contents)
     index = {
@@ -243,4 +251,5 @@ def build_wiki(papers: list, trees: list, client, domain_config: dict = None) ->
         "pages": pages,
         "cross_links": cross_links,
         "index": index,
+        "warnings": warnings,
     }

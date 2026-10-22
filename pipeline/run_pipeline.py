@@ -159,6 +159,43 @@ MIN_PAPERS = 2
 MAX_PAPERS = 5
 
 
+def prepare_papers(papers: list[tuple[str, bytes]]) -> tuple[list[tuple[str, bytes]], list[str]]:
+    """Makes the paper set explicit: identical files collapse to one, papers
+    beyond MAX_PAPERS are named in a notice instead of vanishing, and two
+    different papers sharing a filename get distinct names (the filename is the
+    key for evidence and profiles downstream). Returns (papers, notices)."""
+    import hashlib
+    notices: list[str] = []
+    seen: dict[str, str] = {}
+    unique: list[tuple[str, bytes]] = []
+    for filename, content in papers:
+        sha = hashlib.sha256(content).hexdigest()
+        if sha in seen:
+            notices.append(f"'{filename}' is identical to '{seen[sha]}' and was analysed once.")
+            continue
+        seen[sha] = filename
+        unique.append((filename, content))
+
+    if len(unique) > MAX_PAPERS:
+        dropped = [f for f, _ in unique[MAX_PAPERS:]]
+        notices.append(f"Only the first {MAX_PAPERS} papers are analysed. Not analysed: "
+                       + ", ".join(f"'{f}'" for f in dropped) + ".")
+        unique = unique[:MAX_PAPERS]
+
+    names = [f for f, _ in unique]
+    result = []
+    for filename, content in unique:
+        if names.count(filename) > 1:
+            stem, dot, ext = filename.rpartition(".")
+            tag = hashlib.sha256(content).hexdigest()[:6]
+            new = f"{stem or filename} [{tag}]{dot}{ext}" if dot else f"{filename} [{tag}]"
+            notices.append(f"Two different papers were both named '{filename}'; "
+                           f"this one is shown as '{new}'.")
+            filename = new
+        result.append((filename, content))
+    return result, notices
+
+
 def run_full_pipeline(
     papers: list[tuple[str, bytes]],
     context: dict,
@@ -181,7 +218,13 @@ def run_full_pipeline(
             f"Upload at least {MIN_PAPERS} papers (got {len(papers)}) -- gap detection "
             "compares papers against each other, so a single paper has nothing to compare to."
         )
-    papers = papers[:MAX_PAPERS]
+    papers, _paper_notices = prepare_papers(papers)
+    for _n in _paper_notices:
+        warn(_n)
+    if len(papers) < MIN_PAPERS:
+        raise PipelineInputError(
+            f"Only {len(papers)} distinct paper after removing duplicates; upload at least "
+            f"{MIN_PAPERS} different papers.")
     project_id = options.project_id or DEFAULT_PROJECT_ID
 
     # Keep the uploaded papers in the project folder before anything else runs,
@@ -295,6 +338,9 @@ def run_full_pipeline(
           f"{len(all_papers)} papers",
           f"{len(wiki.get('pages', []))} pages, "
           f"{len(wiki.get('cross_links', {}).get('shared_concepts', []))} links")
+    for _w in wiki.get("warnings", []):
+        _trace("  Wiki cross-links", "all pages", _w, "⚠️")
+        warn(_w)
     for pg in wiki.get("pages", []):
         if not (pg.get("key_findings") or pg.get("contributions") or pg.get("methods")):
             _trace(f"  Wiki page for {pg.get('source_file', '?')}", "paper text",
