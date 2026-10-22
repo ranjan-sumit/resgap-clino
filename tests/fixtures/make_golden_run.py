@@ -36,14 +36,18 @@ def golden_results() -> dict:
         "paper_profiles": {f: {"study_type": "rct"} for _, f in _PAPERS},
         "evidence_objects": {f: [] for _, f in _PAPERS},
         "supplementary_gaps": [],
-        "trace": [{"stage": "evidence", "status": "ok"}],
+        "pipeline_trace": [
+            {"stage": "Stage 1 — PDF Parse", "inputs": "3 PDFs", "outputs": "9,000 chars extracted", "status": "✅"},
+            {"stage": "Stage 2 — LLM Wiki", "inputs": "3 papers", "outputs": "3 pages", "status": "⚠️"},
+        ],
+        "models": {"roles": {"extraction": {"provider": "gemini", "model": "gemini-3.5-flash-lite"}}},
     }
 
 
 def legacy_results() -> dict:
     """Old schema: only context/papers/gaps/proposals."""
     r = copy.deepcopy(golden_results())
-    for k in ("paper_profiles", "supplementary_gaps", "trace"):
+    for k in ("paper_profiles", "supplementary_gaps", "pipeline_trace", "models"):
         r.pop(k)
     return r
 

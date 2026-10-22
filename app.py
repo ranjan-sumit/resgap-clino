@@ -95,7 +95,7 @@ from utils.export import (
 )
 from utils.database import (
     init_db, save_run, list_runs, load_run, delete_run, get_run_row,
-    record_artifact, record_run_manifest,
+    record_artifact, record_run_manifest, get_run_manifest,
     DEFAULT_PROJECT_ID, list_projects, get_project, list_feedback, upsert_feedback,
     list_project_files, attach_comp_results, update_run_proposals,
 )
@@ -183,7 +183,9 @@ for _k, _v in _DEFAULTS.items():
         st.session_state[_k] = _v
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-from ui.viewmodels import overview, run_header, trace_rows
+from ui.viewmodels import (keys_line, off_note, overview, run_header, saved_trace, trace_summary,
+                           trace_rows, stage_status)
+from ui.compat import plotly_full_width, table_full_width
 from ui.components import (badge as _badge, tier_badge as _tier_badge, card as _card,
                            section_label as _section_label, item as _item, skeleton as _skeleton)
 
@@ -554,8 +556,7 @@ with st.sidebar:
         if "model_config" not in st.session_state:
             st.session_state["model_config"] = load_config(_available)
         _found = [_provider_name(p) for p in (*PROVIDER_REGISTRY, CUSTOM_PROVIDER) if p in _available]
-        st.caption("Keys found: " + " · ".join(_found) if _found else
-                   "No API keys found. Add one above, or set it in the environment.")
+        st.caption(keys_line(_found, bool(ss_api_key)))
 
     # ── Research setup (used on every run -> always visible) ─────────────────
     with setup_c:
@@ -753,7 +754,7 @@ _MARK = ('<svg viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.
          '<circle cx="11" cy="17.5" r="2.2" fill="#ffffff"/></svg>')
 _hero_points = [
     ("Evidence-linked", "Every gap is traced to evidence in your papers."),
-    ("Literature-validated", "Checked against Semantic Scholar and arXiv."),
+    ("Literature-validated", "Checked against Europe PMC, Semantic Scholar and arXiv."),
     ("Auditable runs", "Model, parser and code versions recorded."),
 ]
 _hero_steps = ["Parse", "Evidence", "Knowledge graph", "Gap detection", "Validation", "Proposals"]
@@ -762,26 +763,29 @@ _points_html = "".join(
 _flow_html = "".join(
     f'<div class="flow-step"><div class="flow-dot">{i}</div><div class="flow-label">{s}</div></div>'
     for i, s in enumerate(_hero_steps, 1))
-st.markdown(
-    '<div class="hero">'
-    '<div class="hero-brand">'
-    f'<div class="hero-mark">{_MARK}</div>'
-    f'<div class="hero-name">{html.escape(_BRANDING["product_name"])}</div>'
-    '<div class="hero-divider"></div>'
-    f'<div class="hero-platform">{html.escape(_BRANDING["tagline"])}</div>'
-    '</div>'
-    '<div class="hero-grid">'
-    '<div>'
-    '<div class="hero-h1">Identify and validate the research gaps across your literature.</div>'
-    '<div class="hero-desc">Upload 2&ndash;5 papers. AI agents read them, map what is already known, '
-    'and surface the open questions &mdash; with the evidence behind each one.</div>'
-    '</div>'
-    f'<div class="hero-points">{_points_html}</div>'
-    '</div>'
-    '<div class="hero-flow-title">Analysis pipeline</div>'
-    f'<div class="hero-flow">{_flow_html}</div>'
-    '</div>',
-    unsafe_allow_html=True)
+# The hero is for first-time visitors: once the project has a run, results come first.
+_show_hero = not (st.session_state.results or list_runs(limit=1, project_id=st.session_state.current_project_id))
+if _show_hero:
+    st.markdown(
+        '<div class="hero">'
+        '<div class="hero-brand">'
+        f'<div class="hero-mark">{_MARK}</div>'
+        f'<div class="hero-name">{html.escape(_BRANDING["product_name"])}</div>'
+        '<div class="hero-divider"></div>'
+        f'<div class="hero-platform">{html.escape(_BRANDING["tagline"])}</div>'
+        '</div>'
+        '<div class="hero-grid">'
+        '<div>'
+        '<div class="hero-h1">Identify and validate the research gaps across your literature.</div>'
+        '<div class="hero-desc">Upload 2&ndash;5 papers. AI agents read them, map what is already known, '
+        'and surface the open questions &mdash; with the evidence behind each one.</div>'
+        '</div>'
+        f'<div class="hero-points">{_points_html}</div>'
+        '</div>'
+        '<div class="hero-flow-title">Analysis pipeline</div>'
+        f'<div class="hero-flow">{_flow_html}</div>'
+        '</div>',
+        unsafe_allow_html=True)
 
 # ── Project: tools shared by the Project view ───────────────────────────────
 # The run-comparison tools used to live in the sidebar. They are in the Project
@@ -996,13 +1000,8 @@ def _render_run_files(project_id: str, run: dict) -> None:
 
 
 def _table(df, **kwargs):
-    """st.dataframe at full width on any Streamlit version: newer releases want
-    width="stretch" (use_container_width is being retired), older ones only know
-    use_container_width."""
-    try:
-        return st.dataframe(df, width="stretch", **kwargs)
-    except (TypeError, st.errors.StreamlitAPIException):
-        return st.dataframe(df, use_container_width=True, **kwargs)
+    """st.dataframe at full width on any Streamlit version (see ui/compat.py)."""
+    return table_full_width(df, **kwargs)
 
 
 def _render_project_view(project: dict, runs: list[dict]) -> None:
@@ -1194,27 +1193,32 @@ if _view == "Project":
     _render_project_view(_cur_project, _proj_runs)
     st.stop()
 
-# Show loaded run banner
-if st.session_state.loaded_run_id:
+# Run header: the run on screen, whether loaded or just finished
+if st.session_state.current_run_id and st.session_state.results:
     runs_meta = {r["id"]: r for r in list_runs()}
-    run_meta  = runs_meta.get(st.session_state.loaded_run_id, {})
-    _hdr = run_header(run_meta, st.session_state.current_run_name)
+    run_meta  = runs_meta.get(st.session_state.current_run_id, {})
+    _hdr = run_header(run_meta, st.session_state.current_run_name, st.session_state.results,
+                      get_run_manifest(st.session_state.current_run_id))
     _rm_name, _rm_when, _rm_stats = _hdr["name"], _hdr["when"], _hdr["stats"]
+    _chips = "".join(
+        f'<span style="font-size:0.72rem;color:#004b93;background:#e5f2ff;border:1px solid #7ab8f5;'
+        f'border-radius:10px;padding:0.1rem 0.5rem;">{c}</span>' for c in _hdr["chips"])
     st.markdown(
         '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:0.4rem 1rem;'
         'background:#edf6ff;border:1px solid #c9dff5;border-left:3px solid #0066cc;'
         'border-radius:8px;padding:0.65rem 1.1rem;margin-bottom:0.9rem;'
         'font-family:Inter,Segoe UI,system-ui,sans-serif;">'
         '<span style="font-size:0.72rem;font-weight:600;letter-spacing:0.08em;'
-        'text-transform:uppercase;color:#004b93;">Showing saved run</span>'
+        'text-transform:uppercase;color:#004b93;">Run</span>'
         f'<span style="font-size:0.9rem;font-weight:600;color:#0b1f3a;">{_rm_name}</span>'
         f'<span style="font-size:0.82rem;color:#55708f;">{_rm_when}{_rm_stats}</span>'
-        '<span style="font-size:0.82rem;color:#55708f;margin-left:auto;">'
-        'Add papers below to start a new analysis.</span>'
+        f'<span style="display:flex;gap:0.4rem;margin-left:auto;">{_chips}</span>'
         '</div>',
         unsafe_allow_html=True)
 
-with st.container(border=True):
+# With a run on screen the form folds away so the results are the first thing seen.
+_has_run_on_screen = bool(st.session_state.results)
+with st.expander("New analysis", expanded=not _has_run_on_screen):
     st.markdown('<div class="section-label">New analysis</div>'
                 '<div class="section-hint">Add 2&ndash;5 PDFs (up to 200 MB each). '
                 'Gap detection compares papers against each other, so at least two are needed.</div>',
@@ -1421,24 +1425,22 @@ if st.session_state.results:
     if c_stats:
         # No reference diagnostics means the reference stage never ran (it is
         # off by default); "Off" is honest where "0" reads like a failure.
-        refs_ran = bool(res.get("ref_diagnostics"))
-        off = "Off"
-        t1,t2,t3,t4 = st.columns(4)
-        for col,(val,lbl,color) in zip([t1,t2,t3,t4],[
-            (c_stats.get("tier1",0), "Uploaded PDFs", "#0066cc"),
-            (c_stats.get("tier2",0) if refs_ran else off, "Cited (w/ abstract)", "#087f5b"),
-            (c_stats.get("tier3",0) if refs_ran else off, "Distant refs", "#55708f"),
-            (ref_sum.get("total",0) if refs_ran else off, "Total corpus", "#b7791f"),
-        ]):
-            with col:
-                muted = "#8a99ad" if val == off else color
-                st.markdown(f'<div class="stat-box"><span class="stat-number" '
-                            f'style="color:{muted};">{val}</span>'
-                            f'<span class="stat-label">{lbl}</span></div>',
-                            unsafe_allow_html=True)
-        if not refs_ran:
-            st.caption("Reference fetching was off for this run. Turn on “Include cited references” "
-                       "in the sidebar under Analysis to build a wider corpus.")
+        _note = off_note(res)
+        if _note is None:
+            t1,t2,t3,t4 = st.columns(4)
+            for col,(val,lbl,color) in zip([t1,t2,t3,t4],[
+                (c_stats.get("tier1",0), "Uploaded PDFs", "#0066cc"),
+                (c_stats.get("tier2",0), "Cited (w/ abstract)", "#087f5b"),
+                (c_stats.get("tier3",0), "Distant refs", "#55708f"),
+                (ref_sum.get("total",0), "Total corpus", "#b7791f"),
+            ]):
+                with col:
+                    st.markdown(f'<div class="stat-box"><span class="stat-number" '
+                                f'style="color:{color};">{val}</span>'
+                                f'<span class="stat-label">{lbl}</span></div>',
+                                unsafe_allow_html=True)
+        else:
+            st.caption(_note)
         st.markdown("")
 
     # Summary row
@@ -1654,7 +1656,7 @@ if st.session_state.results:
                         "Cited In": r.get("found_in_paper", ""),
                         "DOI": r.get("doi", ""),
                     })
-                st.dataframe(pd.DataFrame(rows), use_container_width=True, height=520)
+                table_full_width(pd.DataFrame(rows), height=520)
             elif ref_view == "Grouped by source paper":
                 grouped_refs = {}
                 for r in filtered:
@@ -1776,7 +1778,7 @@ if st.session_state.results:
                     height=620, margin=dict(l=10, r=10, t=40, b=10),
                     legend=dict(orientation="h", y=-0.02, x=0),
                     title="Knowledge Graph — Entity Network")
-                st.plotly_chart(fig, use_container_width=True)
+                plotly_full_width(fig)
                 st.caption("Hover a line to see how two entities are related, and the supporting text.")
             except ImportError:
                 st.info("pip install plotly for network diagram")
@@ -1795,11 +1797,11 @@ if st.session_state.results:
         if entities:
             with st.expander(f"📋 All {len(entities)} entities"):
                 import pandas as pd
-                st.dataframe(pd.DataFrame([{
+                table_full_width(pd.DataFrame([{
                     "Name":e.get("name",""),"Type":e.get("type",""),
                     "Importance":e.get("importance",""),
                     "Papers":", ".join(e.get("papers",[]))[:60],
-                } for e in entities]), use_container_width=True, height=260)
+                } for e in entities]), height=260)
 
         orphans = graph.get("orphan_concepts",[])
         if orphans:
@@ -2321,9 +2323,20 @@ if st.session_state.results:
     # ── Tab 7: Pipeline Trace ──────────────────────────────────────────────────
     with tab7:
         st.markdown("### 🔎 Pipeline Trace — Explainability View")
-        trace = st.session_state.pipeline_trace
+        trace = saved_trace(res, st.session_state.pipeline_trace)
+        _ts = trace_summary(res, get_run_manifest(st.session_state.current_run_id)
+                            if st.session_state.current_run_id else None)
+        if _ts.get("models"):
+            st.markdown("**Models used:** " + " · ".join(f"{html.escape(str(r))}: {html.escape(str(m))}"
+                                                         for r, m in _ts["models"].items()))
+        if _ts.get("fallback_count"):
+            st.warning(f"{_ts['fallback_count']} call(s) used the fallback model: " + "; ".join(_ts["fallbacks"][:5]))
+        if _ts.get("tokens_total"):
+            st.caption(f"Tokens used: {_ts['tokens_total']:,} in total · "
+                       + " · ".join(f"{k}: {v:,}" for k, v in _ts["tokens_by_stage"].items()))
         if not trace:
-            st.info("Run the main analysis to see the pipeline trace here.")
+            st.info("This run has no stage trace stored (it was saved before traces were kept). "
+                    "Run a new analysis to get one.")
         else:
             for entry in trace_rows(trace):
                 i = entry["n"]

@@ -26,7 +26,7 @@ def test_run_header_formats_time_and_escapes_the_name():
 
 
 def test_run_header_falls_back_when_the_run_is_unknown():
-    assert vm.run_header(None, "My run") == {"name": "My run", "when": "", "stats": ""}
+    assert vm.run_header(None, "My run") == {"name": "My run", "when": "", "stats": "", "chips": []}
     assert vm.run_header({}, "")["name"] == "Saved run"
 
 

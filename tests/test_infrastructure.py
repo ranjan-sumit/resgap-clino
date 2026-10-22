@@ -9,12 +9,12 @@ from utils.azure_client import Failure, Success
 def test_golden_fixture_has_three_papers_and_current_keys():
     r = golden_results()
     assert len(r["papers"]) == 3
-    assert {"paper_profiles", "trace", "supplementary_gaps"} <= set(r)
+    assert {"paper_profiles", "pipeline_trace", "supplementary_gaps"} <= set(r)
 
 
 def test_legacy_fixture_lacks_new_keys():
     r = legacy_results()
-    assert not {"paper_profiles", "trace", "supplementary_gaps"} & set(r)
+    assert not {"paper_profiles", "pipeline_trace", "supplementary_gaps"} & set(r)
     assert r["gaps"]
 
 
