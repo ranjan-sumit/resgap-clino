@@ -250,6 +250,52 @@ def refresh_run_results(project_id: str, run_id: str, results: dict, context: di
     return written
 
 
+def list_papers(project_id: str) -> list[dict]:
+    """The papers kept in a project, oldest first, each with the number of runs
+    that used it. Files whose PDF is no longer on disk are left out."""
+    folder = project_dir(project_id)
+    out = []
+    for f in db.list_project_files(project_id, kind="paper"):
+        try:
+            if not _inside(folder, folder / f["rel_path"]).is_file():
+                continue
+        except ValueError:
+            continue
+        out.append({**f, "kb": max(1, f["size_bytes"] // 1024)})
+    return out
+
+
+def read_papers(project_id: str, file_ids: list[int]) -> list[tuple[str, bytes]]:
+    """(filename, bytes) for the chosen stored papers, in the order given."""
+    by_id = {p["id"]: p for p in list_papers(project_id)}
+    result = []
+    for fid in file_ids:
+        p = by_id.get(fid)
+        if p is None:
+            raise ValueError(f"Paper {fid} is not stored in this project.")
+        result.append((p["filename"], read_project_file(project_id, p["rel_path"])))
+    return result
+
+
+def combine_papers(uploaded: list[tuple[str, bytes]], stored: list[tuple[str, bytes]],
+                   limit: int = 5) -> tuple[list[tuple[str, bytes]], list[str]]:
+    """Uploads plus chosen stored papers as one list: the same file chosen twice
+    (or uploaded again) counts once, and anything beyond `limit` is named in a notice."""
+    notices, seen, out = [], {}, []
+    for name, data in [*stored, *uploaded]:
+        sha = _sha256(data)
+        if sha in seen:
+            notices.append(f"'{name}' is the same file as '{seen[sha]}' and is counted once.")
+            continue
+        seen[sha] = name
+        out.append((name, data))
+    if len(out) > limit:
+        notices.append(f"At most {limit} papers per run; not included: "
+                       + ", ".join(f"'{n}'" for n, _ in out[limit:]) + ".")
+        out = out[:limit]
+    return out, notices
+
+
 def read_project_file(project_id: str, rel_path: str) -> bytes:
     folder = project_dir(project_id)
     return _inside(folder, folder / rel_path).read_bytes()

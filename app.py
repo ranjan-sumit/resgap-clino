@@ -1227,20 +1227,37 @@ with st.expander("New analysis", expanded=not _has_run_on_screen):
         "Research papers (PDF)", type=["pdf"], accept_multiple_files=True,
         label_visibility="collapsed",
     )
-    if uploaded_files and len(uploaded_files) > 5:
-        st.warning("Maximum 5 papers. Only first 5 will be processed.")
-        uploaded_files = uploaded_files[:5]
 
-    if uploaded_files:
-        cols = st.columns(min(len(uploaded_files), 5))
-        for i, (col, f) in enumerate(zip(cols, uploaded_files)):
+    # Papers this project already holds can be analysed again (new model, new question)
+    # without uploading them a second time.
+    _stored = project_store.list_papers(_cur_project["id"])
+    _chosen_ids = []
+    if _stored:
+        st.markdown('<div class="section-hint" style="margin-top:0.6rem;">Or use papers already in this project:</div>',
+                    unsafe_allow_html=True)
+        for _p in _stored:
+            if st.checkbox(f"{_p['filename']} · {_p['kb']} KB", key=f"use_paper_{_cur_project['id']}_{_p['id']}"):
+                _chosen_ids.append(_p["id"])
+    try:
+        _stored_papers = project_store.read_papers(_cur_project["id"], _chosen_ids)
+    except (OSError, ValueError) as e:
+        st.warning(f"A stored paper could not be read: {e}")
+        _stored_papers = []
+    _papers, _paper_notices = project_store.combine_papers(
+        [(f.name, f.getvalue()) for f in (uploaded_files or [])], _stored_papers)
+    for _n in _paper_notices:
+        st.warning(_n)
+
+    if _papers:
+        cols = st.columns(min(len(_papers), 5))
+        for i, (col, (_pname, _pdata)) in enumerate(zip(cols, _papers)):
             with col:
                 st.markdown(
                     f'<div class="stage-card" style="text-align:center;padding:0.8rem;">'
                     f'<div class="stage-title">{_tier_badge(1)} Paper {i+1}</div>'
-                    f'<div class="stage-body" style="font-size:0.78rem;word-break:break-word;">{html.escape(f.name)}</div>'
+                    f'<div class="stage-body" style="font-size:0.78rem;word-break:break-word;">{html.escape(_pname)}</div>'
                     f'<div style="font-size:0.7rem;color:#55708f;">'
-                    f'{len(f.getvalue())//1024} KB</div></div>',
+                    f'{len(_pdata)//1024} KB</div></div>',
                     unsafe_allow_html=True)
 
     run_name = st.text_input(
@@ -1250,7 +1267,7 @@ with st.expander("New analysis", expanded=not _has_run_on_screen):
     st.markdown("---")
     _model_issues = _render_model_picker()      # which model does which job, and a test, in the same step as Run
 
-    _n_files = len(uploaded_files or [])
+    _n_files = len(_papers)
     run_col, status_col = st.columns([1, 5], vertical_alignment="center")
     with run_col:
         run_btn = st.button("Run analysis", type="primary",
@@ -1266,18 +1283,18 @@ with st.expander("New analysis", expanded=not _has_run_on_screen):
         elif _n_files == 1:
             _status, _cls = "Add at least one more paper to begin.", ""
         else:
-            _status, _cls = "Add 2–5 PDFs to begin.", ""
+            _status, _cls = "Add 2–5 PDFs, or tick papers already in the project, to begin.", ""
         st.markdown(f'<div class="run-status{_cls}">{_status}</div>', unsafe_allow_html=True)
 
 # ── Main Pipeline ─────────────────────────────────────────────────────────────
-if run_btn and uploaded_files:
+if run_btn and _papers:
     # The Run button is already held when a needed key is missing; this is the
     # same check again for any path that reaches here anyway.
     if _model_issues:
         st.error(" ".join(_model_issues))
         st.stop()
-    if len(uploaded_files) < 2:
-        st.warning("Upload at least 2 papers.")
+    if len(_papers) < 2:
+        st.warning("Choose at least 2 papers.")
         st.stop()
 
     st.session_state.running        = True
@@ -1309,7 +1326,7 @@ if run_btn and uploaded_files:
         # Streamlit-specific concerns (progress bar, trace rows, warnings)
         # are injected as callbacks -- behaviour here is unchanged.
         outcome = run_full_pipeline(
-            papers=[(uf.name, uf.getvalue()) for uf in uploaded_files],
+            papers=_papers,
             context=context,
             client=client,
             name=run_name,
