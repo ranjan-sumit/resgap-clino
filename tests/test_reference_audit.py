@@ -64,6 +64,34 @@ def test_a_number_out_of_sequence_is_not_a_boundary():
     assert len(entries) == 3 and "7. Beta B." in entries[0]          # "7." is inside entry 1, not a new entry
 
 
+# ── page furniture and trailing sections ───────────────────────────────────────────────────
+def test_a_running_footer_between_entries_is_removed_and_does_not_join_an_entry():
+    text = ("References\n1. Rowe, S.M.; Miller, S. Cystic Fibrosis. N. Engl. J. Med. 2005, 352, 1992–2001.\n"
+            "J. Clin. Med. 2022, 11, 1283 14 of 16\n"
+            "2. Shteinberg, M.; Haq, I.J. Cystic fibrosis. Lancet 2021, 397, 2195–2211.\n"
+            "3. Bell, S.C.; De Boeck, K. New pharmacological approaches. Pharmacol. Ther. 2015, 145, 19–34.\n"
+            "J. Clin. Med. 2022, 11, 1283 15 of 16\n"
+            "4. Veit, G.; Avramescu, R.G. Combinatorial pharmacotherapy. Mol. Biol. Cell 2016, 27, 424–433.")
+    out = rx.strip_reference_noise(text)
+    assert "14 of 16" not in out and "15 of 16" not in out
+    entries = rx._split_reference_entries(out.split("\n", 1)[1])
+    assert len(entries) == 4 and not any("J. Clin. Med. 2022" in e for e in entries)
+
+
+def test_a_funding_or_contributions_heading_ends_the_list():
+    text = "1. Alpha A. First study of things. J A 2001, 5, 1-2.\n2. Beta B. Second study here. J B 2002, 6, 3-4.\n" \
+           "3. Gamma G. Third study there. J C 2003, 7, 5-6.\nFunding: This work was supported by a grant.\nAuthor Contributions: all."
+    out = rx.strip_reference_noise(text)
+    assert "supported by a grant" not in out and rx._split_reference_entries(out)[-1].endswith("5-6.")
+
+
+def test_real_entries_that_look_alike_are_kept():
+    text = "[1] A. Author, Title one about a thing, J. X 1 (2001) 1-9.\n[2] B. Writer, Title two about a thing, J. X 2 (2002) 2-9.\n" \
+           "[3] C. Third, Title three about a thing, J. X 3 (2003) 3-9.\net al.\nand colleagues"
+    out = rx.strip_reference_noise(text)
+    assert out.count("J. X") == 3 and "et al." in out
+
+
 # ── titles ─────────────────────────────────────────────────────────────────────────────────
 @pytest.mark.parametrize("title,ok", [
     ("Pharmacol", False), ("Care Med", False), ("Available online: https://www.cff.org/x", False),

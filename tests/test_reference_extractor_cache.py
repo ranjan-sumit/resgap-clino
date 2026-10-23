@@ -157,7 +157,8 @@ class EnrichReferenceCacheTests(unittest.TestCase):
             enrich_reference(ref, delay=0)
             first_call_count = mock_get.call_count
 
-            with patch.object(reference_extractor, "REFERENCE_STAGE_VERSION", 2):
+            with patch.object(reference_extractor, "REFERENCE_STAGE_VERSION",
+                              reference_extractor.REFERENCE_STAGE_VERSION + 1):
                 enrich_reference(ref, delay=0)
                 second_call_count = mock_get.call_count
                 self.assertGreater(second_call_count, first_call_count)  # version bump -> real cache miss

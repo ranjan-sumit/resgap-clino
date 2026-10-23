@@ -72,6 +72,33 @@ def _extract_arxiv_ids(text: str) -> list[str]:
     return list(dict.fromkeys(ARXIV_RE.findall(text)))
 
 
+_TRAILING_SECTION_RE = re.compile(
+    r"^\s*(?:funding|author contributions?|conflicts? of interest|institutional review board|informed consent|"
+    r"data availability|acknowledg(?:e)?ments?|appendix|supplementary (?:materials?|information)|abbreviations)\b",
+    re.IGNORECASE)
+
+
+def strip_reference_noise(text: str) -> str:
+    """Take page furniture and non-reference sections out of a references section, line by line: a line that
+    repeats on several pages once its digits are ignored ("J. Clin. Med. 2022, 11, 1283  14 of 16") is a running
+    footer, and a "Funding" or "Author Contributions" heading ends the list."""
+    lines = (text or "").splitlines()
+    for i, line in enumerate(lines):
+        if i > 2 and _TRAILING_SECTION_RE.match(line):
+            lines = lines[:i]
+            break
+    shape = lambda ln: re.sub(r"\d+", "#", re.sub(r"\s+", "", ln))
+    counts: dict[str, int] = {}
+    for ln in lines:
+        if 0 < len(ln.strip()) <= 90:
+            counts[shape(ln)] = counts.get(shape(ln), 0) + 1
+    kept = [ln for ln in lines
+            if not (0 < len(ln.strip()) <= 90 and counts.get(shape(ln), 0) >= (2 if re.search(r"\d", ln) else 4)
+                    and not re.match(r"^\s*(?:\[\d+\]|\(\d+\)|\d+\.)", ln))
+            and not re.fullmatch(r"\s*(?:page\s*)?\d{1,3}\s*(?:of|/)\s*\d{1,3}\s*", ln, re.IGNORECASE)]
+    return "\n".join(kept)
+
+
 def clean_reference_text(text: str) -> str:
     """Make reference text searchable: ligatures folded ("ﬁ" -> "fi"), words broken across lines rejoined
     ("com- plementary" -> "complementary"), and DOIs split by a line break or a space put back together."""
@@ -246,7 +273,7 @@ def parse_references_section(paper: dict) -> dict:
         if idx > 0:
             ref_text = full[idx:][:25000]
 
-    ref_text = clean_reference_text(ref_text)
+    ref_text = clean_reference_text(strip_reference_noise(ref_text))
     return {
         "raw_text":  ref_text[:25000],
         "dois":      _extract_dois_from_text(ref_text),
