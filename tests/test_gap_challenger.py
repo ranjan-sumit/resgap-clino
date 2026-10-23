@@ -82,119 +82,84 @@ class QueryFamilyTests(unittest.TestCase):
 
 
 class SearchFunnelTests(unittest.TestCase):
-    @patch("pipeline.gap_challenger._search_arxiv_with_status")
-    @patch("pipeline.gap_challenger._search_semantic_scholar_with_status")
-    def test_both_providers_succeed_gives_full_coverage(self, mock_ss, mock_arxiv):
-        mock_ss.return_value = ([_candidate("Paper A")], True)
-        mock_arxiv.return_value = ([_candidate("Paper B")], True)
-        funnel = run_search_funnel(["query one"])
-        self.assertEqual(funnel["search_coverage_score"], 1.0)
-        self.assertEqual(funnel["post_dedup_count"], 2)
+    """The funnel searches through the literature check's providers (Europe PMC, Semantic Scholar, arXiv for ML)."""
 
-    @patch("pipeline.gap_challenger._search_arxiv_with_status")
-    @patch("pipeline.gap_challenger._search_semantic_scholar_with_status")
-    def test_one_provider_failing_halves_coverage(self, mock_ss, mock_arxiv):
-        mock_ss.return_value = ([_candidate("Paper A")], True)
-        mock_arxiv.return_value = ([], False)
-        funnel = run_search_funnel(["query one"])
-        self.assertEqual(funnel["search_coverage_score"], 0.5)
+    def _funnel(self, papers, flags, queries=("query one",), **kw):
+        with patch("pipeline.gap_challenger.scout._search_gap", return_value=(papers, flags)):
+            return run_search_funnel(list(queries), **kw)
 
-    @patch("pipeline.gap_challenger._search_arxiv_with_status")
-    @patch("pipeline.gap_challenger._search_semantic_scholar_with_status")
-    def test_both_providers_failing_gives_zero_coverage(self, mock_ss, mock_arxiv):
-        mock_ss.return_value = ([], False)
-        mock_arxiv.return_value = ([], False)
-        funnel = run_search_funnel(["query one"])
-        self.assertEqual(funnel["search_coverage_score"], 0.0)
+    def test_both_providers_succeed_gives_full_coverage(self):
+        f = self._funnel([_candidate("Paper A about airways"), _candidate("Paper B about mucus")],
+                         {"semantic_scholar": [True], "europe_pmc": [True]})
+        self.assertEqual(f["search_coverage_score"], 1.0)
+        self.assertEqual(f["post_dedup_count"], 2)
+        self.assertEqual(f["providers_queried"], ["semantic_scholar", "europe_pmc"])
 
-    @patch("pipeline.gap_challenger._search_arxiv_with_status")
-    @patch("pipeline.gap_challenger._search_semantic_scholar_with_status")
-    def test_a_provider_succeeding_on_any_query_family_counts(self, mock_ss, mock_arxiv):
-        # Succeeds (empty result) on the first query, fails on the second --
-        # provider_success should still be True once any call succeeds.
-        mock_ss.side_effect = [([], True), ([_candidate("A")], True)]
-        mock_arxiv.side_effect = [([], False), ([], False)]
-        funnel = run_search_funnel(["q1", "q2"])
-        self.assertTrue(funnel["provider_success"]["semantic_scholar"])
-        self.assertFalse(funnel["provider_success"]["arxiv"])
-        self.assertEqual(funnel["search_coverage_score"], 0.5)
+    def test_one_provider_failing_halves_coverage(self):
+        f = self._funnel([_candidate("Paper A about airways")], {"semantic_scholar": [False], "europe_pmc": [True]})
+        self.assertEqual(f["search_coverage_score"], 0.5)
+        self.assertEqual(f["provider_success"], {"semantic_scholar": False, "europe_pmc": True})
 
-    @patch("pipeline.gap_challenger._search_arxiv_with_status")
-    @patch("pipeline.gap_challenger._search_semantic_scholar_with_status")
-    def test_a_family_where_every_provider_call_failed_is_not_executed(self, mock_ss, mock_arxiv):
-        # q1: both providers fail (planned but never executed); q2: both
-        # succeed. Execution rate 0.5 x provider rate 1.0 -> 0.5 -- the old
-        # hardcoded 1.0 execution rate would have reported 1.0 here.
-        mock_ss.side_effect = [([], False), ([_candidate("A")], True)]
-        mock_arxiv.side_effect = [([], False), ([], True)]
-        funnel = run_search_funnel(["q1", "q2"])
-        self.assertEqual(funnel["search_coverage_score"], 0.5)
+    def test_all_providers_failing_gives_zero_coverage(self):
+        f = self._funnel([], {"semantic_scholar": [False], "europe_pmc": [False]})
+        self.assertEqual(f["search_coverage_score"], 0.0)
 
-    @patch("pipeline.gap_challenger._search_arxiv_with_status")
-    @patch("pipeline.gap_challenger._search_semantic_scholar_with_status")
-    def test_duplicate_titles_across_queries_are_deduped(self, mock_ss, mock_arxiv):
-        mock_ss.return_value = ([_candidate("Same Paper")], True)
-        mock_arxiv.return_value = ([_candidate("Same Paper")], True)
-        funnel = run_search_funnel(["q1"])
-        self.assertEqual(funnel["candidate_count"], 2)
-        self.assertEqual(funnel["post_dedup_count"], 1)
+    def test_a_provider_succeeding_on_any_query_counts(self):
+        f = self._funnel([], {"semantic_scholar": [True, False], "europe_pmc": [False, False]}, queries=("q1", "q2"))
+        self.assertTrue(f["provider_success"]["semantic_scholar"])
+        self.assertFalse(f["provider_success"]["europe_pmc"])
+        self.assertEqual(f["search_coverage_score"], 0.25)          # 1 of 2 families answered x 1 of 2 providers
 
-    @patch("pipeline.gap_challenger._search_arxiv_with_status")
-    @patch("pipeline.gap_challenger._search_semantic_scholar_with_status")
-    def test_no_rerank_query_or_api_key_leaves_order_and_flag_false(self, mock_ss, mock_arxiv):
-        mock_ss.return_value = ([_candidate("Paper A")], True)
-        mock_arxiv.return_value = ([], True)
-        funnel = run_search_funnel(["q1"])
-        self.assertFalse(funnel["rerank_used"])
-        self.assertEqual(funnel["post_rerank_count"], funnel["post_dedup_count"])
+    def test_a_family_where_every_provider_call_failed_is_not_executed(self):
+        f = self._funnel([], {"semantic_scholar": [False, True], "europe_pmc": [False, True]}, queries=("q1", "q2"))
+        self.assertEqual(f["search_coverage_score"], 0.5)           # 0.5 x 1.0
 
-    @patch("pipeline.gap_challenger.rerank_candidates")
-    @patch("pipeline.gap_challenger._search_arxiv_with_status")
-    @patch("pipeline.gap_challenger._search_semantic_scholar_with_status")
-    def test_rerank_reorders_candidates_when_enabled(self, mock_ss, mock_arxiv, mock_rerank):
-        mock_ss.return_value = ([_candidate("Paper A"), _candidate("Paper B")], True)
-        mock_arxiv.return_value = ([], True)
-        # Reranker says Paper B (index 1) is more relevant than Paper A (index 0).
-        mock_rerank.return_value = [{"index": 1, "score": 5.0}, {"index": 0, "score": 0.1}]
-        funnel = run_search_funnel(["q1"], rerank_query="some gap", nvidia_api_key="key")
-        self.assertTrue(funnel["rerank_used"])
-        self.assertEqual([c["title"] for c in funnel["candidates"]], ["Paper B", "Paper A"])
-        self.assertEqual(funnel["post_rerank_count"], 2)
+    def test_arxiv_counts_as_a_provider_only_when_it_was_used(self):
+        f = self._funnel([], {"semantic_scholar": [True], "europe_pmc": [True], "arxiv": [False]}, use_arxiv=True)
+        self.assertEqual(f["providers_queried"], ["semantic_scholar", "europe_pmc", "arxiv"])
+        self.assertAlmostEqual(f["search_coverage_score"], 0.667, places=3)
 
-    @patch("pipeline.gap_challenger.rerank_candidates")
-    @patch("pipeline.gap_challenger._search_arxiv_with_status")
-    @patch("pipeline.gap_challenger._search_semantic_scholar_with_status")
-    def test_rerank_failure_falls_back_to_unranked_order(self, mock_ss, mock_arxiv, mock_rerank):
-        mock_ss.return_value = ([_candidate("Paper A")], True)
-        mock_arxiv.return_value = ([], True)
-        mock_rerank.side_effect = Exception("NVIDIA API down")
-        funnel = run_search_funnel(["q1"], rerank_query="some gap", nvidia_api_key="key")
-        self.assertFalse(funnel["rerank_used"])
-        self.assertEqual([c["title"] for c in funnel["candidates"]], ["Paper A"])
+    def test_duplicates_are_merged_by_doi_or_title(self):
+        a = dict(_candidate("Same Paper About Airways"), doi="10.1/x")
+        b = dict(_candidate("same paper about airways"), doi="https://doi.org/10.1/x")
+        f = self._funnel([a, b, _candidate("Other Paper About Mucus")], {"semantic_scholar": [True], "europe_pmc": [True]})
+        self.assertEqual(f["candidate_count"], 3)
+        self.assertEqual(f["post_dedup_count"], 2)
 
-    @patch("pipeline.gap_challenger._search_arxiv_with_status")
-    @patch("pipeline.gap_challenger._search_semantic_scholar_with_status")
-    def test_metadata_filter_drops_implausible_year_candidates(self, mock_ss, mock_arxiv):
+    def test_records_whose_title_is_a_section_name_are_discarded(self):
+        f = self._funnel([_candidate("Papers"), _candidate("Abstract"), _candidate("Short"),
+                          _candidate("A real paper title about cystic fibrosis")],
+                         {"semantic_scholar": [True], "europe_pmc": [True]})
+        self.assertEqual([c["title"] for c in f["candidates"]], ["A real paper title about cystic fibrosis"])
+
+    def test_without_a_rerank_query_the_order_is_kept_and_the_flag_is_false(self):
+        f = self._funnel([_candidate("Paper A about airways")], {"semantic_scholar": [True], "europe_pmc": [True]})
+        self.assertFalse(f["rerank_used"])
+        self.assertEqual(f["post_rerank_count"], f["post_dedup_count"])
+
+    def test_the_candidates_are_ranked_against_the_gap_without_any_network_call(self):
+        papers = [_candidate("Stock price forecasting with neural networks", abstract="daily prices"),
+                  _candidate("CFTR modulators in a human airway chip", abstract="modulator rescue of ion transport")]
+        with patch("socket.socket", side_effect=AssertionError("network used by the ranker")):
+            f = self._funnel(papers, {"semantic_scholar": [True], "europe_pmc": [True]},
+                             rerank_query="CFTR modulator rescue in an airway chip")
+        self.assertTrue(f["rerank_used"])
+        self.assertEqual(f["ranker"], "token-overlap-v1")
+        self.assertEqual(f["candidates"][0]["title"], "CFTR modulators in a human airway chip")
+
+    def test_metadata_filter_drops_implausible_year_candidates(self):
         from datetime import datetime
-        future_year = datetime.now().year + 10
-        mock_ss.return_value = ([_candidate("Good Paper", year=2022),
-                                  _candidate("Bad Paper", year=future_year)], True)
-        mock_arxiv.return_value = ([], True)
-        funnel = run_search_funnel(["q1"])
-        self.assertEqual(funnel["post_dedup_count"], 2)
-        self.assertEqual(funnel["post_metadata_filter_count"], 1)
-        self.assertEqual(funnel["metadata_filtered_count"], 1)
-        self.assertEqual([c["title"] for c in funnel["candidates"]], ["Good Paper"])
+        f = self._funnel([_candidate("Good Paper about airways", year=2022),
+                          _candidate("Bad Paper about airways", year=datetime.now().year + 10)],
+                         {"semantic_scholar": [True], "europe_pmc": [True]})
+        self.assertEqual(f["post_dedup_count"], 2)
+        self.assertEqual(f["post_metadata_filter_count"], 1)
+        self.assertEqual([c["title"] for c in f["candidates"]], ["Good Paper about airways"])
 
-    @patch("pipeline.gap_challenger._search_arxiv_with_status")
-    @patch("pipeline.gap_challenger._search_semantic_scholar_with_status")
-    def test_metadata_filter_year_bounds_are_opt_in(self, mock_ss, mock_arxiv):
-        mock_ss.return_value = ([_candidate("Old Paper", year=1990)], True)
-        mock_arxiv.return_value = ([], True)
-        funnel = run_search_funnel(["q1"], year_from=2015)
-        self.assertEqual(funnel["post_metadata_filter_count"], 0)
-        funnel_no_bound = run_search_funnel(["q1"])
-        self.assertEqual(funnel_no_bound["post_metadata_filter_count"], 1)
+    def test_metadata_filter_year_bounds_are_opt_in(self):
+        flags = {"semantic_scholar": [True], "europe_pmc": [True]}
+        self.assertEqual(self._funnel([_candidate("Old Paper about airways", year=1990)], flags, year_from=2015)["post_metadata_filter_count"], 0)
+        self.assertEqual(self._funnel([_candidate("Old Paper about airways", year=1990)], flags)["post_metadata_filter_count"], 1)
 
 
 class FilterByMetadataTests(unittest.TestCase):
@@ -252,30 +217,25 @@ class FilterByMetadataTests(unittest.TestCase):
 
 
 class RerankCandidatesHelperTests(unittest.TestCase):
-    def test_no_api_key_skips_reranking(self):
-        candidates = [_candidate("A")]
-        result, used = _rerank_candidates("query", candidates, api_key="")
-        self.assertEqual(result, candidates)
-        self.assertFalse(used)
-
     def test_no_query_skips_reranking(self):
         candidates = [_candidate("A")]
-        result, used = _rerank_candidates("", candidates, api_key="key")
+        result, used = _rerank_candidates("", candidates)
         self.assertEqual(result, candidates)
         self.assertFalse(used)
 
     def test_empty_candidates_skips_reranking(self):
-        result, used = _rerank_candidates("query", [], api_key="key")
+        result, used = _rerank_candidates("query", [])
         self.assertEqual(result, [])
         self.assertFalse(used)
 
-    @patch("pipeline.gap_challenger.rerank_candidates")
-    def test_rankings_covering_only_some_candidates_appends_the_rest(self, mock_rerank):
-        candidates = [_candidate("A"), _candidate("B"), _candidate("C")]
-        mock_rerank.return_value = [{"index": 2, "score": 1.0}]  # only "C" ranked
-        result, used = _rerank_candidates("query", candidates, api_key="key")
+    def test_candidates_are_returned_best_first_and_none_are_lost(self):
+        candidates = [_candidate("Unrelated finance paper", abstract="stocks"),
+                      _candidate("Airway chip CFTR modulator", abstract="airway chip"),
+                      _candidate("Another unrelated paper", abstract="weather")]
+        result, used = _rerank_candidates("airway chip CFTR modulator", candidates)
         self.assertTrue(used)
-        self.assertEqual([c["title"] for c in result], ["C", "A", "B"])
+        self.assertEqual(result[0]["title"], "Airway chip CFTR modulator")
+        self.assertEqual(sorted(c["title"] for c in result), sorted(c["title"] for c in candidates))
 
 
 class JudgeCandidatesTests(unittest.TestCase):
@@ -403,10 +363,21 @@ def _judged(relevant=True, relevance_type="direct", contradicts=False, confidenc
 class DecisionTableTests(unittest.TestCase):
     """Every row of 04-ai-research-architecture.md §5.2's decision table."""
 
-    def test_row1_low_coverage_always_insufficient_evidence_even_with_strong_results(self):
-        strong = [_judged() for _ in range(5)]
-        result = apply_decision_table(SEARCH_COVERAGE_THRESHOLD - 0.01, strong)
-        self.assertEqual(result["status"], "INSUFFICIENT_EVIDENCE")
+    def test_row1_low_coverage_never_concludes_that_a_gap_is_open(self):
+        # an incomplete search cannot show that nobody has done the work
+        for judged in ([], [_judged(relevant=False)], [_judged(relevance_type="adjacent")]):
+            result = apply_decision_table(SEARCH_COVERAGE_THRESHOLD - 0.01, judged)
+            self.assertEqual(result["status"], "INSUFFICIENT_EVIDENCE")
+
+    def test_row1_low_coverage_still_reports_closure_when_papers_directly_do_the_work(self):
+        # papers that do the work are evidence however many sources answered; never CLOSED on an incomplete search
+        result = apply_decision_table(0.5, [_judged() for _ in range(5)])
+        self.assertEqual(result["status"], "LIKELY_CLOSED")
+        self.assertEqual(apply_decision_table(0.5, [_judged()])["status"], "INSUFFICIENT_EVIDENCE")
+
+    def test_row1_low_coverage_with_a_contradiction_is_not_reported_as_closed(self):
+        judged = [_judged(), _judged(), _judged(contradicts=True)]
+        self.assertEqual(apply_decision_table(0.5, judged)["status"], "INSUFFICIENT_EVIDENCE")
 
     def test_row1_zero_coverage_insufficient_evidence(self):
         result = apply_decision_table(0.0, [])
@@ -474,37 +445,50 @@ class DecisionTableTests(unittest.TestCase):
         self.assertEqual(result["status"], "PARTIALLY_OPEN")
 
 
+_NO_PLANNER = patch("pipeline.gap_challenger.scout.plan_queries", return_value=({}, "planner off"))
+
+
+def _funnel_result(**over):
+    base = {"query_families": ["q"], "providers_queried": ["semantic_scholar", "europe_pmc"],
+            "provider_success": {"semantic_scholar": True, "europe_pmc": True},
+            "candidate_count": 0, "post_dedup_count": 0, "post_metadata_filter_count": 0,
+            "metadata_filtered_count": 0, "post_rerank_count": 0, "rerank_used": False, "ranker": "token-overlap-v1",
+            "candidates": [], "search_coverage_score": 1.0}
+    base.update(over)
+    return base
+
+
+def _search(papers, flags=None):
+    return patch("pipeline.gap_challenger.scout._search_gap",
+                 return_value=(papers, flags or {"semantic_scholar": [True] * 3, "europe_pmc": [True] * 3}))
+
+
 class RunChallengeOrchestrationTests(unittest.TestCase):
-    @patch("pipeline.gap_challenger._search_arxiv_with_status")
-    @patch("pipeline.gap_challenger._search_semantic_scholar_with_status")
-    def test_low_confidence_gap_never_reaches_search(self, mock_ss, mock_arxiv):
-        result = run_challenge(_gap(confidence="low"), MagicMock())
+    def setUp(self):
+        self.planner = _NO_PLANNER.start()
+        self.addCleanup(_NO_PLANNER.stop)
+
+    def test_low_confidence_gap_never_reaches_search(self):
+        with patch("pipeline.gap_challenger.scout._search_gap") as search:
+            result = run_challenge(_gap(confidence="low"), MagicMock())
         self.assertEqual(result["challenger_state"], "GENERATED")
         self.assertIsNone(result["challenger_status"])
-        mock_ss.assert_not_called()
-        mock_arxiv.assert_not_called()
+        search.assert_not_called()
 
-    @patch("pipeline.gap_challenger._search_arxiv_with_status")
-    @patch("pipeline.gap_challenger._search_semantic_scholar_with_status")
-    def test_full_pipeline_reaches_challenged_with_a_terminal_status(self, mock_ss, mock_arxiv):
-        mock_ss.return_value = ([_candidate("Relevant Paper")], True)
-        mock_arxiv.return_value = ([], True)
+    def test_full_pipeline_reaches_challenged_with_a_terminal_status(self):
         client = MagicMock()
-        # A bare MagicMock().api_key auto-creates a truthy attribute, which
-        # would make _rerank_candidates() attempt a real HTTP call to
-        # NVIDIA's reranker instead of skipping it -- explicit empty string
-        # keeps this test's "mocked, no live service" guarantee.
-        client.api_key = ""
         client.chat_json.return_value = Success(
-            '[{"title": "Relevant Paper", "relevant": true, "relevance_type": "adjacent", '
+            '[{"title": "Relevant Paper about validation", "relevant": true, "relevance_type": "adjacent", '
             '"contradicts_gap": false, "confidence": "medium"}]'
         )
-        result = run_challenge(_gap(confidence="high"), client)
+        with _search([_candidate("Relevant Paper about validation")]):
+            result = run_challenge(_gap(confidence="high"), client)
         self.assertEqual(result["challenger_state"], "CHALLENGED")
         self.assertEqual(result["challenger_status"], "PARTIALLY_OPEN")
         self.assertIn("challenge_funnel", result)
         self.assertIn("search_coverage_score", result["challenge_funnel"])
         self.assertIn("judged_candidates", result["challenge_funnel"])
+        self.assertEqual(result["challenge_funnel"]["ranker"], "token-overlap-v1")
 
     def test_gap_with_no_usable_query_text_stays_search_pending(self):
         gap = {"title": "", "description": "", "missing_connection": "", "confidence": "high"}
@@ -512,66 +496,74 @@ class RunChallengeOrchestrationTests(unittest.TestCase):
         self.assertEqual(result["challenger_state"], "SEARCH_PENDING")
         self.assertIsNone(result["challenger_status"])
 
-    @patch("pipeline.gap_challenger._search_arxiv_with_status")
-    @patch("pipeline.gap_challenger._search_semantic_scholar_with_status")
-    def test_judge_failure_resolves_to_insufficient_evidence_not_open(self, mock_ss, mock_arxiv):
+    def test_judge_failure_resolves_to_insufficient_evidence_not_open(self):
         # ADR-008: an unjudged candidate pool must never run the decision
         # table -- "the judge call failed" is not "searched, nothing found."
-        mock_ss.return_value = ([_candidate("Paper A")], True)
-        mock_arxiv.return_value = ([], True)
         client = MagicMock()
         client.chat_json.return_value = Failure(ErrorInfo(kind="api_error", detail="down"))
-        result = run_challenge(_gap(confidence="high"), client)
+        with _search([_candidate("Paper A about validation")]):
+            result = run_challenge(_gap(confidence="high"), client)
         self.assertEqual(result["challenger_state"], "CHALLENGED")
         self.assertEqual(result["challenger_status"], "INSUFFICIENT_EVIDENCE")
         self.assertFalse(result["challenge_funnel"]["judged"])
         self.assertIn("challenger_reason", result)
 
-    @patch("pipeline.gap_challenger._search_arxiv_with_status")
-    @patch("pipeline.gap_challenger._search_semantic_scholar_with_status")
-    def test_partial_judgment_coverage_resolves_to_insufficient_evidence(self, mock_ss, mock_arxiv):
-        # Even one unjudged candidate taints the pool: the decision table
-        # may only run on fully-judged input.
-        mock_ss.return_value = ([_candidate("Paper A"), _candidate("Paper B")], True)
-        mock_arxiv.return_value = ([], True)
+    def test_partial_judgment_coverage_resolves_to_insufficient_evidence(self):
         client = MagicMock()
         client.chat_json.return_value = Success(
-            '[{"title": "Paper A", "relevant": true, "relevance_type": "direct", '
+            '[{"title": "Paper A about validation", "relevant": true, "relevance_type": "direct", '
             '"contradicts_gap": false, "confidence": "high"}]'
         )
-        result = run_challenge(_gap(confidence="high"), client)
+        with _search([_candidate("Paper A about validation"), _candidate("Paper B about validation")]):
+            result = run_challenge(_gap(confidence="high"), client)
         self.assertEqual(result["challenger_status"], "INSUFFICIENT_EVIDENCE")
 
-    @patch("pipeline.gap_challenger.run_search_funnel")
-    def test_explicit_nvidia_api_key_is_threaded_to_the_funnel(self, mock_funnel):
-        mock_funnel.return_value = {
-            "query_families": ["q"], "providers_queried": ["semantic_scholar", "arxiv"],
-            "provider_success": {"semantic_scholar": True, "arxiv": True},
-            "candidate_count": 0, "post_dedup_count": 0, "post_metadata_filter_count": 0,
-            "metadata_filtered_count": 0, "post_rerank_count": 0, "rerank_used": False,
-            "candidates": [], "search_coverage_score": 1.0,
-        }
-        client = MagicMock()
-        run_challenge(_gap(confidence="high"), client, nvidia_api_key="nvidia-key")
-        self.assertEqual(mock_funnel.call_args.kwargs["nvidia_api_key"], "nvidia-key")
-        # The rerank query is gap-framing-stripped, same as the search
-        # queries (B27): "Missing" must not reach the reranker.
-        self.assertNotIn("Missing", mock_funnel.call_args.kwargs["rerank_query"])
-        self.assertIn("external validation", mock_funnel.call_args.kwargs["rerank_query"])
+    def test_the_rerank_query_is_stripped_of_gap_framing(self):
+        with patch("pipeline.gap_challenger.run_search_funnel", return_value=_funnel_result()) as funnel:
+            run_challenge(_gap(confidence="high"), MagicMock())
+        self.assertNotIn("Missing", funnel.call_args.kwargs["rerank_query"])
+        self.assertIn("external validation", funnel.call_args.kwargs["rerank_query"])
 
-    @patch("pipeline.gap_challenger.run_search_funnel")
-    @patch.dict("os.environ", {"NVIDIA_API_KEY": "env-key"})
-    def test_nvidia_api_key_falls_back_to_env_var(self, mock_funnel):
-        mock_funnel.return_value = {
-            "query_families": ["q"], "providers_queried": ["semantic_scholar", "arxiv"],
-            "provider_success": {"semantic_scholar": True, "arxiv": True},
-            "candidate_count": 0, "post_dedup_count": 0, "post_metadata_filter_count": 0,
-            "metadata_filtered_count": 0, "post_rerank_count": 0,
-            "rerank_used": False,
-            "candidates": [], "search_coverage_score": 1.0,
-        }
-        run_challenge(_gap(confidence="high"), MagicMock())
-        self.assertEqual(mock_funnel.call_args.kwargs["nvidia_api_key"], "env-key")
+    def test_no_third_party_key_is_read_or_sent(self):
+        # the old reranker took NVIDIA_API_KEY from the environment and sent gap and abstract text to NVIDIA
+        with patch.dict("os.environ", {"NVIDIA_API_KEY": "env-key"}), \
+             patch("pipeline.gap_challenger.run_search_funnel", return_value=_funnel_result()) as funnel:
+            run_challenge(_gap(confidence="high"), MagicMock())
+        self.assertNotIn("nvidia_api_key", funnel.call_args.kwargs)
+        import inspect
+        self.assertNotIn("nvidia", inspect.signature(run_challenge).parameters)
+
+    def test_arxiv_is_searched_only_when_asked_to(self):
+        with patch("pipeline.gap_challenger.run_search_funnel", return_value=_funnel_result()) as funnel:
+            run_challenge(_gap(confidence="high"), MagicMock(), use_arxiv=True)
+            self.assertTrue(funnel.call_args.kwargs["use_arxiv"])
+            run_challenge(_gap(confidence="high"), MagicMock())
+            self.assertFalse(funnel.call_args.kwargs["use_arxiv"])
+
+
+class PlannedQueryTests(unittest.TestCase):
+    def test_the_planners_short_queries_are_what_gets_searched(self):
+        gap = dict(_gap(confidence="high"), gap_id="g1")
+        with patch("pipeline.gap_challenger.scout.plan_queries", return_value=({"g1": ["airway chip CFTR", "modulator rescue chip"]}, None)), \
+             patch("pipeline.gap_challenger.run_search_funnel", return_value=_funnel_result()) as funnel:
+            result = run_challenge(gap, MagicMock())
+        self.assertEqual(funnel.call_args.args[0], ["airway chip CFTR", "modulator rescue chip"])
+        self.assertIsNone(result["challenge_funnel"]["planner_error"])
+
+    def test_when_the_planner_fails_the_deterministic_queries_are_used_and_the_reason_is_recorded(self):
+        gap = dict(_gap(confidence="high"), gap_id="g1")
+        with patch("pipeline.gap_challenger.scout.plan_queries", return_value=({}, "query planner failed: timeout")), \
+             patch("pipeline.gap_challenger.run_search_funnel", return_value=_funnel_result()) as funnel:
+            result = run_challenge(gap, MagicMock())
+        self.assertEqual(funnel.call_args.args[0], generate_query_families(gap))
+        self.assertEqual(result["challenge_funnel"]["planner_error"], "query planner failed: timeout")
+
+    def test_a_planner_exception_does_not_stop_the_challenge(self):
+        gap = dict(_gap(confidence="high"), gap_id="g1")
+        with patch("pipeline.gap_challenger.scout.plan_queries", side_effect=RuntimeError("boom")), \
+             patch("pipeline.gap_challenger.run_search_funnel", return_value=_funnel_result()):
+            result = run_challenge(gap, MagicMock())
+        self.assertEqual(result["challenger_state"], "CHALLENGED")
 
 
 if __name__ == "__main__":

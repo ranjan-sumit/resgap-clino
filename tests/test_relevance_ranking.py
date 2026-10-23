@@ -1,123 +1,51 @@
-"""
-Tests for pipeline/relevance_ranking.py (Clinova Phase 3, Epic 3.5).
-Mocked HTTP/OpenAI client -- no live NVIDIA API needed for this suite,
-matching this codebase's existing convention for external-service modules
-(pipeline/graph_persistence.py's tests use the same approach).
-"""
-import unittest
-from unittest.mock import patch, MagicMock
+"""The relevance ranking is computed locally: no network, no key, deterministic."""
+from unittest.mock import patch
 
-from pipeline.relevance_ranking import embed_texts, rerank_candidates, RERANK_URL, RERANK_MODEL
+from pipeline.relevance_ranking import RANKER, rerank_candidates
 
-
-class EmbedTextsTests(unittest.TestCase):
-    def test_empty_input_returns_empty_without_a_call(self):
-        self.assertEqual(embed_texts([], api_key="x"), [])
-
-    @patch("pipeline.relevance_ranking.OpenAI")
-    def test_passes_input_type_via_extra_body(self, mock_openai_cls):
-        mock_client = MagicMock()
-        mock_openai_cls.return_value = mock_client
-        mock_client.embeddings.create.return_value = MagicMock(
-            data=[MagicMock(embedding=[0.1, 0.2]), MagicMock(embedding=[0.3, 0.4])]
-        )
-        result = embed_texts(["a", "b"], api_key="x", input_type="query")
-        self.assertEqual(result, [[0.1, 0.2], [0.3, 0.4]])
-        _, kwargs = mock_client.embeddings.create.call_args
-        self.assertEqual(kwargs["extra_body"], {"input_type": "query"})
-        self.assertEqual(kwargs["input"], ["a", "b"])
-
-    @patch("pipeline.relevance_ranking.OpenAI")
-    def test_default_input_type_is_passage(self, mock_openai_cls):
-        mock_client = MagicMock()
-        mock_openai_cls.return_value = mock_client
-        mock_client.embeddings.create.return_value = MagicMock(data=[MagicMock(embedding=[0.1])])
-        embed_texts(["doc"], api_key="x")
-        _, kwargs = mock_client.embeddings.create.call_args
-        self.assertEqual(kwargs["extra_body"], {"input_type": "passage"})
+GAP = "CFTR modulator rescue in human airway chip infection models"
+PASSAGES = [
+    "Stock price forecasting with recurrent neural networks. We predict daily prices.",
+    "CFTR modulators rescue ion transport in a human airway chip model of cystic fibrosis infection.",
+    "A survey of airway disease. Airway disease is common.",
+    "Modulator therapy outcomes in patients: a registry study of CFTR modulators.",
+]
 
 
-class RerankCandidatesTests(unittest.TestCase):
-    def test_empty_passages_returns_empty_without_a_call(self):
-        self.assertEqual(rerank_candidates("query", [], api_key="x"), [])
-
-    def test_empty_query_returns_empty_without_a_call(self):
-        self.assertEqual(rerank_candidates("", ["a passage"], api_key="x"), [])
-
-    @patch("pipeline.relevance_ranking.requests.post")
-    def test_posts_to_the_correct_url_and_model(self, mock_post):
-        mock_post.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"rankings": [{"index": 0, "logit": 1.5}]},
-        )
-        mock_post.return_value.raise_for_status.return_value = None
-        rerank_candidates("query text", ["passage text"], api_key="secret")
-        args, kwargs = mock_post.call_args
-        self.assertEqual(args[0], RERANK_URL)
-        self.assertEqual(kwargs["json"]["model"], RERANK_MODEL)
-        self.assertEqual(kwargs["json"]["query"], {"text": "query text"})
-        self.assertEqual(kwargs["json"]["passages"], [{"text": "passage text"}])
-        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer secret")
-
-    @patch("pipeline.relevance_ranking.requests.post")
-    def test_maps_rankings_response_to_index_score_dicts(self, mock_post):
-        mock_post.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"rankings": [
-                {"index": 2, "logit": 5.0},
-                {"index": 0, "logit": 1.0},
-                {"index": 1, "logit": -3.0},
-            ]},
-        )
-        mock_post.return_value.raise_for_status.return_value = None
-        result = rerank_candidates("q", ["a", "b", "c"], api_key="x")
-        self.assertEqual(result, [
-            {"index": 2, "score": 5.0},
-            {"index": 0, "score": 1.0},
-            {"index": 1, "score": -3.0},
-        ])
-
-    @patch("pipeline.relevance_ranking.requests.post")
-    def test_unsorted_api_response_is_returned_sorted_by_logit(self, mock_post):
-        # Regression: the API does not guarantee ranked order -- the module
-        # must sort explicitly, not pass the response through in arrival
-        # order.
-        mock_post.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"rankings": [
-                {"index": 1, "logit": 0.5},
-                {"index": 0, "logit": 9.0},
-                {"index": 2, "logit": -1.0},
-            ]},
-        )
-        mock_post.return_value.raise_for_status.return_value = None
-        result = rerank_candidates("q", ["a", "b", "c"], api_key="x")
-        self.assertEqual([r["index"] for r in result], [0, 1, 2])
-        self.assertEqual([r["score"] for r in result], [9.0, 0.5, -1.0])
-
-    @patch("pipeline.relevance_ranking.requests.post")
-    def test_equal_logits_keep_api_order(self, mock_post):
-        # Stable sort: ties must not be reordered relative to each other.
-        mock_post.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"rankings": [
-                {"index": 2, "logit": 1.0},
-                {"index": 0, "logit": 1.0},
-                {"index": 1, "logit": 1.0},
-            ]},
-        )
-        mock_post.return_value.raise_for_status.return_value = None
-        result = rerank_candidates("q", ["a", "b", "c"], api_key="x")
-        self.assertEqual([r["index"] for r in result], [2, 0, 1])
-
-    @patch("pipeline.relevance_ranking.requests.post")
-    def test_http_error_raises_not_swallowed(self, mock_post):
-        import requests
-        mock_post.return_value = MagicMock(status_code=500)
-        mock_post.return_value.raise_for_status.side_effect = requests.exceptions.HTTPError("500")
-        with self.assertRaises(requests.exceptions.HTTPError):
-            rerank_candidates("q", ["a"], api_key="x")
+def test_the_closest_passage_comes_first_and_the_unrelated_one_last():
+    ranking = rerank_candidates(GAP, PASSAGES)
+    assert [r["index"] for r in ranking][0] == 1 and [r["index"] for r in ranking][-1] == 0
+    assert all(ranking[i]["score"] >= ranking[i + 1]["score"] for i in range(len(ranking) - 1))
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_every_passage_is_ranked_exactly_once():
+    ranking = rerank_candidates(GAP, PASSAGES)
+    assert sorted(r["index"] for r in ranking) == [0, 1, 2, 3]
+
+
+def test_the_same_input_gives_the_same_order():
+    assert rerank_candidates(GAP, PASSAGES) == rerank_candidates(GAP, PASSAGES)
+
+
+def test_nothing_to_rank_gives_nothing():
+    assert rerank_candidates("query", []) == [] and rerank_candidates("", ["a passage"]) == []
+
+
+def test_a_query_of_only_stop_and_framing_words_keeps_the_original_order():
+    assert [r["index"] for r in rerank_candidates("the missing gap of this", PASSAGES)] == [0, 1, 2, 3]
+
+
+def test_a_shared_two_word_phrase_outranks_the_same_words_scattered():
+    passages = ["airway chip models of infection", "chip design, and infection of the airway in models"]
+    assert rerank_candidates("airway chip", passages)[0]["index"] == 0
+
+
+def test_a_common_word_counts_for_less_than_a_rare_one():
+    passages = ["cystic fibrosis fibrosis fibrosis", "bronchiectasis in cystic patients"]
+    assert rerank_candidates("cystic bronchiectasis", passages)[0]["index"] == 1
+
+
+def test_it_never_touches_the_network():
+    with patch("socket.socket", side_effect=AssertionError("network used")):
+        assert rerank_candidates(GAP, PASSAGES)
+    assert RANKER == "token-overlap-v1"

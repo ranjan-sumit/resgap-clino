@@ -221,6 +221,9 @@ def _search_gap(queries: list, ss_api_key: str, use_arxiv: bool) -> tuple[list, 
     def s2():
         out = []
         for q in queries:
+            if flags["semantic_scholar"] and not any(flags["semantic_scholar"]):
+                flags["semantic_scholar"].append(False)      # refused twice already: do not wait through the rest
+                continue
             papers, ok = _search_s2(q, ss_api_key)
             out += papers
             flags["semantic_scholar"].append(ok)

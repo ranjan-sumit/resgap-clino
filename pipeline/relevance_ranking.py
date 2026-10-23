@@ -1,98 +1,57 @@
+"""Relevance ranking of search results against a gap, with no network call.
+
+The Gap Challenger used to rerank with a model hosted by NVIDIA. That model was retired (HTTP 410), the one before it
+was too, NVIDIA no longer lists a reranker at all, and the step failed silently, so it never ran. It also sent the gap and
+every candidate abstract to a third party. Candidate lists are short (a few dozen at most) and the next step is a model
+that reads the best ten, so a deterministic lexical ranking is enough: words shared with the gap, weighted by how rare
+they are among the candidates, with a bonus for shared two-word phrases. Nothing leaves the machine.
 """
-Embedding + reranking (Clinova Phase 3, Epic 3.5; resolves PRD FR-17/FR-18)
-via NVIDIA NIM hosted models, not local BGE-M3/BGE-reranker as
-04-ai-research-architecture.md's port table originally named. Same
-"superseded, not silently rewritten" treatment as ADR-002 (Neo4j ->
-ArcadeDB): this machine has no GPU, so local inference would be CPU-only
-and slow, and NVIDIA NIM already hosts equivalent embedding/reranking
-models on the same integrate.api.nvidia.com / ai.api.nvidia.com endpoints
-this app already calls for every other AI step, using the same
-NVIDIA_API_KEY already in .env -- zero new credentials, zero local model
-downloads.
+from __future__ import annotations
 
-Model choice, checked live against the real API before picking, not just
-docs (docs proved stale twice in a row here): BAAI's bge-m3 is hosted on
-NVIDIA NIM but scheduled for deprecation 2026-08-24. The next two models
-tried by name from NVIDIA's own docs/model-card pages --
-nvidia/llama-3.2-nv-embedqa-1b-v2 + nvidia/llama-3.2-nv-rerankqa-1b-v2,
-then nvidia/llama-3.2-nemoretriever-300m-embed-v2 -- both live-returned
-HTTP 410 Gone ("reached its end of life on 2026-05-18" / "2026-02-26")
-despite the docs pages showing no deprecation notice. Resolved by
-querying GET https://integrate.api.nvidia.com/v1/models (the same
-OpenAI-compatible model-listing endpoint every NVIDIA-hosted call in
-this app already has access to) for what is CURRENTLY actually hosted,
-then live-testing candidates from that list directly against the real
-API. nvidia/llama-nemotron-embed-1b-v2 (embedding, confirmed 200,
-2048-dim) and nvidia/llama-nemotron-rerank-1b-v2 (reranking, confirmed
-200) are what's live as of 2026-08-22 -- if NVIDIA retires these too,
-re-run the same GET /v1/models + live-probe process, don't guess a new
-name from a docs page again.
+import math
+import re
 
-No vector database (Qdrant or otherwise) is used or needed: Gap
-Challenger's candidate pool per gap challenge is Semantic Scholar/arXiv
-results for a handful of query families -- tens of candidates, not a
-corpus to index. NVIDIA's rerank endpoint accepts passages directly (up
-to 512); there is nothing here for a persistent ANN vector store to do
-that a single stateless rerank call doesn't already cover at this scale.
+RANKER = "token-overlap-v1"
 
-llama-3.2-nv-embedqa-1b-v2 is an asymmetric embedding model -- NVIDIA's
-API rejects a call missing `input_type` ("query" for the one search
-query being embedded, "passage" for documents being searched over).
-embed_texts() is exposed for completeness / a future embedding-similarity
-use, but Epic 3.5's actual current integration (pipeline/gap_challenger.py)
-only needs rerank_candidates() -- the rerank endpoint scores query-passage
-relevance directly without the caller computing cosine similarity itself.
-"""
-import requests
-from openai import OpenAI
-
-from utils.azure_client import NVIDIA_BASE_URL
-
-EMBEDDING_MODEL = "nvidia/llama-nemotron-embed-1b-v2"
-RERANK_MODEL = "nvidia/llama-nemotron-rerank-1b-v2"
-RERANK_URL = f"https://ai.api.nvidia.com/v1/retrieval/{RERANK_MODEL}/reranking"
-_TIMEOUT = 30
+_STOP = frozenset("""
+a an and are as at be been by for from has have in into is it its of on or that the their these this to was were which
+with without not no more most other than then there they we our can may also using use used study studies paper
+""".split())
+# words that frame a gap rather than describe a topic
+_FRAMING = frozenset("missing lack lacking absence unexplored unestablished unknown gap gaps future need needs novel".split())
 
 
-def embed_texts(texts: list[str], api_key: str, input_type: str = "passage") -> list[list[float]]:
-    """input_type must be "query" for a search query, "passage" for
-    documents -- see module docstring. Returns [] for empty input without
-    an API call (honest no-op, not a wasted request)."""
-    if not texts:
+def _tokens(text: str) -> list[str]:
+    return [t for t in re.findall(r"[a-z0-9]{3,}", (text or "").lower()) if t not in _STOP and t not in _FRAMING]
+
+
+def rerank_candidates(query: str, passages: list[str]) -> list[dict]:
+    """[{"index": i, "score": float}, ...] best first, `index` being the passage's original position. Empty for an
+    empty query or no passages. Ties keep the original order."""
+    if not query or not passages:
         return []
-    client = OpenAI(base_url=NVIDIA_BASE_URL, api_key=api_key)
-    response = client.embeddings.create(
-        input=texts, model=EMBEDDING_MODEL, extra_body={"input_type": input_type},
-    )
-    return [d.embedding for d in response.data]
-
-
-def rerank_candidates(query: str, passages: list[str], api_key: str) -> list[dict]:
-    """Returns [{"index": i, "score": float}, ...] sorted descending by
-    score, `index` referring to `passages`' original position. Raises on
-    a genuine HTTP failure (network error, non-2xx, timeout) rather than
-    swallowing it -- callers degrade to unranked order on failure,
-    matching this codebase's existing per-stage failure-isolation
-    convention (e.g. pipeline/gap_challenger.py's per-gap Challenger
-    isolation) rather than hiding the failure in this module."""
-    if not passages or not query:
-        return []
-    resp = requests.post(
-        RERANK_URL,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={
-            "model": RERANK_MODEL,
-            "query": {"text": query},
-            "passages": [{"text": p} for p in passages],
-            "truncate": "END",
-        },
-        timeout=_TIMEOUT,
-    )
-    resp.raise_for_status()
-    rankings = resp.json().get("rankings", [])
-    # Sort explicitly by descending logit -- the API does not guarantee the
-    # response is already in ranked order, and callers rely on this
-    # function's contract (first entry = most relevant). Ties keep the API's
-    # order (stable sort on the response sequence).
-    rankings = sorted(rankings, key=lambda r: r["logit"], reverse=True)
-    return [{"index": r["index"], "score": r["logit"]} for r in rankings]
+    q = _tokens(query)
+    if not q:
+        return [{"index": i, "score": 0.0} for i in range(len(passages))]
+    q_set = set(q)
+    q_bigrams = set(zip(q, q[1:]))
+    docs = [_tokens(p) for p in passages]
+    n = len(docs)
+    df: dict[str, int] = {}
+    for d in docs:
+        for t in set(d):
+            df[t] = df.get(t, 0) + 1
+    idf = lambda t: math.log(1 + (n + 1) / (df.get(t, 0) + 1))
+    scored = []
+    for i, d in enumerate(docs):
+        if not d:
+            scored.append({"index": i, "score": 0.0})
+            continue
+        tf: dict[str, int] = {}
+        for t in d:
+            tf[t] = tf.get(t, 0) + 1
+        overlap = sum(idf(t) * (1 + math.log(c)) for t, c in tf.items() if t in q_set)
+        phrases = sum(1 for bg in zip(d, d[1:]) if bg in q_bigrams)
+        score = (overlap + 1.5 * phrases) / math.sqrt(len(d))
+        scored.append({"index": i, "score": round(score, 4)})
+    return sorted(scored, key=lambda r: -r["score"])

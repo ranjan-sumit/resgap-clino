@@ -44,7 +44,8 @@ from pipeline.academic_search import (
     _search_semantic_scholar_with_status, _search_arxiv_with_status,
     _truncate_at_word_boundary, _strip_negation_framing,
 )
-from pipeline.relevance_ranking import rerank_candidates
+from pipeline import literature_scout as scout
+from pipeline.relevance_ranking import RANKER, rerank_candidates
 from pipeline.agent_config import GAP_CHALLENGER
 
 GAP_CHALLENGER_STAGE_VERSION = 1
@@ -66,7 +67,6 @@ TERMINAL_STATUSES = (
     "LIKELY_CLOSED", "CLOSED",
 )
 
-_PROVIDERS = ("semantic_scholar", "arxiv")
 
 
 def check_evidence_supported(gap: dict) -> bool:
@@ -177,98 +177,66 @@ def _filter_by_metadata(candidates: list, year_from: int = None, year_to: int = 
     return kept, dropped
 
 
-def _rerank_candidates(rerank_query: str, candidates: list, api_key: str) -> tuple[list, bool]:
-    """Best-effort reorder of `candidates` by relevance to `rerank_query`
-    via pipeline/relevance_ranking.py's NVIDIA-hosted reranker. Returns
-    (candidates, False) unchanged on any failure -- no API key, an HTTP
-    error, a timeout, or a candidate list too large/empty to bother with
-    -- so a reranker outage degrades the funnel to its pre-Epic-3.5
-    behavior rather than breaking it."""
-    if not api_key or not rerank_query or not candidates:
+def _rerank_candidates(rerank_query: str, candidates: list) -> tuple[list, bool]:
+    """Order `candidates` by relevance to `rerank_query` (pipeline/relevance_ranking.py: shared rare words and phrases,
+    computed here, nothing sent anywhere). Returns (candidates, False) unchanged when there is no query or no candidate."""
+    if not rerank_query or not candidates:
         return candidates, False
     passages = [f"{c.get('title', '')}. {c.get('abstract', '')}".strip() for c in candidates]
-    try:
-        rankings = rerank_candidates(rerank_query, passages, api_key)
-    except Exception:
-        return candidates, False
-    if not rankings:
-        return candidates, False
+    rankings = rerank_candidates(rerank_query, passages)
     ordered = [candidates[r["index"]] for r in rankings if r["index"] < len(candidates)]
-    # Any candidate the reranker's response didn't cover (shouldn't happen
-    # given `passages` is built 1:1 from `candidates`, but not assumed)
-    # stays included, appended after the ranked ones rather than dropped.
     covered = {r["index"] for r in rankings}
     ordered.extend(c for i, c in enumerate(candidates) if i not in covered)
     return ordered, True
 
 
+def _usable(paper: dict) -> bool:
+    title = (paper.get("title") or "").strip()
+    return len(title) >= 12 and title.lower().rstrip(".") not in scout._JUNK_TITLES
+
+
 def run_search_funnel(query_families: list[str], ss_api_key: str = "",
                        per_query_limit: int = 5,
-                       rerank_query: str = "", nvidia_api_key: str = "",
-                       year_from: int = None, year_to: int = None) -> dict:
-    """§5.1's SEARCHED state: "full query-planning -> query-expansion ->
-    multi-provider search -> dedup -> [metadata filter ->] rerank funnel
-    has executed" -- FR-15's exact stated order (union -> canonical dedup
-    -> metadata filter -> embedding retrieval -> rerank -> LLM relevance
-    review). Dedup is by normalized title, the same identity key the rest
-    of this codebase already uses for reference dedup
-    (pipeline/reference_extractor.py). Metadata filtering (Epic 3.3, see
-    _filter_by_metadata()) always drops implausible-year candidates and
-    optionally enforces a `year_from`/`year_to` range. Reranking (Epic
-    3.5, see pipeline/relevance_ranking.py) is additive and optional --
-    pass `rerank_query`/`nvidia_api_key` to enable it; omitting either
-    leaves order unchanged, same as before Epic 3.5.
+                       rerank_query: str = "",
+                       year_from: int = None, year_to: int = None, use_arxiv: bool = False) -> dict:
+    """§5.1's SEARCHED state: query families -> multi-provider search -> dedup -> metadata filter -> rerank. Providers
+    are Europe PMC and Semantic Scholar (the same two the literature check uses), plus arXiv for machine-learning
+    corpora. A record whose title is a section name ("Abstract") is discarded, duplicates are merged by DOI or title,
+    and the survivors are ranked against the gap's own text.
 
-    Returns a funnel dict recording every stage per §5.3's inspectability
-    requirement: query families used, providers queried, candidate count,
-    post-dedup count, post-metadata-filter count, post-rerank count,
-    whether reranking actually ran, and the final candidate list.
-    """
-    provider_success = {p: False for p in _PROVIDERS}
-    all_candidates = []
-    families_executed = 0
+    Returns a funnel dict recording every stage per §5.3's inspectability requirement."""
+    found, flags = scout._search_gap(list(query_families), ss_api_key, use_arxiv)
+    providers = list(flags) or ["europe_pmc", "semantic_scholar"]
+    provider_success = {name: any(flags.get(name, [])) for name in providers}
 
-    for query in query_families:
-        family_executed = False
-        ss_results, ss_ok = _search_semantic_scholar_with_status(query, limit=per_query_limit, api_key=ss_api_key)
-        if ss_ok:
-            provider_success["semantic_scholar"] = True
-            family_executed = True
-        all_candidates.extend(ss_results)
+    # a family counts as executed when at least one provider answered it
+    families_executed = sum(
+        1 for i in range(len(query_families))
+        if any(i < len(oks) and oks[i] for oks in flags.values()))
 
-        arxiv_results, arxiv_ok = _search_arxiv_with_status(query, limit=max(2, per_query_limit // 2))
-        if arxiv_ok:
-            provider_success["arxiv"] = True
-            family_executed = True
-        all_candidates.extend(arxiv_results)
-
-        if family_executed:
-            families_executed += 1
-
-    deduped = _dedupe_by_title(all_candidates)
+    usable = [p for p in found if _usable(p)]
+    deduped = scout._merge(usable)
     filtered, metadata_filtered_count = _filter_by_metadata(deduped, year_from=year_from, year_to=year_to)
-    reranked, rerank_used = _rerank_candidates(rerank_query, filtered, nvidia_api_key)
+    reranked, rerank_used = _rerank_candidates(rerank_query, filtered)
 
     providers_responded = sum(1 for ok in provider_success.values() if ok)
     query_family_execution_rate = (families_executed / len(query_families)) if query_families else 0.0
-    provider_response_rate = providers_responded / len(_PROVIDERS)
+    provider_response_rate = providers_responded / len(providers) if providers else 0.0
     # §5.2's exact formula: fraction of planned query families executed x
-    # fraction of queried providers that responded successfully. A query
-    # family counts as executed only if at least one provider call in it
-    # succeeded (ok=True) -- a family where every provider call failed was
-    # planned but not actually executed.
+    # fraction of queried providers that responded successfully.
     search_coverage_score = round(query_family_execution_rate * provider_response_rate, 3)
 
     return {
         "query_families": query_families,
-        "providers_queried": list(_PROVIDERS),
+        "providers_queried": providers,
         "provider_success": provider_success,
-        "candidate_count": len(all_candidates),
+        "candidate_count": len(found),
         "post_dedup_count": len(deduped),
         "post_metadata_filter_count": len(filtered),
         "metadata_filtered_count": metadata_filtered_count,
         "post_rerank_count": len(reranked),
         "rerank_used": rerank_used,
+        "ranker": RANKER,
         "candidates": reranked,
         "search_coverage_score": search_coverage_score,
     }
@@ -358,7 +326,7 @@ def _index_judgments_by_title(judgments: list) -> dict:
     return by_title
 
 
-def judge_candidates(gap: dict, candidates: list, client, max_candidates: int = 8) -> list:
+def judge_candidates(gap: dict, candidates: list, client, max_candidates: int = 10) -> list:
     """§5.1's CHALLENGED state: "relevance judgment and contradiction
     analysis have both completed against the searched results." One
     scoped LLM call for the whole candidate set (not one call per
@@ -423,10 +391,6 @@ def apply_decision_table(search_coverage_score: float, judged_candidates: list) 
     "never left to implicit LLM judgment." Returns {status, relevant_count,
     contradiction_count, converging_count} so the funnel stays inspectable
     (§5.3), not just the final verdict."""
-    if search_coverage_score < SEARCH_COVERAGE_THRESHOLD:
-        return {"status": "INSUFFICIENT_EVIDENCE", "relevant_count": 0,
-                "contradiction_count": 0, "converging_count": 0}
-
     relevant = [c for c in judged_candidates if c.get("relevant")]
     # B27-adjacent fix (2026-08-22): `contradicts_gap` means candidate
     # papers disagreeing WITH EACH OTHER (see _CHALLENGE_PROMPT) -- real
@@ -453,6 +417,14 @@ def apply_decision_table(search_coverage_score: float, judged_candidates: list) 
     contradiction_count = len(contradicting)
     converging_count = len(converging)
 
+    if search_coverage_score < SEARCH_COVERAGE_THRESHOLD:
+        # The search was incomplete. "Nobody has done this" cannot be concluded from it, but papers that directly do
+        # the work are evidence however many sources answered, so closure is still reported (never as CLOSED).
+        status = "LIKELY_CLOSED" if contradiction_count == 0 and converging_count >= LIKELY_CLOSED_MIN_CONVERGING \
+            else "INSUFFICIENT_EVIDENCE"
+        return {"status": status, "relevant_count": relevant_count,
+                "contradiction_count": contradiction_count, "converging_count": converging_count}
+
     if contradiction_count == 0 and converging_count >= CLOSED_MIN_CONVERGING:
         status = "CLOSED"
     elif contradiction_count == 0 and converging_count >= LIKELY_CLOSED_MIN_CONVERGING:
@@ -473,18 +445,16 @@ def apply_decision_table(search_coverage_score: float, judged_candidates: list) 
 
 
 def run_challenge(gap: dict, client, ss_api_key: str = "", domain_config: dict = None,
-                  nvidia_api_key: str = "") -> dict:
+                  use_arxiv: bool = False) -> dict:
     """Runs the full GENERATED -> ... -> terminal-status pipeline for one
     gap. Returns a dict with the lifecycle state reached, the terminal
     status (once CHALLENGED), and the full inspectable funnel (§5.3) --
     merged into the gap dict's own keys by the caller, not returned as a
     replacement for the gap.
 
-    `nvidia_api_key` is the key for the rerank endpoint -- NOT the LLM
-    `client`'s key (that one belongs to a different provider and gets a
-    401 from NVIDIA). Falls back to the NVIDIA_API_KEY env var. Does NOT mutate `gap` -- returns a fresh dict the caller merges in,
-    consistent with how deterministic_gap_patterns.py/graph_structural_
-    gaps.py build new dicts rather than mutating shared state."""
+    The search queries come from the literature check's query planner (short keyword queries, not the gap's title), with
+    the deterministic query families as the fallback. Does NOT mutate `gap` -- returns a fresh dict the caller merges in,
+    consistent with how deterministic_gap_patterns.py/graph_structural_gaps.py build new dicts rather than mutating shared state."""
     # Clinova Phase 4, Epic 4.4 (Scientific Lineage): makes the challenge
     # self-identifying -- gap.get("gap_id") is None only for a gap
     # predating Epic 4.4's identity fields, never fabricated.
@@ -499,7 +469,14 @@ def run_challenge(gap: dict, client, ss_api_key: str = "", domain_config: dict =
 
     result["challenger_state"] = "EVIDENCE_SUPPORTED"
 
-    query_families = generate_query_families(gap, domain_config)
+    query_families, planner_error = [], None
+    try:
+        planned, planner_error = scout.plan_queries([gap], client)
+        query_families = [q for q in (planned.get(gap.get("gap_id")) or []) if q]
+    except Exception as e:                                   # a planner failure must not stop the challenge
+        planner_error = f"query planner failed: {type(e).__name__}"
+    if not query_families:
+        query_families = generate_query_families(gap, domain_config)
     if not query_families:
         result["challenger_state"] = "SEARCH_PENDING"
         result["challenger_status"] = None
@@ -509,10 +486,8 @@ def run_challenge(gap: dict, client, ss_api_key: str = "", domain_config: dict =
     rerank_query = _strip_negation_framing(
         f"{gap.get('title', '')}. {gap.get('description', '')}".strip()
     )
-    rerank_key = nvidia_api_key or os.environ.get("NVIDIA_API_KEY", "")
     funnel = run_search_funnel(
-        query_families, ss_api_key=ss_api_key,
-        rerank_query=rerank_query, nvidia_api_key=rerank_key,
+        query_families, ss_api_key=ss_api_key, rerank_query=rerank_query, use_arxiv=use_arxiv,
     )
     result["challenger_state"] = "SEARCHED"
     result["challenge_funnel"] = {
@@ -525,6 +500,8 @@ def run_challenge(gap: dict, client, ss_api_key: str = "", domain_config: dict =
         "metadata_filtered_count": funnel["metadata_filtered_count"],
         "post_rerank_count": funnel["post_rerank_count"],
         "rerank_used": funnel["rerank_used"],
+        "ranker": funnel["ranker"],
+        "planner_error": planner_error,
         "search_coverage_score": funnel["search_coverage_score"],
     }
 

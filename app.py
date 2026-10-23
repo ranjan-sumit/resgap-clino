@@ -120,7 +120,6 @@ from pipeline.graph_persistence import (
     connect_ok as graph_store_connect_ok, save_graph_snapshot, load_graph_snapshot,
     list_graph_snapshots, diff_graph_snapshots, GRAPH_PERSISTENCE_VERSION,
 )
-from pipeline.relevance_ranking import EMBEDDING_MODEL, RERANK_MODEL
 from pipeline.coverage import paper_coverage
 from pipeline.run_lab import run_computational_lab
 from pipeline.param_extractor import (
@@ -1728,7 +1727,6 @@ if run_btn and _papers:
         enable_quality_engine=enable_quality_engine,
         override_quality_gate=override_quality_gate,
         enable_gap_challenger=enable_gap_challenger,
-        nvidia_api_key=api_key,
         enable_graph_persistence=True,   # SQLite makes this free; no longer an opt-in
         project_id=st.session_state.current_project_id,
         ss_api_key=ss_api_key,

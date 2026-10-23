@@ -60,7 +60,7 @@ from pipeline.proposal_generator import generate_proposals, review_proposals
 from pipeline.reference_extractor import (
     REFERENCE_STAGE_VERSION, extract_and_enrich_references, summarise_reference_corpus,
 )
-from pipeline.relevance_ranking import EMBEDDING_MODEL, RERANK_MODEL
+from pipeline.relevance_ranking import RANKER
 from pipeline.wiki_compiler import build_wiki
 from utils.database import DEFAULT_PROJECT_ID, record_artifact, record_run_manifest, save_run
 from utils import project_store
@@ -107,7 +107,6 @@ class RunOptions:
     enable_gap_challenger: bool = False
     enable_graph_persistence: bool = False
     ss_api_key: str = ""
-    nvidia_api_key: str = ""              # relevance reranking in the Gap Challenger
     models: dict | None = None            # ModelConfig.to_dict(): which model did which job
     project_id: str | None = None         # None = the default project
     domain_config: dict | None = None
@@ -748,19 +747,29 @@ def _run_full_pipeline(
         if options.enable_gap_challenger:
             progress("Stage 5b — Gap Challenger (search coverage + terminal status)…", 62)
             client.set_stage("Stage 5b — Gap Challenger")
-            for i, gap in enumerate(validated_gaps):
-                progress(f"Stage 5b — Challenging gap {i+1}/{len(validated_gaps)}…", 62)
+            _use_arxiv = bool(_study_types & set(_ARXIV_STUDY_TYPES))
+
+            def _challenge(gap):
                 try:
-                    gap.update(run_challenge(
-                        gap, client, ss_api_key=(options.ss_api_key or "").strip(),
-                        domain_config=domain_cfg,
-                        nvidia_api_key=(options.nvidia_api_key or "").strip(),
-                    ))
+                    return run_challenge(gap, client, ss_api_key=(options.ss_api_key or "").strip(),
+                                         domain_config=domain_cfg, use_arxiv=_use_arxiv), None
                 except Exception as e:
+                    return None, e
+
+            # Each gap needs a planner call, two searches and a judge call, about 20-40 s; they are independent, so
+            # three run at once (Semantic Scholar requests stay paced by a shared lock).
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=3) as _pool:
+                _outcomes = list(_pool.map(_challenge, validated_gaps))
+            for i, (gap, (outcome, error)) in enumerate(zip(validated_gaps, _outcomes)):
+                progress(f"Stage 5b — Challenged gap {i+1}/{len(validated_gaps)}", 62)
+                if error is None:
+                    gap.update(outcome)
+                else:
                     # Per-gap failure degrades that gap only.
                     gap["challenger_state"] = None
                     gap["challenger_status"] = None
-                    gap["challenger_error"] = str(e)
+                    gap["challenger_error"] = str(error)
             statuses = [g.get("challenger_status") for g in validated_gaps if g.get("challenger_status")]
             status_counts = {s: statuses.count(s) for s in sorted(set(statuses))}
             _trace("Stage 5b — Gap Challenger",
@@ -921,7 +930,7 @@ def _run_full_pipeline(
             proposals=None if gate_blocked else proposals,
             tooling={
                 "graph_builder": str(GRAPH_PERSISTENCE_VERSION) if options.enable_graph_persistence else None,
-                "embedding_model": EMBEDDING_MODEL if options.enable_gap_challenger else None,
+                "embedding_model": None,                    # no embedding model is used
                 "model_bundle": _model_bundle(options),
             },
             gate_blocked=gate_blocked,
@@ -936,8 +945,8 @@ def _run_full_pipeline(
             },
             reference_resolver_version=str(REFERENCE_STAGE_VERSION),
             model_bundle_version=_model_bundle(options),
-            embedding_model_version=EMBEDDING_MODEL if options.enable_gap_challenger else None,
-            reranker_version=RERANK_MODEL if options.enable_gap_challenger else None,
+            embedding_model_version=None,
+            reranker_version=RANKER if options.enable_gap_challenger else None,
             graph_version=str(GRAPH_PERSISTENCE_VERSION) if options.enable_graph_persistence else None,
             search_strategy_version=str(GAP_CHALLENGER_STAGE_VERSION) if options.enable_gap_challenger else None,
             academic_search_date=datetime.now().date().isoformat(),
