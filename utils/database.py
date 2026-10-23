@@ -801,16 +801,25 @@ def get_run_manifests_bulk(run_ids: list[str]) -> dict[str, dict]:
     return {r["run_id"]: _decode_json_cols(r, "run_manifests") for r in rows}
 
 
+def _purge_run(conn, run_id: str) -> None:
+    """Everything the database holds for one run. Some tables cascade from `runs`; the rest (the run manifest, the lineage
+    artifacts, the graph snapshot with its quoted evidence, background-job records) are keyed by run_id only and would
+    otherwise outlive the run they describe. Any table with a `run_id` column is cleared, so a table added later is covered."""
+    for (table,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").fetchall():
+        cols = [c[1] for c in conn.execute(f'PRAGMA table_info("{table}")')]
+        if "run_id" in cols:
+            conn.execute(f'DELETE FROM "{table}" WHERE run_id = ?', (run_id,))
+    conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+
+
 def delete_run(run_id: str) -> None:
     init_db()
     conn = _get_conn()
-    cur = conn.cursor()
-    # papers.run_id is ON DELETE CASCADE and _get_conn() turns foreign_keys
-    # on, so this manual delete is defensive-but-redundant.
-    cur.execute("DELETE FROM papers WHERE run_id = ?", (run_id,))
-    cur.execute("DELETE FROM runs   WHERE id     = ?", (run_id,))
-    conn.commit()
-    conn.close()
+    try:
+        _purge_run(conn, run_id)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def get_run_papers(run_id: str) -> list[dict]:
@@ -1095,10 +1104,12 @@ def delete_project_rows(project_id: str) -> dict:
     try:
         run_ids = [r["id"] for r in conn.execute("SELECT id FROM runs WHERE project_id = ?", (project_id,))]
         for rid in run_ids:
-            conn.execute("DELETE FROM papers WHERE run_id = ?", (rid,))
-            conn.execute("DELETE FROM feedback WHERE run_id = ?", (rid,))
-            conn.execute("DELETE FROM run_files WHERE run_id = ?", (rid,))
-        n_runs = conn.execute("DELETE FROM runs WHERE project_id = ?", (project_id,)).rowcount
+            _purge_run(conn, rid)
+        n_runs = len(run_ids)
+        for (table,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").fetchall():
+            cols = [c[1] for c in conn.execute(f'PRAGMA table_info("{table}")')]
+            if "project_id" in cols and table not in ("projects", "project_files"):
+                conn.execute(f'DELETE FROM "{table}" WHERE project_id = ?', (project_id,))
         conn.execute("DELETE FROM feedback WHERE project_id = ?", (project_id,))
         n_files = conn.execute("DELETE FROM project_files WHERE project_id = ?", (project_id,)).rowcount
         conn.execute("DELETE FROM run_jobs WHERE project_id = ?", (project_id,))

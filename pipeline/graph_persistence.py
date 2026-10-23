@@ -23,11 +23,12 @@ destroy the last good snapshot or leave a half-written one.
 """
 import json
 import re
+import unicodedata
 from datetime import datetime, timezone
 
 from utils import database as db
 
-GRAPH_PERSISTENCE_VERSION = 1
+GRAPH_PERSISTENCE_VERSION = 2     # 2: a snapshot keeps every field of an entity and a relationship (page, evidence ids, ...)
 
 
 def connect_ok(config: dict = None) -> tuple[bool, str]:
@@ -74,10 +75,8 @@ def save_graph_snapshot(run_id: str, run_name: str, graph: dict, config: dict = 
     id_by_key = {}
     for e in entities:
         eid = e.get("id") or e.get("name", "")
-        stored_entities.append({
-            "id": eid, "name": e.get("name", ""), "type": e.get("type", ""),
-            "importance": e.get("importance", ""), "papers": e.get("papers", []),
-        })
+        stored_entities.append({**e, "id": eid, "name": e.get("name", ""), "type": e.get("type", ""),
+                                "importance": e.get("importance", ""), "papers": e.get("papers", [])})
         id_by_key[eid] = eid
         id_by_key.setdefault(_normalize_name(e.get("name", "")), eid)
 
@@ -87,10 +86,8 @@ def save_graph_snapshot(run_id: str, run_name: str, graph: dict, config: dict = 
         tgt = id_by_key.get(r.get("target", "")) or id_by_key.get(_normalize_name(str(r.get("target", ""))))
         if not src or not tgt:
             continue  # relationship references an entity not in this graph -- skip, don't guess
-        stored_relationships.append({
-            "source": src, "target": tgt, "relation": r.get("relation", ""),
-            "paper": r.get("paper", ""), "evidence": r.get("evidence", ""),
-        })
+        stored_relationships.append({**r, "source": src, "target": tgt, "relation": r.get("relation", ""),
+                                     "paper": r.get("paper", ""), "evidence": r.get("evidence", "")})
 
     conn = db._get_conn()
     try:
@@ -106,7 +103,7 @@ def save_graph_snapshot(run_id: str, run_name: str, graph: dict, config: dict = 
                    version = EXCLUDED.version, build_status = EXCLUDED.build_status,
                    quality_score = EXCLUDED.quality_score, graph_json = EXCLUDED.graph_json""",
             (run_id, run_name, datetime.now(timezone.utc).isoformat(),
-             len(entities), len(relationships), GRAPH_PERSISTENCE_VERSION,
+             len(entities), len(stored_relationships), GRAPH_PERSISTENCE_VERSION,
              quality.get("build_status"), quality.get("quality_score"),
              json.dumps({"entities": stored_entities, "relationships": stored_relationships},
                         default=str)),
@@ -116,7 +113,8 @@ def save_graph_snapshot(run_id: str, run_name: str, graph: dict, config: dict = 
         conn.close()
 
     return {"run_id": run_id, "entity_count": len(entities),
-            "relationship_count": len(stored_relationships)}
+            "relationship_count": len(stored_relationships),
+            "skipped_relationships": len(relationships) - len(stored_relationships)}
 
 
 def load_graph_snapshot(run_id: str, config: dict = None) -> dict:
@@ -159,42 +157,95 @@ def list_graph_snapshots(config: dict = None) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+_PAREN = re.compile(r"\(([^()]*)\)")
+
+
+def _fold(text: str) -> str:
+    """Lower case, accents and punctuation removed, simple plurals folded: "Interleukin-8" and "interleukin 8" agree."""
+    text = unicodedata.normalize("NFKD", str(text or ""))
+    text = "".join(ch for ch in text if not unicodedata.combining(ch)).lower()
+    text = re.sub(r"[^a-z0-9]+", " ", text).strip()
+    return " ".join(w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w for w in text.split())
+
+
+def name_keys(name: str) -> set[str]:
+    """The ways one entity name can be recognised: the name itself, the name without a bracketed part, and the bracketed
+    part when it is an abbreviation. "Ciliary beat frequency (CBF)" is recognised as "Ciliary Beat Frequency" and as "CBF"."""
+    name = str(name or "")
+    keys = {_fold(name)}
+    outside = _fold(_PAREN.sub(" ", name))
+    if outside:
+        keys.add(outside)
+    for inner in _PAREN.findall(name):
+        folded = _fold(inner)
+        if folded and (inner.strip().isupper() or len(folded) <= 8):
+            keys.add(folded)
+    return {k for k in keys if k}
+
+
+def _match_entities(entities_a: list, entities_b: list) -> tuple[dict, dict]:
+    """(index in A -> index in B, index in B -> index in A) for entities that are the same concept. An entity is claimed by
+    at most one partner; a key that two entities of one graph share is not used to match (it would be ambiguous)."""
+    def index(entities):
+        by_key: dict = {}
+        for i, e in enumerate(entities):
+            for k in name_keys(e.get("name", "")):
+                by_key.setdefault(k, []).append(i)
+        return by_key
+    by_a, by_b = index(entities_a), index(entities_b)
+    a_to_b, b_to_a = {}, {}
+    for pass_exact in (True, False):                    # exact folded names first, then the looser keys
+        for i, e in enumerate(entities_a):
+            if i in a_to_b or not e.get("name"):
+                continue
+            keys = [_fold(e["name"])] if pass_exact else sorted(name_keys(e["name"]))
+            for k in keys:
+                cands = [j for j in by_b.get(k, []) if j not in b_to_a]
+                if len(cands) == 1 and len(by_a.get(k, [])) == 1:
+                    a_to_b[i], b_to_a[cands[0]] = cands[0], i
+                    break
+    return a_to_b, b_to_a
+
+
 def diff_graph_snapshots(run_id_a: str, run_id_b: str, config: dict = None) -> dict:
-    """The actual cross-run payoff Epic 3.1 exists for: which entities
-    and relationships are new in B vs. A, which disappeared, and which
-    are common to both -- matched by normalized entity name (the same
-    identity key used throughout this codebase's dedup logic elsewhere),
-    since raw entity ids are never comparable across separate saves."""
+    """The actual cross-run payoff Epic 3.1 exists for: which entities and relationships are new in B vs. A, which
+    disappeared, and which are common to both. Entities are matched by name after folding case, punctuation, plurals and
+    bracketed abbreviations; a pair matched under different spellings is listed in `entities_renamed`. Relationships are
+    compared between matched entities, so the same relationship between differently-spelled entities is common."""
     graph_a = load_graph_snapshot(run_id_a, config)
     graph_b = load_graph_snapshot(run_id_b, config)
+    ents_a = [e for e in graph_a["entities"] if e.get("name")]
+    ents_b = [e for e in graph_b["entities"] if e.get("name")]
+    a_to_b, b_to_a = _match_entities(ents_a, ents_b)
 
-    names_a = {_normalize_name(e["name"]): e for e in graph_a["entities"] if e.get("name")}
-    names_b = {_normalize_name(e["name"]): e for e in graph_b["entities"] if e.get("name")}
+    common = [ents_a[i]["name"] for i in a_to_b]
+    renamed = [(ents_a[i]["name"], ents_b[j]["name"]) for i, j in a_to_b.items()
+               if _normalize_name(ents_a[i]["name"]) != _normalize_name(ents_b[j]["name"])]
+    only_a = [e["name"] for i, e in enumerate(ents_a) if i not in a_to_b]
+    only_b = [e["name"] for j, e in enumerate(ents_b) if j not in b_to_a]
 
-    only_in_a = sorted(set(names_a) - set(names_b))
-    only_in_b = sorted(set(names_b) - set(names_a))
-    common = sorted(set(names_a) & set(names_b))
+    # a canonical label for each entity: its partner's index if matched, so both sides use the same node name
+    label_a = {e.get("id"): (f"#{a_to_b[i]}" if i in a_to_b else f"A:{_fold(e['name'])}") for i, e in enumerate(ents_a)}
+    label_b = {e.get("id"): (f"#{j}" if j in b_to_a else f"B:{_fold(e['name'])}") for j, e in enumerate(ents_b)}
+    name_a = {e.get("id"): e["name"] for e in ents_a}
+    name_b = {e.get("id"): e["name"] for e in ents_b}
 
-    def _rel_signature(rels, entities_by_norm_id):
-        sigs = set()
+    def sigs(rels, labels, names):
+        out = {}
         for r in rels:
-            src = entities_by_norm_id.get(r.get("source", ""))
-            tgt = entities_by_norm_id.get(r.get("target", ""))
-            if src and tgt:
-                sigs.add((_normalize_name(src), _normalize_name(tgt), r.get("relation", "")))
-        return sigs
-
-    id_to_name_a = {e.get("id"): e.get("name", "") for e in graph_a["entities"]}
-    id_to_name_b = {e.get("id"): e.get("name", "") for e in graph_b["entities"]}
-    rel_sigs_a = _rel_signature(graph_a["relationships"], id_to_name_a)
-    rel_sigs_b = _rel_signature(graph_b["relationships"], id_to_name_b)
+            s_, t_ = labels.get(r.get("source")), labels.get(r.get("target"))
+            if s_ and t_:
+                out.setdefault((s_, t_, r.get("relation", "")), (_normalize_name(names[r["source"]]), _normalize_name(names[r["target"]]), r.get("relation", "")))
+        return out
+    sa, sb = sigs(graph_a["relationships"], label_a, name_a), sigs(graph_b["relationships"], label_b, name_b)
 
     return {
         "run_id_a": run_id_a, "run_id_b": run_id_b,
-        "entities_only_in_a": [names_a[n]["name"] for n in only_in_a],
-        "entities_only_in_b": [names_b[n]["name"] for n in only_in_b],
-        "entities_common": [names_a[n]["name"] for n in common],
-        "relationships_only_in_a": sorted(rel_sigs_a - rel_sigs_b),
-        "relationships_only_in_b": sorted(rel_sigs_b - rel_sigs_a),
-        "relationships_common": sorted(rel_sigs_a & rel_sigs_b),
+        "entities_only_in_a": sorted(only_a, key=str.lower),
+        "entities_only_in_b": sorted(only_b, key=str.lower),
+        "entities_common": sorted(common, key=str.lower),
+        "entities_renamed": sorted(renamed),
+        "relationships_only_in_a": sorted(v for k, v in sa.items() if k not in sb),
+        "relationships_only_in_b": sorted(v for k, v in sb.items() if k not in sa),
+        "relationships_common": sorted(v for k, v in sa.items() if k in sb),
     }

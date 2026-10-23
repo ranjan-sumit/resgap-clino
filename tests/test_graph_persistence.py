@@ -63,7 +63,7 @@ class SaveLoadTests(_DbTestCase):
                                "paper": "P1", "evidence": "..."}],
         }
         summary = save_graph_snapshot("run_1", "Test Run", graph)
-        self.assertEqual(summary, {"run_id": "run_1", "entity_count": 2, "relationship_count": 1})
+        self.assertEqual(summary, {"run_id": "run_1", "entity_count": 2, "relationship_count": 1, "skipped_relationships": 0})
 
         loaded = load_graph_snapshot("run_1")
         self.assertEqual([e["name"] for e in loaded["entities"]], ["ADHD", "Internalising problems"])

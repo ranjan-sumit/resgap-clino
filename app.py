@@ -937,12 +937,24 @@ def _render_graph_history(project_run_ids: set) -> None:
                 f"{len(diff['relationships_only_in_a'])} only in the first · "
                 f"{len(diff['relationships_only_in_b'])} only in the second"
             )
+            if diff.get("entities_renamed"):
+                a_, b_ = diff["entities_renamed"][0]
+                st.caption(f"{len(diff['entities_renamed'])} common entit"
+                           f"{'y is' if len(diff['entities_renamed']) == 1 else 'ies are'} worded differently in the two runs "
+                           f"(for example “{a_}” and “{b_}”). Different words for the same idea that cannot be matched "
+                           "by spelling alone (such as an abbreviation and its long form) still count as different.")
             for key, rid in (("entities_only_in_a", id_a), ("entities_only_in_b", id_b)):
                 if diff[key]:
                     st.markdown("")
                     _section_label("Entities only in the " + ("first" if rid == id_a else "second") + " graph")
                     for name_ in diff[key][:15]:
                         _item(f"🔹 {esc(name_)}")
+            for key, rid in (("relationships_only_in_a", id_a), ("relationships_only_in_b", id_b)):
+                if diff[key]:
+                    st.markdown("")
+                    _section_label("Relationships only in the " + ("first" if rid == id_a else "second") + " graph")
+                    for s_, t_, r_ in diff[key][:10]:
+                        _item(f"↔ {esc(s_)} — {esc(r_)} → {esc(t_)}")
         except Exception as e:
             show_error("Diff failed", exc=e)
 
