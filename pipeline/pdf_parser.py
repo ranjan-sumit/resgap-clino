@@ -57,6 +57,25 @@ def _detect_section(text: str) -> str | None:
     return None
 
 
+_X_TOLERANCE = 1.5            # pdfplumber's default (3) fuses words in tightly set PDFs ("Rowe,S.M.;Miller,S.;...")
+_RUN_TOGETHER_SHARE = 0.03    # more than this share of words 18+ letters long means the spaces were lost
+
+
+def _words_run_together(text: str) -> bool:
+    words = text.split()
+    return len(words) >= 40 and sum(1 for w in words if re.search(r"[A-Za-z]{18,}", w)) / len(words) > _RUN_TOGETHER_SHARE
+
+
+def _page_text(page) -> str:
+    """One page's text with spaces between words. If the words still run together at the usual spacing
+    tolerance, the page is read again with a tighter one."""
+    visible = page.filter(visible_char)
+    text = visible.extract_text(x_tolerance=_X_TOLERANCE) or ""
+    if _words_run_together(text):
+        text = visible.extract_text(x_tolerance=1.0) or text
+    return text
+
+
 def _extract_text_by_section(pdf_path: str) -> dict:
     """
     Use pdfplumber to extract text, grouping content by detected section headers.
@@ -69,8 +88,7 @@ def _extract_text_by_section(pdf_path: str) -> dict:
     removed = 0
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            page_text = page.filter(visible_char).extract_text() or ""
-            page_text, n = strip_invisible(page_text)
+            page_text, n = strip_invisible(_page_text(page))
             removed += n
             for line in page_text.split("\n"):
                 sec = _detect_section(line)

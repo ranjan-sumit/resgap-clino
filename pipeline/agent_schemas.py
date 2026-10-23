@@ -125,6 +125,14 @@ SCHEMAS: dict[str, dict] = {
                        "verdict": {"type": "string", "enum": ["accept", "revise", "reject"]},
                        "issues": _STRINGS, "required_changes": _STR, "reason": _STR},
     },
+    # Reference parser: one structured reference
+    "reference": {
+        "type": "object",
+        "required": ["title"],
+        "properties": {"title": _NONEMPTY, "authors": {"type": ["array", "string"]}, "year": {"type": ["numlike", "null"]},
+                       "doi": {"type": ["string", "null"]}, "journal": {"type": ["string", "null"]},
+                       "arxiv_id": {"type": ["string", "null"]}},
+    },
     # Parameter extractor: one parameter
     "parameter": {
         "type": "object",

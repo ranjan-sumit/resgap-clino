@@ -456,6 +456,7 @@ def _run_full_pipeline(
             max_refs_per_paper=options.ref_limit,
             progress_callback=ref_upd,
             return_diagnostics=True,
+            ss_api_key=(options.ss_api_key or ""),
         )
         summary = summarise_reference_corpus(ref_papers)
         _trace("Stage 1B — Reference Extraction",

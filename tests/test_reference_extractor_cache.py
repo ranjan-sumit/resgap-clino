@@ -52,6 +52,12 @@ _OPENALEX_HIT = {
 }
 
 
+def _openalex_echo(url, params=None, **kwargs):
+    # OpenAlex answers with the paper that was asked for: a title search is only accepted when the title matches.
+    hit = {"results": [dict(_OPENALEX_HIT["results"][0], title=(params or {}).get("search", "A Cached Paper"))]}
+    return _FakeResponse(200, hit)
+
+
 class EnrichReferenceCacheTests(unittest.TestCase):
     def setUp(self):
         self.schema = new_test_schema()
@@ -79,7 +85,7 @@ class EnrichReferenceCacheTests(unittest.TestCase):
     def test_title_only_ref_is_cached_under_title_identity(self):
         ref = {"title": "A Unique Title About Something"}
         with patch("pipeline.reference_extractor.requests.get") as mock_get:
-            mock_get.return_value = _FakeResponse(200, _OPENALEX_HIT)
+            mock_get.side_effect = _openalex_echo
             first = enrich_reference(ref, delay=0)
             self.assertEqual(first["tier"], 2)
             first_call_count = mock_get.call_count
@@ -171,7 +177,7 @@ class EnrichReferenceCacheTests(unittest.TestCase):
             first_call_count = mock_get.call_count
             self.assertGreater(first_call_count, 0)
 
-            mock_get.return_value = _FakeResponse(200, _OPENALEX_HIT)
+            mock_get.side_effect = _openalex_echo
             enrich_reference(title_ref, delay=0)
             self.assertGreater(mock_get.call_count, first_call_count)  # real second lookup, not a false hit
 
