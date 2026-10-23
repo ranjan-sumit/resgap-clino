@@ -46,6 +46,7 @@ _STATUS_BY_LEVEL = {
     "ss_paper_id": "ACCEPTED",
     "arxiv_id": "ACCEPTED",
     "title_author_year": "ACCEPTED",
+    "title_year": "ACCEPTED",
     "title_only_partial": "QUARANTINED",
     "none": "UNRESOLVED",
 }
@@ -126,6 +127,12 @@ def resolve_canonical_identity(ref: dict) -> dict:
         composite = f"title:{norm_title}|author:{author}|year:{year}"
         return {"identity_key": hashlib.sha256(composite.encode()).hexdigest(),
                 "identity_level": "title_author_year"}
+
+    if norm_title and year and len(norm_title.split()) >= 3:
+        # The reference exactly as the paper wrote it (title and year, no author captured). It is kept, and two
+        # records with the same title and year merge; it is not claimed to be verified.
+        return {"identity_key": hashlib.sha256(f"title:{norm_title}|year:{year}".encode()).hexdigest(),
+                "identity_level": "title_year"}
 
     if norm_title:
         # Partial match only (title alone, missing author and/or year) --

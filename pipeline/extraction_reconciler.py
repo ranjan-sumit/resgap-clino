@@ -15,7 +15,12 @@ measure, and prevent silent information loss" requirement.
 """
 import re
 
-RECONCILIATION_STAGE_VERSION = 1
+RECONCILIATION_STAGE_VERSION = 2
+
+# A paper's own DOI is printed at the start (title block, header or footer of page one). A DOI found only later is
+# a cited paper's, and must not be reported as this paper's identity.
+FRONT_MATTER_FRACTION = 0.25
+FRONT_MATTER_MIN_CHARS = 6000
 
 # Deterministic DOI pattern -- same shape used across CrossRef/Semantic
 # Scholar/OpenAlex metadata (10.NNNN/suffix).
@@ -39,6 +44,10 @@ def _extract_doi_candidate(text: str) -> tuple[str | None, float | None]:
     if not match:
         return None, None
     return _clean_doi(match.group()), match.start() / len(text)
+
+
+def _in_front_matter(position_fraction: float | None, n_chars: int) -> bool:
+    return position_fraction is not None and position_fraction * n_chars <= max(FRONT_MATTER_MIN_CHARS, FRONT_MATTER_FRACTION * n_chars)
 
 
 def reconcile_paper(pymupdf_result: dict, docling_result: dict, filename: str) -> dict:
@@ -80,6 +89,15 @@ def reconcile_paper(pymupdf_result: dict, docling_result: dict, filename: str) -
     # can still be recovered intact from the other.
     doi_pymupdf, pos_pymupdf = _extract_doi_candidate(pymupdf_text)
     doi_docling, pos_docling = _extract_doi_candidate(docling_text)
+    # Every candidate stays listed below, but only one found in the front matter can be the paper's own DOI: the first
+    # DOI in a paper with none of its own is a cited paper's.
+    late = {"pymupdf": doi_pymupdf if doi_pymupdf and not _in_front_matter(pos_pymupdf, pymupdf_chars) else None,
+            "docling": doi_docling if doi_docling and not _in_front_matter(pos_docling, docling_chars) else None}
+    all_candidates = {"pymupdf": doi_pymupdf, "docling": doi_docling}
+    if late["pymupdf"]:
+        doi_pymupdf, pos_pymupdf = None, None
+    if late["docling"]:
+        doi_docling, pos_docling = None, None
 
     if doi_pymupdf and doi_docling and doi_pymupdf == doi_docling:
         doi_value, doi_confidence, doi_source = doi_pymupdf, "high", "both"
@@ -135,8 +153,8 @@ def reconcile_paper(pymupdf_result: dict, docling_result: dict, filename: str) -
         "source": doi_source,
         "confidence": doi_confidence,
         "candidates": [
-            {"source": "pymupdf", "value": doi_pymupdf},
-            {"source": "docling", "value": doi_docling},
+            {"source": "pymupdf", "value": all_candidates["pymupdf"], "front_matter": not late["pymupdf"]},
+            {"source": "docling", "value": all_candidates["docling"], "front_matter": not late["docling"]},
         ],
         "needs_llm_recovery": doi_value is None,
     }

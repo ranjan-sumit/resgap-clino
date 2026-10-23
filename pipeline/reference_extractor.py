@@ -788,6 +788,8 @@ def extract_and_enrich_references(
         "doi_entries": 0,
         "enriched": 0,
         "title_only": 0,
+        "resolved_no_abstract": 0,       # found by a lookup (Tier 2) but the source had no abstract
+        "unmatched": 0,                  # no lookup found them (Tier 3: the citation as written)
         "unresolved": 0,
         "duplicates_skipped": 0,
         "errors": [],
@@ -923,6 +925,7 @@ def extract_and_enrich_references(
                 diagnostics["enriched"] += 1
             else:
                 diagnostics["title_only"] += 1
+                diagnostics["resolved_no_abstract" if enriched.get("tier") == 2 else "unmatched"] += 1
             all_refs.append(enriched)
         pool.shutdown(wait=True)
 

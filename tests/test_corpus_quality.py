@@ -105,8 +105,8 @@ class PaperCompletenessTests(unittest.TestCase):
         result = score_paper_completeness(
             _reconciled(tables=[{"content": "t"}]), _wiki_page(), ref_count=5, has_figures=True,
         )
-        self.assertEqual(result["achievable_field_count"], 11)
-        self.assertAlmostEqual(result["achievable_completeness_score"], 10 / 11, places=3)
+        self.assertEqual(result["achievable_field_count"], 13)
+        self.assertAlmostEqual(result["achievable_completeness_score"], 10 / 13, places=3)
         self.assertGreater(result["achievable_completeness_score"], result["completeness_score"])
 
 
@@ -207,7 +207,7 @@ class CorpusQualityAggregationTests(unittest.TestCase):
         ref_papers = [{"doi": f"10.1/{i}"} for i in range(5)]
         metrics = compute_corpus_quality([good_paper], {}, ref_papers=ref_papers)
 
-        self.assertAlmostEqual(metrics["achievable_completeness"], 10 / 11, places=3)
+        self.assertAlmostEqual(metrics["achievable_completeness"], 10 / 13, places=3)
         self.assertAlmostEqual(metrics["extraction_completeness"], 10 / 16, places=3)  # still reported, honestly, unchanged
         self.assertEqual(metrics["quality_gate"], "PASS")  # correctly PASSes on the achievable ceiling
 

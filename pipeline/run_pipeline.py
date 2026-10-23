@@ -524,16 +524,20 @@ def _run_full_pipeline(
             try:
                 docling_result = extract_with_docling(tmp_path, paper.get("filename", papers[i][0]))
                 reconciled = reconcile_paper(paper, docling_result, paper.get("filename", ""))
-            except Exception:
+            except Exception as e:
                 # A second-parser failure degrades this paper's score rather than
                 # aborting the run -- its doi/tables fields score as
                 # not-extracted, correctly lowering completeness instead of
                 # pretending nothing was lost.
                 reconciled = {"fields": {}}
+                warn(f"The structural cross-check failed for '{paper.get('filename', '?')}' ({type(e).__name__}); "
+                     "its DOI and tables could not be checked.")
             docling_results.append(docling_result)
+            _per_paper = {d.get("filename"): d.get("raw_entries", 0) for d in ref_diagnostics.get("papers", [])}
             paper_scores.append(score_paper_completeness(
                 reconciled, wiki_page,
-                ref_count=len(ref_papers), has_figures=bool(paper.get("figures")),
+                ref_count=_per_paper.get(paper.get("filename"), len(ref_papers) if not _per_paper else 0),
+                has_figures=bool(paper.get("figures")), paper=paper,
             ))
 
         corpus_quality_metrics = compute_corpus_quality(

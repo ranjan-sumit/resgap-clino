@@ -15,6 +15,7 @@ path exists" into the same signal as "extraction found nothing" would
 itself be exactly the kind of silent information loss this engine exists
 to detect (Problem A).
 """
+import re
 from datetime import datetime, timezone
 
 # The 16-field scientific checklist, 05-data-architecture.md §4.
@@ -27,7 +28,7 @@ FIELD_CHECKLIST = [
 # Fields with genuinely no extraction path anywhere in the pipeline today --
 # always "not_extracted", not paper-specific. Revisit as Phase 2's Evidence
 # Objects (05-data-architecture.md §8) add real extraction for these.
-_NOT_YET_EXTRACTED_ANYWHERE = ("authors", "abstract", "introduction", "metrics", "conclusion")
+_NOT_YET_EXTRACTED_ANYWHERE = ("authors", "metrics", "models_interventions")
 
 # Design fix, 2026-08-21: the quality gate must not penalize a paper for
 # fields NOTHING in the pipeline can extract yet -- with 5 of 16 fields in
@@ -62,6 +63,47 @@ class QualityGateBlockedError(Exception):
         self.metrics = metrics
 
 
+# "Abstract:", "Abstract—", "Abstract" alone on a line, and the letter-spaced "A B S T R A C T" many journals print
+_ABSTRACT_RE = re.compile(r"^\s*a\s*b\s*s\s*t\s*r\s*a\s*c\s*t\s*(?:[:.\-\u2014\u2013]|$)", re.IGNORECASE | re.MULTILINE)
+_FRONT_CHARS = 8000
+_TABLE_CAPTION_RE = re.compile(r"^\s*Table\s+(\d+)\b", re.IGNORECASE | re.MULTILINE)
+
+
+def _headings(paper: dict) -> list[str]:
+    """Lower-cased section headings of a parsed paper, numbering removed: from the structural parser's
+    page-tagged segments and from the keyword splitter's section names."""
+    heads = [s.get("text", "") for s in (paper.get("text_segments") or []) if s.get("label") == "section_header"]
+    heads += [k for k in (paper.get("sections") or {}) if k != "_header"]
+    # numbering is "3.", "3.2", "3.2." or an upper-case roman numeral ("IV."); the word that follows is kept
+    return [re.sub(r"^(?:\d+(?:\.\d+)*\.?\s+|[IVXLC]+[.)]\s+)", "", h.strip()).strip().lower().rstrip(".:")
+            for h in heads]
+
+
+def table_captions(paper: dict) -> list[str]:
+    """Distinct "Table N" captions in the paper's text (borderless tables have no ruling lines to detect, but
+    their captions show a table exists)."""
+    text = "\n".join(s.get("text", "") for s in (paper.get("text_segments") or [])) or paper.get("full_text", "") or ""
+    return sorted({m.group(1) for m in _TABLE_CAPTION_RE.finditer(text)}, key=int)
+
+
+def structure_fields(paper: dict | None) -> dict:
+    """abstract / introduction / conclusion, found from the paper's own headings (no model needed). With no parsed
+    paper to look at they are `not_extracted`; with one, a missing section is `empty`."""
+    if not paper:
+        return {name: {"status": "not_extracted", "confidence": "low", "reason": "no parsed paper to inspect"}
+                for name in ("abstract", "introduction", "conclusion")}
+    heads = _headings(paper)
+    front = "\n".join((s.get("text") or "") for s in (paper.get("text_segments") or []))[:_FRONT_CHARS] \
+        or (paper.get("full_text") or "")[:_FRONT_CHARS]
+    found = {
+        "abstract": any(h.startswith("abstract") for h in heads) or bool(_ABSTRACT_RE.search(front)),
+        "introduction": any(h.startswith(("introduction", "background")) for h in heads),
+        "conclusion": any(h.startswith(("conclusion", "concluding", "summary and", "summary & ")) for h in heads),
+    }
+    return {name: ({"status": "present", "confidence": "medium", "source": "section headings"} if ok
+                   else {"status": "empty", "confidence": "low"}) for name, ok in found.items()}
+
+
 def _list_field_status(value) -> dict:
     if value is None:
         return {"status": "not_extracted", "confidence": "low"}
@@ -71,7 +113,7 @@ def _list_field_status(value) -> dict:
 
 
 def score_paper_completeness(reconciled: dict, wiki_page: dict,
-                              ref_count: int = 0, has_figures: bool = False) -> dict:
+                              ref_count: int = 0, has_figures: bool = False, paper: dict | None = None) -> dict:
     """Score one paper's extraction completeness against FIELD_CHECKLIST.
 
     `reconciled` is pipeline.extraction_reconciler.reconcile_paper()'s
@@ -107,14 +149,9 @@ def score_paper_completeness(reconciled: dict, wiki_page: dict,
     fields["limitations"] = _list_field_status(wiki_page.get("limitations"))
     fields["future_work"] = _list_field_status(wiki_page.get("future_work"))
 
-    # models_interventions -- overlaps wiki.methods/contributions but has
-    # no distinct field in the current wiki schema. Honest signal, distinct
-    # from the always-missing set: a future wiki schema change could close
-    # this without needing a new extraction path entirely.
-    fields["models_interventions"] = {
-        "status": "not_extracted", "confidence": "low",
-        "reason": "overlaps wiki.methods/contributions but has no distinct field",
-    }
+    # models_interventions overlaps wiki.methods/contributions and has no field of its own (set above).
+    fields["models_interventions"]["reason"] = "overlaps wiki.methods/contributions but has no distinct field"
+    fields.update(structure_fields(paper))
 
     fields["references"] = {
         "status": "present" if ref_count > 0 else "empty",
@@ -123,11 +160,17 @@ def score_paper_completeness(reconciled: dict, wiki_page: dict,
 
     tables_field = (reconciled or {}).get("fields", {}).get("tables", {})
     tables_value = tables_field.get("value") or []
-    fields["tables"] = {
-        "status": "present" if tables_value else "empty",
-        "confidence": tables_field.get("confidence", "low"),
-        "source": tables_field.get("source", "none"),
-    }
+    captions = table_captions(paper) if paper else []
+    if tables_value:
+        fields["tables"] = {"status": "present", "confidence": tables_field.get("confidence", "low"),
+                            "source": tables_field.get("source", "none")}
+    elif captions:
+        # A "Table N" caption with no detectable cells: the table is in the text (borderless), just not structured.
+        fields["tables"] = {"status": "present", "confidence": "low", "source": "caption only",
+                            "reason": f"{len(captions)} table caption(s) found; the cells could not be separated"}
+    else:
+        fields["tables"] = {"status": "empty", "confidence": tables_field.get("confidence", "low"),
+                            "source": tables_field.get("source", "none")}
 
     fields["figures"] = {
         "status": "present" if has_figures else "empty",
@@ -208,7 +251,10 @@ def compute_corpus_quality(paper_scores: list[dict], ref_diagnostics: dict,
     enriched = d.get("enriched", 0)
     title_only = d.get("title_only", 0)
     duplicates_skipped = d.get("duplicates_skipped", 0)
-    resolved = enriched + title_only
+    # "resolved" means a lookup found the paper (Tier 2, with or without an abstract). Title-only records are the
+    # references that no lookup could find.
+    unmatched = d.get("unmatched")
+    resolved = enriched + d.get("resolved_no_abstract", 0) if unmatched is not None else enriched + title_only
 
     # `unresolved` is counted per input entry by the enrichment loop itself
     # (entries whose enrichment raised and produced no title-only
@@ -220,6 +266,8 @@ def compute_corpus_quality(paper_scores: list[dict], ref_diagnostics: dict,
     unresolved = d.get("unresolved")
     if unresolved is None:
         unresolved = max(structured_entries - resolved, 0)
+    if unmatched is not None:
+        unresolved = unresolved + unmatched
 
     reference_funnel = {
         "detected": raw_entries,
@@ -240,6 +288,7 @@ def compute_corpus_quality(paper_scores: list[dict], ref_diagnostics: dict,
         round(sum(1 for r in refs if r.get("doi")) / len(refs), 3) if refs else 0.0
     )
     abstract_availability = round(enriched / resolved, 3) if resolved else 0.0
+    per_paper_refs = {p.get("filename"): p.get("raw_entries", 0) for p in d.get("papers", [])}
 
     gate = _evaluate_quality_gate(avg_achievable, doi_resolution_rate)
 
@@ -250,6 +299,7 @@ def compute_corpus_quality(paper_scores: list[dict], ref_diagnostics: dict,
         "doi_resolution_rate": doi_resolution_rate,
         "abstract_availability": abstract_availability,
         "n_papers": n_papers,
+        "references_per_paper": per_paper_refs,
         "quality_gate": gate["status"],
         "quality_gate_reasons": gate["reasons"],
     }
