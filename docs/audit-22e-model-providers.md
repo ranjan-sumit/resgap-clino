@@ -23,5 +23,5 @@ requests, so the three providers without keys stay marked "not verified live". D
 - OpenAI, Groq and Qwen model names in the list (`gpt-5.6-*`, `qwen3.8-max`, ...) cannot be checked without keys; use "Refresh model list" and "Test models" with a real key before relying on them.
 - The host check does not resolve names: a host name that points at a link-local address is not caught. In a controlled deployment use `RESGAP_ALLOWED_HOSTS`.
 - Provider terms (retention, training on prompts, region) are not something the app can check; they are part of the deployment decision.
-- Prices are only known for models listed in `data/model_prices.json`; others show no cost estimate.
+- There is no built-in price list (prices change); a cost estimate appears only for models you list in `data/model_prices.json`, which does not exist yet.
 - NVIDIA's account was slow throughout the audit (54 s to 181 s per call), so the app's default model on that provider is poor right now; Gemini answered in about a second.
