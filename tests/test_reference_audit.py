@@ -275,6 +275,54 @@ def test_semantic_scholar_title_search_is_given_up_after_a_rate_limit():
     rx._reset_providers()
 
 
+_REAL_PACE = rx._s2_pace          # the conftest replaces it with a no-op for every other test
+
+
+def test_semantic_scholar_requests_wait_their_turn_across_threads(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(rx.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setitem(rx._SS_KEY, "value", "k")
+    rx._S2_LAST[0] = 0.0
+    _REAL_PACE()
+    _REAL_PACE()
+    assert len(sleeps) == 1 and 0.5 < sleeps[0] <= 1.1             # with a key: about a second between requests
+    sleeps.clear()
+    monkeypatch.setitem(rx._SS_KEY, "value", "")
+    _REAL_PACE()
+    assert sleeps and 2.0 < sleeps[0] <= 3.5                       # without one: much slower
+
+
+def test_a_keyed_429_is_retried_once_and_only_a_repeated_one_gives_the_provider_up(monkeypatch):
+    monkeypatch.setattr(rx.time, "sleep", lambda s: None)
+    monkeypatch.setitem(rx._SS_KEY, "value", "k")
+    rx._reset_providers()
+    ok = _resp({"data": []})
+    with patch.object(rx.requests, "get", side_effect=[_r429('{"message":"Too Many Requests"}'), ok]) as get:
+        assert rx._ss_search_by_title("Gene therapy for cystic fibrosis lung disease") is None
+    assert get.call_count == 2 and "semantic_scholar_search" not in rx._BLOCKED         # the retry worked
+    with patch.object(rx.requests, "get", return_value=_r429('{"message":"Too Many Requests"}')):
+        rx._ss_search_by_title("Gene therapy for cystic fibrosis lung disease")
+    assert "even with the key" in rx._BLOCKED["semantic_scholar_search"]
+    rx._reset_providers()
+
+
+def test_semantic_scholar_lookups_by_doi_send_the_key(monkeypatch):
+    monkeypatch.setitem(rx._SS_KEY, "value", "my-key")
+    with patch.object(rx.requests, "get", return_value=_resp({"title": "x"})) as get:
+        rx._ss_by_doi("10.1/abc")
+        rx._ss_by_arxiv("1234.5678")
+    assert all(c.kwargs["headers"].get("x-api-key") == "my-key" for c in get.call_args_list)
+
+
+def test_the_semantic_scholar_key_falls_back_to_the_environment(monkeypatch, isolated_env):
+    monkeypatch.setenv("SEMANTIC_SCHOLAR_API_KEY", "env-key")
+    monkeypatch.setitem(rx._SS_KEY, "value", "")
+    rx.extract_and_enrich_references([], None, max_refs_per_paper=1)
+    assert rx._SS_KEY["value"] == "env-key"
+    rx.extract_and_enrich_references([], None, max_refs_per_paper=1, ss_api_key="typed-key")
+    assert rx._SS_KEY["value"] == "typed-key"
+
+
 def test_unpaywall_is_only_called_with_a_real_contact_address(monkeypatch):
     monkeypatch.delenv("RESGAP_CONTACT_EMAIL", raising=False)
     with patch.object(rx.requests, "get") as get:

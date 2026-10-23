@@ -15,6 +15,7 @@ import json
 import time
 import html
 import os
+import threading
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 import difflib
@@ -424,11 +425,33 @@ def _reset_providers() -> None:
     _BLOCKED.clear()
 
 
+_S2_LOCK = threading.Lock()
+_S2_LAST = [0.0]
+
+
+def _s2_pace() -> None:
+    """Semantic Scholar allows about one request a second with a key and far fewer without one, across every endpoint;
+    the lookups run three at a time, so all of them wait their turn here."""
+    interval = 1.1 if _SS_KEY["value"] else 3.5
+    with _S2_LOCK:
+        wait = interval - (time.monotonic() - _S2_LAST[0])
+        if wait > 0:
+            time.sleep(wait)
+        _S2_LAST[0] = time.monotonic()
+
+
 def _provider_get(provider: str, url: str, **kwargs):
     """requests.get for a named provider; None when that provider has been given up on for this run."""
     if provider in _BLOCKED:
         return None
+    is_s2 = provider.startswith("semantic_scholar")
+    if is_s2:
+        _s2_pace()
     r = requests.get(url, **kwargs)
+    if r.status_code == 429 and is_s2 and _SS_KEY["value"]:
+        time.sleep(3)                                   # a keyed 429 is a brief burst limit: one more try
+        _s2_pace()
+        r = requests.get(url, **kwargs)
     if r.status_code == 429:
         text = r.text if isinstance(getattr(r, "text", None), str) else ""
         if provider == "openalex" and "budget" in text.lower():
@@ -436,9 +459,16 @@ def _provider_get(provider: str, url: str, **kwargs):
                                   "matched by other sources only. A free key lifts it: set OPENALEX_API_KEY "
                                   "(https://help.openalex.org/api/authentication/).")
         elif provider == "semantic_scholar_search":
-            _BLOCKED[provider] = ("Semantic Scholar's title search is rate-limited without a key; it was skipped. "
-                                  "Set SEMANTIC_SCHOLAR_API_KEY to use it.")
+            _BLOCKED[provider] = (
+                "Semantic Scholar's title search kept refusing requests even with the key, so it was skipped."
+                if _SS_KEY["value"] else
+                "Semantic Scholar's title search is rate-limited without a key; it was skipped. "
+                "Set SEMANTIC_SCHOLAR_API_KEY to use it.")
     return r
+
+
+def _ss_headers() -> dict:
+    return {**_HEADERS, **({"x-api-key": _SS_KEY["value"]} if _SS_KEY["value"] else {})}
 
 
 def _openalex_headers() -> dict:
@@ -452,8 +482,7 @@ def _ss_search_by_title(title: str) -> Optional[dict]:
     presence breaks near-ties only, it never substitutes for a title match."""
     try:
         params = {"query": title[:200], "limit": 5, "fields": SS_FIELDS}
-        headers = {**_HEADERS, **({"x-api-key": _SS_KEY["value"]} if _SS_KEY["value"] else {})}
-        r = _provider_get("semantic_scholar_search", SS_SEARCH, params=params, headers=headers, timeout=_TIMEOUT)
+        r = _provider_get("semantic_scholar_search", SS_SEARCH, params=params, headers=_ss_headers(), timeout=_TIMEOUT)
         if r is not None and r.status_code == 200:
             items = r.json().get("data", [])
             best, best_key = None, None
@@ -475,9 +504,9 @@ def _ss_search_by_title(title: str) -> Optional[dict]:
 def _ss_by_doi(doi: str) -> Optional[dict]:
     try:
         url = SS_PAPER.format(id=urllib.parse.quote(f"DOI:{doi}", safe=""))
-        r   = requests.get(url, params={"fields": SS_FIELDS},
-                           headers=_HEADERS, timeout=_TIMEOUT)
-        if r.status_code == 200:
+        r   = _provider_get("semantic_scholar", url, params={"fields": SS_FIELDS},
+                            headers=_ss_headers(), timeout=_TIMEOUT)
+        if r is not None and r.status_code == 200:
             return r.json()
     except Exception:
         pass
@@ -487,9 +516,9 @@ def _ss_by_doi(doi: str) -> Optional[dict]:
 def _ss_by_arxiv(arxiv_id: str) -> Optional[dict]:
     try:
         url = SS_PAPER.format(id=urllib.parse.quote(f"ARXIV:{arxiv_id}", safe=""))
-        r   = requests.get(url, params={"fields": SS_FIELDS},
-                           headers=_HEADERS, timeout=_TIMEOUT)
-        if r.status_code == 200:
+        r   = _provider_get("semantic_scholar", url, params={"fields": SS_FIELDS},
+                            headers=_ss_headers(), timeout=_TIMEOUT)
+        if r is not None and r.status_code == 200:
             return r.json()
     except Exception:
         pass
@@ -850,7 +879,7 @@ def extract_and_enrich_references(
 
     progress_callback: optional fn(current, total, message)
     """
-    _SS_KEY["value"] = (ss_api_key or "").strip()
+    _SS_KEY["value"] = (ss_api_key or os.getenv("SEMANTIC_SCHOLAR_API_KEY", "")).strip()
     _reset_providers()
     all_refs  = []
     seen_dois = set()
