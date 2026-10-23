@@ -180,6 +180,145 @@ def test_an_unresolved_reference_is_labelled_with_its_citation_not_unknown(isola
     assert out["tier"] == 3 and out["title"].startswith("Cabrini G.")
 
 
+# ── short titles need the year and an author to agree ────────────────────────────────────────
+def _hit(title, year, authors):
+    return {"results": [{"title": title, "publication_year": year, "abstract_inverted_index": {"A": [0]},
+                         "doi": "https://doi.org/10.1/x", "authorships": [{"author": {"display_name": a}} for a in authors]}]}
+
+
+ELBORN = {"title": "Cystic fibrosis", "year": 2016, "authors": [],
+          "raw_reference": "J.S. Elborn, Cystic fibrosis, Lancet 388 (10059) (2016) 2519 – 2531"}
+
+
+def test_a_two_word_title_is_matched_when_year_and_author_agree(isolated_env):
+    with patch.object(rx.requests, "get", return_value=_resp(_hit("Cystic fibrosis", 2016, ["J Stuart Elborn"]))):
+        out = rx.enrich_reference(dict(ELBORN), delay=0)
+    assert out["tier"] == 2 and out["source"] == "openalex" and out["authors"] == ["J Stuart Elborn"]
+
+
+@pytest.mark.parametrize("hit", [
+    _hit("Cystic fibrosis", 1998, ["J Stuart Elborn"]),            # right author, wrong year
+    _hit("Cystic fibrosis", 2016, ["Someone Else"]),               # right year, wrong author
+    _hit("Cystic fibrosis", 2016, []),                             # nothing to check it against
+])
+def test_a_two_word_title_is_not_matched_when_year_or_author_disagree(isolated_env, hit):
+    with patch.object(rx.requests, "get", return_value=_resp(hit)), \
+         patch.object(rx, "_crossref_search", return_value=None), patch.object(rx, "_ss_search_by_title", return_value=None), \
+         patch.object(rx, "_pubmed_search", return_value=None), patch.object(rx, "_crossref_citation_search", return_value=None):
+        out = rx.enrich_reference(dict(ELBORN), delay=0)
+    assert out["tier"] == 3
+
+
+def test_a_longer_title_does_not_need_the_extra_checks(isolated_env):
+    ref = {"title": "Emerging microRNA therapeutic approaches for cystic fibrosis", "year": None, "authors": []}
+    with patch.object(rx.requests, "get", return_value=_resp(_hit("Emerging microRNA therapeutic approaches for cystic fibrosis", 2018, []))):
+        assert rx.enrich_reference(ref, delay=0)["tier"] == 2
+
+
+def test_the_citation_search_accepts_a_short_title_only_with_year_and_author():
+    item = {"DOI": "10.1/x", "title": ["Cystic fibrosis"], "published": {"date-parts": [[2016]]},
+            "author": [{"given": "J. Stuart", "family": "Elborn"}], "container-title": ["Lancet"]}
+    with patch.object(rx.requests, "get", return_value=_resp({"message": {"items": [item]}})):
+        assert rx._crossref_citation_search(ELBORN["raw_reference"])["doi"] == "10.1/x"
+        assert rx._crossref_citation_search("A. Other, Cystic fibrosis, Some Journal (2016) 1-9, in a long enough citation") is None
+
+
+# ── a provider that refuses us is left alone, and the reader is told ──────────────────────────
+BUDGET_MSG = ('{"error":"Rate limit exceeded","message":"Insufficient budget. This request has no API key, so it counts '
+              'against the free daily budget shared by everyone on your network\'s IP address"}')
+
+
+def _r429(text=BUDGET_MSG):
+    r = MagicMock()
+    r.status_code, r.text = 429, text
+    return r
+
+
+def test_openalex_out_of_free_budget_is_skipped_for_the_rest_of_the_run_with_a_note():
+    rx._reset_providers()
+    with patch.object(rx.requests, "get", return_value=_r429()) as get:
+        assert rx._openalex_by_title("Gene therapy for cystic fibrosis lung disease") is None
+        assert rx._openalex_by_doi("10.1/abc") is None
+        assert rx._openalex_by_title("Another long enough title about airways") is None
+    assert get.call_count == 1                                          # one refusal, then no more requests to it
+    assert "OPENALEX_API_KEY" in rx._BLOCKED["openalex"]
+    rx._reset_providers()
+
+
+def test_a_run_reports_a_blocked_provider_and_still_resolves_what_other_sources_find(isolated_env):
+    text = "[1] A. Au, Gene therapy for cystic fibrosis lung disease, J. X 1 (2001) 1-9. [2] B. Bu, Second long title about airways, J. X 2 (2002) 2-9. " \
+           "[3] C. Cu, Third long title about mucus clearance, J. X 3 (2003) 3-9."
+    crossref = {"message": {"items": []}}
+
+    def fake_get(url, **kw):
+        if "openalex" in url:
+            return _r429()
+        return _resp(crossref)
+    with patch.object(rx.requests, "get", side_effect=fake_get):
+        refs, diag = rx.extract_and_enrich_references([_paper(text)], None, max_refs_per_paper=None, return_diagnostics=True)
+    assert len(refs) == 3 and any("OPENALEX_API_KEY" in n for n in diag["provider_notes"])
+
+
+def test_the_openalex_key_is_sent_when_set(monkeypatch):
+    monkeypatch.setenv("OPENALEX_API_KEY", "oa-test-key")
+    assert rx._openalex_headers()["Authorization"] == "Bearer oa-test-key"
+    monkeypatch.delenv("OPENALEX_API_KEY")
+    assert "Authorization" not in rx._openalex_headers()
+
+
+def test_semantic_scholar_title_search_is_given_up_after_a_rate_limit():
+    rx._reset_providers()
+    with patch.object(rx.requests, "get", return_value=_r429('{"message":"Too Many Requests"}')) as get:
+        rx._ss_search_by_title("Gene therapy for cystic fibrosis lung disease")
+        rx._ss_search_by_title("Another long enough title about airways")
+    assert get.call_count == 1 and "SEMANTIC_SCHOLAR_API_KEY" in rx._BLOCKED["semantic_scholar_search"]
+    rx._reset_providers()
+
+
+def test_unpaywall_is_only_called_with_a_real_contact_address(monkeypatch):
+    monkeypatch.delenv("RESGAP_CONTACT_EMAIL", raising=False)
+    with patch.object(rx.requests, "get") as get:
+        assert rx._unpaywall_by_doi("10.1/abc") is None
+    assert not get.called
+    monkeypatch.setenv("RESGAP_CONTACT_EMAIL", "someone@university.edu")
+    with patch.object(rx.requests, "get", return_value=_resp({"is_oa": True, "best_oa_location": {"url_for_pdf": "http://x/p.pdf"}})) as get:
+        assert rx._unpaywall_by_doi("10.1/abc") == "http://x/p.pdf"
+    assert get.call_args.kwargs["params"]["email"] == "someone@university.edu"
+
+
+# ── every entry is read by the model, in chunks ────────────────────────────────────────────
+def _numbered_refs(n):
+    return "\n".join(f"{i}. Author{i} A. Distinct study title number {i} of the series. J Series {i} (2000):1-{i + 9}." for i in range(1, n + 1))
+
+
+def test_the_model_reads_all_requested_entries_in_chunks_of_25():
+    entries = rx._split_reference_entries(_numbered_refs(60))
+    assert len(entries) == 60
+    seen = []
+
+    class Echo(FakeClient):
+        def chat_json(self, system, user, *a, **kw):
+            lines = [l for l in user.split("\n\n", 1)[1].splitlines()]
+            seen.append(len(lines))
+            return super().chat_json(system, user, *a, **kw)
+
+    def reply(n0, n):
+        return json.dumps([{"title": f"Distinct study title number {i} of the series", "year": 2000, "authors": [f"Author{i} A"]}
+                           for i in range(n0, n0 + n)])
+    client = Echo([reply(1, 25), reply(26, 25), reply(51, 10)])
+    out = rx.parse_references_with_llm("", client, entries=entries, max_refs=None)
+    assert sorted(seen) == [10, 25, 25] and len(out) == 60
+    assert {r["title"] for r in out} == {f"Distinct study title number {i} of the series" for i in range(1, 61)}
+
+
+def test_a_limit_below_the_total_reads_only_that_many_and_one_bad_chunk_does_not_lose_the_rest():
+    entries = rx._split_reference_entries(_numbered_refs(60))
+    client = FakeClient(["!api_error", json.dumps([{"title": "Distinct study title number 30 of the series", "year": 2000}])])
+    out = rx.parse_references_with_llm("", client, entries=entries, max_refs=50)
+    assert len(client.calls) == 2                                           # 50 entries = two chunks of 25
+    assert [r["title"] for r in out] == ["Distinct study title number 30 of the series"]
+
+
 # ── the model stage ────────────────────────────────────────────────────────────────────────
 def test_the_model_is_given_the_numbered_entries_it_will_be_asked_about():
     entries = rx._split_reference_entries(MDPI)

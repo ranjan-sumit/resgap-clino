@@ -14,6 +14,7 @@ import re
 import json
 import time
 import html
+import os
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 import difflib
@@ -166,14 +167,46 @@ def _plausible_title(title: str) -> bool:
             and not re.search(r"\[(?:CrossRef|PubMed)\]", title))
 
 
-def _title_in_citation(candidate_title: str, year, citation: str) -> bool:
+def _is_short_title(title: str) -> bool:
+    """A title this short ("Cystic fibrosis") is the title of many papers; it cannot identify one by itself."""
+    return len([w for w in _normalize_title_text(title).split() if len(w) > 2]) < 3
+
+
+def _authors_in_citation(authors, citation: str) -> bool:
+    """Does any of a hit's first authors appear (by a name of 3+ letters) in the citation text?"""
+    have = set(_normalize_title_text(citation).split())
+    for name in list(authors or [])[:4]:
+        name = name.get("name", "") if isinstance(name, dict) else str(name)
+        if any(len(tok) >= 3 and tok in have for tok in _normalize_title_text(name).split()):
+            return True
+    return False
+
+
+def _year_close(a, b) -> bool:
+    try:
+        return abs(int(str(a)[:4]) - int(str(b)[:4])) <= 1
+    except (TypeError, ValueError):
+        return False
+
+
+def _corroborated(ref: dict, meta: dict) -> bool:
+    """For a short title: the hit must also agree with the citation on the year (within one) and on an author."""
+    citation = ref.get("raw_reference") or " ".join(_normalise_authors(ref.get("authors")))
+    year = meta.get("year") or meta.get("publication_year")
+    return _year_close(ref.get("year"), year) and _authors_in_citation(meta.get("authors"), citation)
+
+
+def _title_in_citation(candidate_title: str, year, citation: str, authors=None) -> bool:
     """Is a search hit's title the paper this citation string names? Nearly every word of the hit's title must appear
-    in the citation, and the hit's year must be too (when it has one)."""
+    in the citation, and the hit's year must be too (when it has one). A short title also needs one of the hit's
+    authors to appear in the citation and the year to be known."""
     words = [w for w in _normalize_title_text(candidate_title).split() if len(w) > 2]
     cite = _normalize_title_text(citation)
     have = set(cite.split())
-    if len(words) < 3 or sum(w in have for w in words) / len(words) < 0.9:
+    if not words or sum(w in have for w in words) / len(words) < 0.9:
         return False
+    if len(words) < 3:
+        return bool(year) and str(year) in cite and _authors_in_citation(authors, citation)
     return not year or str(year) in cite
 
 
@@ -190,7 +223,7 @@ def _crossref_citation_search(citation: str) -> Optional[dict]:
         for item in r.json().get("message", {}).get("items", []):
             cand = (item.get("title") or [""])[0] if isinstance(item.get("title"), list) else item.get("title", "")
             year = (item.get("published", {}).get("date-parts") or [[None]])[0][0]
-            if cand and _title_in_citation(cand, year, citation):
+            if cand and _title_in_citation(cand, year, citation, _crossref_authors(item)):
                 doi = item.get("DOI", "")
                 return {
                     "title": cand, "year": year, "abstract": re.sub(r"<[^>]+>", "", item.get("abstract", "") or ""),
@@ -301,22 +334,39 @@ Return ONLY a JSON array. Include up to 30 references.
 If title is unclear, skip that entry."""
 
 
-def parse_references_with_llm(ref_text: str, client, entries: list[str] | None = None, max_refs: int = 30) -> list[dict]:
-    """Use LLM to parse messy reference text into structured entries. With `entries` (the split list) the model
-    is given the first `max_refs` of them, numbered, so the whole batch it will be asked about is in front of it."""
-    if entries and len(entries) >= 3:
-        text = "\n".join(f"{i}. {e[:600]}" for i, e in enumerate(entries[:max_refs], 1))
-    else:
-        text = (ref_text or "")[:6000]
-    if not text or len(text) < 50:
-        return []
-    raw = unwrap(client.chat_json(
-        REF_PARSE_PROMPT,
-        f"References section:\n\n{text}",
-        max_tokens=4000,
-    ))
+_PARSE_CHUNK = 25          # entries per model call: a reply of this many structured references fits comfortably
+
+
+def _parse_chunk(text: str, client) -> list[dict]:
+    raw = unwrap(client.chat_json(REF_PARSE_PROMPT, f"References section:\n\n{text}", max_tokens=4500))
     result, _ = keep_valid("reference", [r for r in _safe_parse_list(raw) if isinstance(r, dict)], client)
     return [clean_reference_fields(r) for r in result]
+
+
+def parse_references_with_llm(ref_text: str, client, entries: list[str] | None = None, max_refs: int | None = 30) -> list[dict]:
+    """Use LLM to parse messy reference text into structured entries. With `entries` (the split list) the model is
+    given the first `max_refs` of them (all of them when None), numbered, in chunks of 25 that are parsed side by
+    side, so every entry that will be looked up has been read by the model. A chunk that fails is skipped."""
+    if entries and len(entries) >= 3:
+        wanted = entries if max_refs is None else entries[:max_refs]
+        chunks = [wanted[i:i + _PARSE_CHUNK] for i in range(0, len(wanted), _PARSE_CHUNK)]
+        texts = ["\n".join(f"{i}. {e[:600]}" for i, e in enumerate(chunk, start + 1))
+                 for chunk, start in zip(chunks, range(0, len(wanted), _PARSE_CHUNK))]
+    else:
+        texts = [(ref_text or "")[:6000]]
+    texts = [t for t in texts if len(t) >= 50]
+    if not texts:
+        return []
+    if len(texts) == 1:
+        return _parse_chunk(texts[0], client)
+
+    def safe(t):
+        try:
+            return _parse_chunk(t, client)
+        except Exception:
+            return []
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        return [r for part in pool.map(safe, texts) for r in part]
 
 
 def clean_reference_fields(ref: dict) -> dict:
@@ -365,6 +415,36 @@ def _title_similarity(a: str, b: str) -> float:
 
 _SS_KEY = {"value": ""}     # set by extract_and_enrich_references for the duration of a run
 
+# A provider that refuses us (its free budget is used up, or it rate-limits every call) is left alone for the rest of the
+# run instead of costing a timeout per reference, and the reader is told why.
+_BLOCKED: dict[str, str] = {}
+
+
+def _reset_providers() -> None:
+    _BLOCKED.clear()
+
+
+def _provider_get(provider: str, url: str, **kwargs):
+    """requests.get for a named provider; None when that provider has been given up on for this run."""
+    if provider in _BLOCKED:
+        return None
+    r = requests.get(url, **kwargs)
+    if r.status_code == 429:
+        text = r.text if isinstance(getattr(r, "text", None), str) else ""
+        if provider == "openalex" and "budget" in text.lower():
+            _BLOCKED[provider] = ("OpenAlex's free daily limit for this network is used up, so references without a DOI were "
+                                  "matched by other sources only. A free key lifts it: set OPENALEX_API_KEY "
+                                  "(https://help.openalex.org/api/authentication/).")
+        elif provider == "semantic_scholar_search":
+            _BLOCKED[provider] = ("Semantic Scholar's title search is rate-limited without a key; it was skipped. "
+                                  "Set SEMANTIC_SCHOLAR_API_KEY to use it.")
+    return r
+
+
+def _openalex_headers() -> dict:
+    key = os.getenv("OPENALEX_API_KEY", "").strip()
+    return {**_HEADERS, **({"Authorization": f"Bearer {key}"} if key else {})}
+
 
 def _ss_search_by_title(title: str) -> Optional[dict]:
     """Search Semantic Scholar by title. Returns the best title match or
@@ -373,8 +453,8 @@ def _ss_search_by_title(title: str) -> Optional[dict]:
     try:
         params = {"query": title[:200], "limit": 5, "fields": SS_FIELDS}
         headers = {**_HEADERS, **({"x-api-key": _SS_KEY["value"]} if _SS_KEY["value"] else {})}
-        r = requests.get(SS_SEARCH, params=params, headers=headers, timeout=_TIMEOUT)
-        if r.status_code == 200:
+        r = _provider_get("semantic_scholar_search", SS_SEARCH, params=params, headers=headers, timeout=_TIMEOUT)
+        if r is not None and r.status_code == 200:
             items = r.json().get("data", [])
             best, best_key = None, None
             for item in items:
@@ -503,10 +583,12 @@ def _crossref_search(title: str) -> Optional[dict]:
 
 
 def _unpaywall_by_doi(doi: str) -> Optional[str]:
+    email = os.getenv("RESGAP_CONTACT_EMAIL", "").strip()
+    if not email:
+        return None                      # Unpaywall rejects made-up addresses; no contact address, no open-access link
     try:
         url = UNPAYWALL.format(doi=urllib.parse.quote(doi, safe=""))
-        r = requests.get(url, params={"email": "research@example.com"},
-                         headers=_HEADERS, timeout=_TIMEOUT)
+        r = requests.get(url, params={"email": email}, headers=_HEADERS, timeout=_TIMEOUT)
         if r.status_code == 200:
             data = r.json()
             if data.get("is_oa"):
@@ -569,11 +651,11 @@ def _openalex_by_title(title: str) -> Optional[dict]:
             # DOI->PMID->OpenAlex ID->... priority chain) has something real
             # to resolve against for this provider -- previously not
             # requested at all, so that priority level could never match.
-            "select":  "id,title,publication_year,abstract_inverted_index,doi",
+            "select":  "id,title,publication_year,abstract_inverted_index,doi,authorships",
             "per-page": 5,
         }
-        r = requests.get(OPENALEX, params=params, headers=_HEADERS, timeout=_TIMEOUT)
-        if r.status_code == 200:
+        r = _provider_get("openalex", OPENALEX, params=params, headers=_openalex_headers(), timeout=_TIMEOUT)
+        if r is not None and r.status_code == 200:
             # The best-matching TITLE among the hits, and only if it really is the queried title: the first hit
             # for a vague query ("Pharmacol") is an unrelated paper, and its abstract would be attached to the reference.
             results = [x for x in r.json().get("results", []) if x.get("title")]
@@ -600,7 +682,7 @@ def _openalex_meta(item: dict, fallback_title: str = "") -> dict:
         "doi":      (item.get("doi") or "").replace("https://doi.org/", ""),
         "openalex_id": (item.get("id") or "").replace("https://openalex.org/", ""),
         "venue":    "",
-        "authors":  [],
+        "authors":  [(a.get("author") or {}).get("display_name", "") for a in (item.get("authorships") or [])[:6]],
         "citations": 0,
         "url":      item.get("doi") or "",
         "source_api": "openalex",
@@ -610,10 +692,10 @@ def _openalex_meta(item: dict, fallback_title: str = "") -> dict:
 def _openalex_by_doi(doi: str) -> Optional[dict]:
     """The DOI is exact, so no title check is needed. Used for the abstract, which Crossref rarely has."""
     try:
-        r = requests.get(OPENALEX, params={"filter": f"doi:https://doi.org/{doi}", "per-page": 1,
-                                           "select": "id,title,publication_year,abstract_inverted_index,doi"},
-                         headers=_HEADERS, timeout=_TIMEOUT)
-        if r.status_code == 200:
+        r = _provider_get("openalex", OPENALEX, params={"filter": f"doi:https://doi.org/{doi}", "per-page": 1,
+                                                         "select": "id,title,publication_year,abstract_inverted_index,doi,authorships"},
+                          headers=_openalex_headers(), timeout=_TIMEOUT)
+        if r is not None and r.status_code == 200:
             results = r.json().get("results", [])
             if results and results[0].get("title"):
                 return _openalex_meta(results[0])
@@ -680,21 +762,13 @@ def enrich_reference(ref: dict, delay: float = 0.3) -> dict:
         meta = _pubmed_search(doi=doi)
         time.sleep(delay)
 
-    if not meta and title and len(title) > 10:
-        meta = _openalex_by_title(title)
+    for lookup in (_openalex_by_title, _crossref_search, _ss_search_by_title, lambda t: _pubmed_search(title=t)):
+        if meta or not (title and len(title) > 10):
+            break
+        found = lookup(title)
         time.sleep(delay)
-
-    if not meta and title and len(title) > 10:
-        meta = _crossref_search(title)
-        time.sleep(delay)
-
-    if not meta and title and len(title) > 10:
-        meta = _ss_search_by_title(title)
-        time.sleep(delay)
-
-    if not meta and title and len(title) > 10:
-        meta = _pubmed_search(title=title)
-        time.sleep(delay)
+        if found and (not _is_short_title(title) or _corroborated(ref, found)):
+            meta = found
 
     raw_citation = (ref.get("raw_reference") or "").strip()
     if not meta and not doi and len(raw_citation) > 40:
@@ -777,6 +851,7 @@ def extract_and_enrich_references(
     progress_callback: optional fn(current, total, message)
     """
     _SS_KEY["value"] = (ss_api_key or "").strip()
+    _reset_providers()
     all_refs  = []
     seen_dois = set()
     seen_titles: set[str] = set()
@@ -813,7 +888,7 @@ def extract_and_enrich_references(
         if client:
             try:
                 structured = parse_references_with_llm(parsed["raw_text"], client, entries=raw_entries,
-                                                       max_refs=max_refs_per_paper or 30)
+                                                       max_refs=max_refs_per_paper)
             except Exception as e:
                 structured = []
                 diagnostics["errors"].append(f"{filename}: LLM reference parse failed: {e}")
@@ -826,7 +901,7 @@ def extract_and_enrich_references(
 
         # The model was shown the first `max_refs_per_paper` entries. If it parsed most of them, those entries are
         # covered (it skips ones it cannot read); only the entries it never saw come from the rule-based parser.
-        asked = raw_entries[:max_refs_per_paper or 30] if client else []
+        asked = (raw_entries if max_refs_per_paper is None else raw_entries[:max_refs_per_paper]) if client else []
         model_covered = bool(asked) and len(structured) >= 0.6 * len(asked)
 
         for idx, entry in enumerate(raw_entries):
@@ -925,10 +1000,12 @@ def extract_and_enrich_references(
                 diagnostics["enriched"] += 1
             else:
                 diagnostics["title_only"] += 1
-                diagnostics["resolved_no_abstract" if enriched.get("tier") == 2 else "unmatched"] += 1
+                if enriched.get("source") != "enrichment_failed":          # a failure is already counted as unresolved
+                    diagnostics["resolved_no_abstract" if enriched.get("tier") == 2 else "unmatched"] += 1
             all_refs.append(enriched)
         pool.shutdown(wait=True)
 
+    diagnostics["provider_notes"] = list(_BLOCKED.values())
     if return_diagnostics:
         return all_refs, diagnostics
     return all_refs

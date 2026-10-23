@@ -458,6 +458,8 @@ def _run_full_pipeline(
             return_diagnostics=True,
             ss_api_key=(options.ss_api_key or ""),
         )
+        for _note in ref_diagnostics.get("provider_notes", []):
+            warn(_note)
         summary = summarise_reference_corpus(ref_papers)
         _trace("Stage 1B — Reference Extraction",
               f"{len(papers)} PDFs scanned",

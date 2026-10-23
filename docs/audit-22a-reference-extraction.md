@@ -27,10 +27,25 @@ Cached reference matches from before this change may belong to a different paper
 - Of 30 Tier 2 references, 29 had a title that appears in their own citation (the other is the real, two-word title "Cystic fibrosis").
 - With the model on two papers (20 references each): 38 references, 25 with an abstract, authors present, 0 schema errors.
 
+## Follow-up fixes (the three items that were left open)
+
+| Was open | Fix |
+|---|---|
+| Only the first 30 references per paper were read by the model, whatever the "References per paper" setting said (the setting's 50 or "All" only widened the rule-based fallback). | The model now reads every entry that will be looked up, in chunks of 25 run side by side. On the 94-reference paper with a limit of 60: 3 calls, 52 structured references, 13 s of model time. |
+| A two-word title ("Cystic fibrosis") could not be matched except by DOI. | A short title is accepted when the hit's year is within a year of the citation's and one of the hit's first authors appears in the citation. OpenAlex hits now carry their authors so this can be checked. Year or author disagreeing, or no author to check, leaves the reference as written. |
+| A running page footer or a Funding / Author Contributions section could join the last entry. | Repeated footer lines and trailing sections are removed before splitting (commit `578e2f5`). |
+
+## Found while verifying the follow-up
+
+| # | Finding | Fix |
+|---|---|---|
+| 11 | **OpenAlex now limits keyless use to a small free daily budget shared by everyone on the same network** (about 100 searches a day). The audit used it up and every later call returned HTTP 429. A normal three-paper run would exceed it. OpenAlex was the best title-matching source in this audit. | A key is supported (`OPENALEX_API_KEY`, free). When the budget is gone, OpenAlex is skipped for the rest of the run instead of costing a timeout per reference, and the run shows a warning that says why and how to fix it. |
+| 12 | Semantic Scholar's title search was rate-limited on every call without a key. | Skipped for the rest of the run after the first refusal, with a note. |
+| 13 | The Unpaywall lookup sent the made-up address `research@example.com`; Unpaywall rejects it (HTTP 422), so open-access links never worked. | A real contact address is read from `RESGAP_CONTACT_EMAIL`; without one the lookup is skipped. Both variables are in `.env.example`. |
+| — | The run took 300 s for 59 references, much of it waiting on the refused providers. | Fixed by 11 and 12. Not re-timed: OpenAlex stayed out of budget for the rest of the day, so the new short-title matching and the faster run were checked with unit tests, not a live run. |
+
 ## Still open
 
-- References are capped (default 30 per paper), so only the first 30 of 72–94 are looked up.
-- A very short title ("Cystic fibrosis") cannot be verified against a citation and is matched only by DOI or by title search.
-- Entries with no DOI and a title Crossref does not return stay Tier 3 (a citation string, not "Unknown").
-- Page-footer text between two entries (a journal name and page count) stays inside the earlier entry.
+- Entries with no DOI and a title no source returns stay Tier 3 (a citation string, not "Unknown").
 - The rule-based parser does not extract authors or the journal; only the model stage does.
+- Without an OpenAlex key, a large run still loses OpenAlex part-way; matching then relies on Crossref and PubMed.
