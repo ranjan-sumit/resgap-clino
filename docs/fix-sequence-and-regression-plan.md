@@ -183,6 +183,13 @@ Each follows the same pattern: run the module on real input, write the findings,
 ### PR-24 Release candidate
 - Run the full regression (section 5) including the real-model smoke and the manual checklist; update DEPLOY.md and README; tag; record known issues.
 
+### PR-25 PyMuPDF licence resolution (B31) — deferred to the end, decided with the owner
+- **Why last:** the app is private and the papers are not confidential, so PyMuPDF's AGPL licence creates no obligation today. It matters the moment the app is hosted for other people or handed out.
+- **Changes (one of, per the decision in `docs/pymupdf-licence-decision.md`):** (1) keep it and record that the app stays private; (2) publish the app source under the AGPL; (3) buy the Artifact commercial licence; (4) replace PyMuPDF with a permissively licensed parser (pypdfium2, pdfminer.six or pdfplumber) behind a small parser interface.
+- **New tests (option 4 only):** parser contract tests on the fixture PDFs (text, page numbers, headings, tables, furniture, hidden-text rules) pass on both parsers before the switch; page and size limits and the structural-parser outputs are unchanged.
+- **Regression:** R-01 to R-05 and the PDF-limit tests.
+- **Depends on:** PR-24 decision point. **Size:** S (options 1–3) or L (option 4). **Risk:** low / medium.
+
 ## 4. Regression system
 
 **Layers**
