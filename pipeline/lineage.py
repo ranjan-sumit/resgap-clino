@@ -27,9 +27,9 @@ additive, never replacing the strict single-parent chain the FK requires.
 import hashlib
 import json
 
-from utils.database import get_artifact, list_artifacts, load_run, record_artifact
+from utils.database import get_artifact, list_artifacts, list_project_files, load_run, record_artifact
 
-LINEAGE_SCHEMA_VERSION = 1
+LINEAGE_SCHEMA_VERSION = 2      # 2: hashes cover the real content (the PDF bytes, the full graph, gaps, proposals)
 PARENTS_METADATA_KEY = "contributing_parents"
 
 # The technical spine, in dependency order -- each entry's parent is the
@@ -42,6 +42,29 @@ def _content_hash(obj) -> str:
     return hashlib.sha256(json.dumps(obj, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
+def _reference_fingerprint(refs: list) -> str:
+    return _content_hash(sorted(((r.get("doi") or ""), (r.get("title") or ""), r.get("tier")) for r in refs or []))
+
+
+def _graph_content(graph: dict) -> dict:
+    return {
+        "entity_count": graph.get("stats", {}).get("entity_count", 0),
+        "relationship_count": graph.get("stats", {}).get("relationship_count", 0),
+        "entities": sorted(e.get("id", "") for e in graph.get("entities", [])),
+        "content_hash": _content_hash({"entities": graph.get("entities", []), "relationships": graph.get("relationships", [])}),
+    }
+
+
+def _gap_content(gaps: list) -> dict:
+    return {"gap_ids": sorted(g.get("gap_id", "") for g in gaps if g.get("gap_id")),
+            "content_hash": _content_hash(sorted(gaps, key=lambda g: str(g.get("gap_id") or g.get("title") or "")))}
+
+
+def _proposal_content(proposals: list) -> dict:
+    return {"count": len(proposals), "titles": sorted(p.get("title", "") for p in proposals),
+            "content_hash": _content_hash(sorted(proposals, key=lambda p: str(p.get("title") or "")))}
+
+
 def _spine_id(artifact_type: str, run_id: str, obj) -> str:
     return f"{artifact_type}:{run_id}:{_content_hash(obj)[:8]}"
 
@@ -51,6 +74,7 @@ def record_run_lineage(
     papers: list, wiki: dict, ref_papers: list, evidence_objects: dict,
     graph: dict | None, gaps: list | None, proposals: list | None,
     tooling: dict | None = None, gate_blocked: bool = False,
+    source_hashes: dict | None = None,
 ) -> dict:
     """Writes the per-run Technical Lineage spine, parent-first (the
     parent_artifact FK is enforced -- an insert referencing a not-yet-
@@ -66,9 +90,11 @@ def record_run_lineage(
     by_type: dict[str, str] = {}
     skipped: list[str] = []
 
+    source_hashes = source_hashes or {}              # {filename: sha256 of the PDF's bytes}
     corpus_content = {
         "papers": sorted(p.get("filename", "") for p in papers),
         "wiki_pages": len(wiki.get("pages", [])),
+        **({"source_sha256": {k: source_hashes[k] for k in sorted(source_hashes)}} if source_hashes else {}),
     }
     corpus_id = _spine_id("corpus", run_id, corpus_content)
     record_artifact(
@@ -83,14 +109,16 @@ def record_run_lineage(
     paper_artifact_ids = []
     for p in papers:
         filename = p.get("filename", "")
-        paper_content = {"filename": filename, "char_count": p.get("char_count", 0)}
+        paper_content = {"filename": filename, "char_count": p.get("char_count", 0),
+                         **({"source_sha256": source_hashes[filename]} if filename in source_hashes else {})}
         paper_id = _spine_id("paper_extraction", run_id, paper_content)
         record_artifact(
             artifact_id=paper_id, artifact_type="paper_extraction",
             artifact_version=run_id, project_id=project_id,
             content_hash=_content_hash(paper_content), run_id=run_id,
             parent_artifact=corpus_id,
-            metadata={"filename": filename, "char_count": p.get("char_count", 0)},
+            metadata={"filename": filename, "char_count": p.get("char_count", 0), "lineage_schema": LINEAGE_SCHEMA_VERSION,
+                      **({"source_sha256": source_hashes[filename]} if filename in source_hashes else {})},
         )
         artifact_ids.append(paper_id)
         paper_artifact_ids.append(paper_id)
@@ -99,7 +127,7 @@ def record_run_lineage(
 
     reference_set_id = None
     if ref_papers:
-        ref_content = {"count": len(ref_papers)}
+        ref_content = {"count": len(ref_papers), "references": _reference_fingerprint(ref_papers)}
         reference_set_id = _spine_id("reference_set", run_id, ref_content)
         record_artifact(
             artifact_id=reference_set_id, artifact_type="reference_set",
@@ -113,6 +141,7 @@ def record_run_lineage(
     evidence_content = {
         "wiki_content_hash": _content_hash(wiki),
         "per_paper_evidence_counts": {k: len(v) for k, v in evidence_objects.items()},
+        "evidence_content_hash": _content_hash(evidence_objects),
     }
     evidence_set_id = _spine_id("evidence_set", run_id, evidence_content)
     evidence_metadata = {
@@ -145,11 +174,7 @@ def record_run_lineage(
         skipped = ["graph", "gap_set", "proposal_set"]
         return {"artifact_ids": artifact_ids, "by_type": by_type, "skipped": skipped}
 
-    graph_content = {
-        "entity_count": graph.get("stats", {}).get("entity_count", 0),
-        "relationship_count": graph.get("stats", {}).get("relationship_count", 0),
-        "entities": sorted(e.get("id", "") for e in graph.get("entities", [])),
-    }
+    graph_content = _graph_content(graph)
     graph_id = _spine_id("graph", run_id, graph_content)
     record_artifact(
         artifact_id=graph_id, artifact_type="graph", artifact_version=run_id,
@@ -159,32 +184,34 @@ def record_run_lineage(
             "entity_count": graph_content["entity_count"],
             "relationship_count": graph_content["relationship_count"],
             "used_fallback": graph.get("diagnostics", {}).get("used_fallback"),
+            "lineage_schema": LINEAGE_SCHEMA_VERSION,
         },
     )
     artifact_ids.append(graph_id)
     by_type["graph"] = graph_id
 
     gaps = gaps or []
-    gap_content = {"gap_ids": sorted(g.get("gap_id", "") for g in gaps if g.get("gap_id"))}
+    gap_content = _gap_content(gaps)
     gap_set_id = _spine_id("gap_set", run_id, gap_content)
     record_artifact(
         artifact_id=gap_set_id, artifact_type="gap_set", artifact_version=run_id,
         project_id=project_id, content_hash=_content_hash(gap_content),
         run_id=run_id, parent_artifact=graph_id,
-        metadata={"gap_count": len(gaps), "gap_ids": gap_content["gap_ids"]},
+        metadata={"gap_count": len(gaps), "gap_ids": gap_content["gap_ids"], "lineage_schema": LINEAGE_SCHEMA_VERSION},
     )
     artifact_ids.append(gap_set_id)
     by_type["gap_set"] = gap_set_id
 
     proposals = proposals or []
-    proposal_content = {"count": len(proposals), "titles": sorted(p.get("title", "") for p in proposals)}
+    proposal_content = _proposal_content(proposals)
     proposal_set_id = _spine_id("proposal_set", run_id, proposal_content)
     record_artifact(
         artifact_id=proposal_set_id, artifact_type="proposal_set",
         artifact_version=run_id, project_id=project_id,
         content_hash=_content_hash(proposal_content), run_id=run_id,
         parent_artifact=gap_set_id,
-        metadata={"proposal_count": len(proposals), "pipeline_artifact": f"pipeline:{run_id}"},
+        metadata={"proposal_count": len(proposals), "pipeline_artifact": f"pipeline:{run_id}",
+                  "lineage_schema": LINEAGE_SCHEMA_VERSION},
     )
     artifact_ids.append(proposal_set_id)
     by_type["proposal_set"] = proposal_set_id
@@ -197,8 +224,7 @@ def get_technical_lineage(run_id: str) -> dict:
     walkable structure: {root, nodes, edges, fan_in_edges, orphans}.
     `orphans` lists any row whose parent_artifact doesn't resolve within
     this run's own artifact set -- reported, never silently dropped."""
-    rows = list_artifacts(project_id=None, status=None)
-    rows = [r for r in rows if r.get("run_id") == run_id]
+    rows = list_artifacts(run_id=run_id)
     by_id = {r["artifact_id"]: r for r in rows}
 
     edges = []
@@ -259,7 +285,7 @@ def get_scientific_lineage(run_id: str, gap_id: str | None = None) -> dict:
     fields) cannot be meaningfully traced -- they are excluded from
     `gaps` and counted in `n_gaps_without_identity` instead of being
     rendered with a fabricated/None identity."""
-    loaded = load_run(run_id)
+    loaded = load_run(run_id, sections=False)         # the section text is not part of the chain
     if not loaded:
         raise ValueError(f"Run '{run_id}' was not found -- cannot trace lineage.")
     results = loaded.get("results", {}) or {}
@@ -338,7 +364,7 @@ def trace_artifact_descendants(artifact_id: str) -> list[dict]:
     root = get_artifact(artifact_id)
     if not root or not root.get("run_id"):
         return []
-    all_in_run = [r for r in list_artifacts() if r.get("run_id") == root["run_id"]]
+    all_in_run = list_artifacts(run_id=root["run_id"])
     by_id = {r["artifact_id"]: r for r in all_in_run}
 
     descendants = []
@@ -352,3 +378,49 @@ def trace_artifact_descendants(artifact_id: str) -> list[dict]:
                 break
             node = by_id.get(node["parent_artifact"])
     return descendants
+
+
+def verify_lineage(run_id: str) -> dict:
+    """Recomputes the lineage hashes from what is saved now and compares them with the ones recorded when the run was made.
+    Returns {"checked": [...], "mismatches": [{"artifact_type", "detail"}], "unverifiable": [...]}.
+    A mismatch means the saved results, or the stored copy of a PDF, are not what the run produced. An artifact recorded
+    before the hashes covered the content (lineage schema 1) is reported as unverifiable, never as fine."""
+    loaded = load_run(run_id, sections=False)
+    if not loaded:
+        raise ValueError(f"Run '{run_id}' was not found.")
+    results = loaded.get("results") or {}
+    artifacts = list_artifacts(run_id=run_id)
+    by_type = {r["artifact_type"]: r for r in artifacts if r["artifact_type"] != "paper_extraction"}
+    out = {"checked": [], "mismatches": [], "unverifiable": []}
+
+    def check(kind, content):
+        row = by_type.get(kind)
+        if row is None:
+            return
+        if (row.get("metadata") or {}).get("lineage_schema", 1) < LINEAGE_SCHEMA_VERSION:
+            out["unverifiable"].append(kind)
+            return
+        out["checked"].append(kind)
+        if _content_hash(content) != row["content_hash"]:
+            out["mismatches"].append({"artifact_type": kind, "detail": "the saved results differ from what the run recorded"})
+
+    if results.get("graph"):
+        check("graph", _graph_content(results["graph"]))
+    if "gap_set" in by_type:
+        check("gap_set", _gap_content(results.get("gaps") or []))
+    if "proposal_set" in by_type:
+        check("proposal_set", _proposal_content(results.get("proposals") or []))
+
+    project_id = (by_type.get("corpus") or {}).get("project_id")
+    stored = {f["filename"]: f.get("sha256") for f in list_project_files(project_id, kind="paper", run_id=run_id)} if project_id else {}
+    for row in (r for r in artifacts if r["artifact_type"] == "paper_extraction"):
+        meta = row.get("metadata") or {}
+        name, recorded = meta.get("filename"), meta.get("source_sha256")
+        if not recorded:
+            out["unverifiable"].append(f"paper_extraction:{name}")
+        elif stored.get(name) and stored[name] != recorded:
+            out["mismatches"].append({"artifact_type": "paper_extraction",
+                                      "detail": f"the stored copy of {name} is not the PDF this run read"})
+        else:
+            out["checked"].append(f"paper_extraction:{name}")
+    return out

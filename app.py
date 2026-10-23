@@ -114,7 +114,7 @@ from pipeline.graph_quality import score_graph_quality, apply_graph_quality_to_g
 from pipeline.gap_challenger import run_challenge, GAP_CHALLENGER_STAGE_VERSION
 from pipeline.repeatability_score import compute_repeatability_score
 from pipeline.run_compare import compare_runs
-from pipeline.lineage import record_run_lineage, get_technical_lineage, get_scientific_lineage
+from pipeline.lineage import record_run_lineage, get_technical_lineage, get_scientific_lineage, verify_lineage
 from utils.token_meter import TokenMeter
 from pipeline.graph_persistence import (
     connect_ok as graph_store_connect_ok, save_graph_snapshot, load_graph_snapshot,
@@ -877,6 +877,17 @@ def _render_lineage(run_id: str) -> None:
                 _item(f"🔗 {esc(e['parent'])} → {esc(e['child'])} ({esc(child.get('artifact_type','?'))})")
             if tech["fan_in_edges"]:
                 st.caption(f"{len(tech['fan_in_edges'])} fan-in edge(s) (e.g. N papers → 1 evidence set)")
+            _check = verify_lineage(run_id)
+            if _check["mismatches"]:
+                show_warning("These parts of the run no longer match what it recorded: "
+                             + "; ".join(f"{m['artifact_type']} ({m['detail']})" for m in _check["mismatches"]))
+            elif _check["checked"]:
+                st.caption(f"Integrity check passed for {len(_check['checked'])} part(s): the saved results match the hashes "
+                           "recorded when the run was made."
+                           + (f" {len(_check['unverifiable'])} older part(s) cannot be checked." if _check["unverifiable"] else ""))
+            elif _check["unverifiable"]:
+                st.caption("This run was recorded before its parts were hashed from their content, so the integrity "
+                           "check is not possible.")
             if tech["orphans"]:
                 show_warning(f"{len(tech['orphans'])} artifact(s) with an unresolved parent.")
 
@@ -1173,15 +1184,12 @@ def _render_project_view(project: dict, runs: list[dict]) -> None:
                 st.session_state["main_view"] = "Analysis"
                 st.rerun()
 
-    zip_key = f"project_zip_{pid}"
-    if st.button("Prepare project download", key=f"prep_zip_{pid}"):
-        st.session_state[zip_key] = project_store.build_project_zip(pid)
-    if st.session_state.get(zip_key):
-        st.download_button("Download project (.zip)", data=st.session_state[zip_key],
-                           file_name=f"{project_store.safe_filename(project['name'])}.zip",
-                           mime="application/zip", key=f"dl_zip_{pid}")
-        st.caption("The zip holds the papers, every run's results and reports, and a database export "
-                   "with the project's runs and feedback.")
+    # The zip is built when the download is requested, not kept in the session (it can be hundreds of megabytes).
+    st.download_button("Download project (.zip)", data=lambda: project_store.build_project_zip(pid),
+                       file_name=f"{project_store.safe_filename(project['name'])}.zip",
+                       mime="application/zip", key=f"dl_zip_{pid}")
+    st.caption("The zip holds the papers, every run's results and reports, a database export with the project's runs "
+               "and feedback, and a checksum list so a copy can be checked later.")
 
 
 # ── Project: feedback forms (used by the Analysis view) ──────────────────────

@@ -907,7 +907,8 @@ def get_artifact(artifact_id: str) -> dict | None:
     return _decode_json_cols(row, "research_artifacts") if row else None
 
 
-def list_artifacts(artifact_type: str = None, project_id: str = None, status: str = None) -> list[dict]:
+def list_artifacts(artifact_type: str = None, project_id: str = None, status: str = None,
+                   run_id: str = None) -> list[dict]:
     init_db()
     conn = _get_conn()
     cur = conn.cursor()
@@ -918,6 +919,8 @@ def list_artifacts(artifact_type: str = None, project_id: str = None, status: st
         clauses.append("project_id = ?"); params.append(project_id)
     if status:
         clauses.append("status = ?"); params.append(status)
+    if run_id:
+        clauses.append("run_id = ?"); params.append(run_id)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     # rowid breaks ties between rows created within the same millisecond.
     cur.execute(f"SELECT * FROM research_artifacts {where} ORDER BY created_at DESC, rowid DESC", params)

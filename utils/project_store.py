@@ -302,21 +302,62 @@ def read_project_file(project_id: str, rel_path: str) -> bytes:
     return _inside(folder, folder / rel_path).read_bytes()
 
 
+CHECKSUMS_NAME = "CHECKSUMS.sha256"
+
+
 def build_project_zip(project_id: str) -> bytes:
-    """The whole project as one zip: its folder plus database_export.json (the
-    project row, its runs' metadata, file list and all feedback), so the
-    details held in the database travel with the files."""
+    """The whole project as one zip: its folder plus database_export.json (the project row, its runs' metadata, file list
+    and all feedback), so the details held in the database travel with the files, and CHECKSUMS.sha256 (one line per
+    file, in the format `sha256sum -c` reads) so a copy can be checked later. Links inside the folder are not followed:
+    only real files go in."""
     folder = project_dir(project_id)
     export = {
+        "format": 1,
+        "exported_at": db.utc_now_iso(),
         "project": db.get_project(project_id),
         "runs": db.list_runs(limit=100000, project_id=project_id),
         "files": db.list_project_files(project_id),
         "feedback": db.list_feedback(project_id=project_id),
     }
+    members: list[tuple[str, bytes]] = []
+    for path in sorted(folder.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        members.append((path.relative_to(folder).as_posix(), path.read_bytes()))
+    members.append(("database_export.json", json.dumps(export, default=str, indent=2).encode("utf-8")))
+    checksums = "".join(f"{hashlib.sha256(data).hexdigest()}  {name}\n" for name, data in members)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for path in sorted(folder.rglob("*")):
-            if path.is_file():
-                z.write(path, path.relative_to(folder).as_posix())
-        z.writestr("database_export.json", json.dumps(export, default=str, indent=2))
+        for name, data in members:
+            z.writestr(name, data)
+        z.writestr(CHECKSUMS_NAME, checksums)
     return buf.getvalue()
+
+
+def verify_project_zip(data: bytes) -> list[str]:
+    """Problems found in a project zip made by build_project_zip: a missing or changed file, a file the checksums do not
+    list, or no checksum file at all. An empty list means the zip is as it was exported."""
+    problems = []
+    try:
+        z = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        return ["not a readable zip file"]
+    with z:
+        if (bad := z.testzip()) is not None:
+            problems.append(f"damaged file inside the zip: {bad}")
+        if CHECKSUMS_NAME not in z.namelist():
+            return problems + [f"{CHECKSUMS_NAME} is missing"]
+        listed = {}
+        for line in z.read(CHECKSUMS_NAME).decode("utf-8").splitlines():
+            digest, _, name = line.partition("  ")
+            if digest and name:
+                listed[name] = digest
+        for name, digest in listed.items():
+            if name not in z.namelist():
+                problems.append(f"missing: {name}")
+            elif hashlib.sha256(z.read(name)).hexdigest() != digest:
+                problems.append(f"changed: {name}")
+        for name in z.namelist():
+            if name != CHECKSUMS_NAME and name not in listed:
+                problems.append(f"not listed in the checksums: {name}")
+    return problems

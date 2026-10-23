@@ -21,6 +21,7 @@ Design notes:
   module is an extraction, not a rewrite -- any behaviour change here would
   silently change what Streamlit does too.
 """
+import hashlib
 import os
 import tempfile
 import time
@@ -927,6 +928,7 @@ def _run_full_pipeline(
             project_id=project_id,
             papers=all_papers, wiki=wiki, ref_papers=ref_papers,
             evidence_objects=evidence_objects,
+            source_hashes={fn: hashlib.sha256(data).hexdigest() for fn, data in papers},
             graph=None if gate_blocked else graph,
             gaps=None if gate_blocked else validated_gaps,
             proposals=None if gate_blocked else proposals,
