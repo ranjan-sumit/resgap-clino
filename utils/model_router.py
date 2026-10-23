@@ -250,6 +250,11 @@ class ModelRouter:
     def model(self) -> str:
         return self.config.spec_for(self._role).model
 
+    def cache_tag(self) -> str:
+        """The provider and model that answer for the current stage; part of every cached result's key."""
+        spec = self.config.spec_for(self._role)
+        return f"{spec.provider}:{spec.model}"
+
     @property
     def api_key(self) -> str:
         return key_for(self.config.spec_for(ROLE_ANALYSIS), self.keys)

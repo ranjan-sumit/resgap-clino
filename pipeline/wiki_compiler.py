@@ -9,6 +9,7 @@ from pipeline.pdf_parser import get_smart_excerpt
 from pipeline.page_index import tree_to_summary
 from domain_config import inject_domain_into_wiki_prompt
 from utils.azure_client import unwrap, LLMCallError
+from utils.cache_tag import model_tag
 from utils.database import compute_cache_key, get_cached_wiki_page, save_cached_wiki_page
 
 # Bumped whenever WIKI_SYSTEM_PROMPT or the wiki-domain-injection logic changes,
@@ -17,7 +18,7 @@ from utils.database import compute_cache_key, get_cached_wiki_page, save_cached_
 # so pages cached at version 1 for papers with one huge section are empty and wrong.
 # 3: the model now sees up to WIKI_EXCERPT_CHARS of the paper (was 10,000, i.e. 12-20%
 # of a typical paper: e.g. a survey's own "Limitations" section never reached it).
-WIKI_STAGE_VERSION = 3
+WIKI_STAGE_VERSION = 4     # 4: the cache key includes the model that wrote the page
 
 # Gemini flash-lite has a 1M-token window and ~60k characters is about 15k tokens, so
 # the whole of a normal paper fits for pennies. Anything longer is cut by priority.
@@ -87,7 +88,7 @@ def compile_wiki_page(paper: dict, tree, client, domain_config: dict = None) -> 
     cache_key = content_hash = domain_hash = None
     if cacheable:
         cache_key, content_hash, domain_hash = compute_cache_key(
-            content, domain_config, WIKI_DOMAIN_KEYS, WIKI_STAGE_VERSION
+            content, domain_config, WIKI_DOMAIN_KEYS, WIKI_STAGE_VERSION, model_tag=model_tag(client)
         )
         cached = get_cached_wiki_page(cache_key)
         if cached is not None and not _page_is_empty(cached):

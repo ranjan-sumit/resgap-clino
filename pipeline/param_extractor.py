@@ -12,6 +12,7 @@ import csv
 import io
 import logging
 from utils.azure_client import unwrap, LLMCallError
+from utils.cache_tag import model_tag
 from utils.database import compute_cache_key, get_cached_parameters, save_cached_parameters
 from pipeline.param_quality import annotate_parameters
 
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 # don't silently keep serving stale-logic results (AD-3).
 # 2: the prompt now excludes laboratory protocol settings (a real run's parameters were mostly
 # coating and staining concentrations, which no model can use).
-PARAM_STAGE_VERSION = 3   # 3: parameters carry evidence_kind (measured/opinion) and sanity checks
+PARAM_STAGE_VERSION = 4  # 3: parameters carry evidence_kind (measured/opinion) and sanity checks
 
 PARAM_EXTRACTION_PROMPT = """You are a clinical biostatistician extracting quantitative parameters
 from healthcare research paper summaries.
@@ -201,7 +202,7 @@ def extract_parameters(wiki: dict, papers: list, client, study_types: dict | Non
         # AD-3). Keyed on `context` (the wiki-derived LLM input), NOT
         # paper["full_text"] — this stage's actual input changes whenever the
         # wiki page changes, even if the raw paper text doesn't.
-        cache_key, content_hash, _ = compute_cache_key(context, None, [], PARAM_STAGE_VERSION)
+        cache_key, content_hash, _ = compute_cache_key(context, None, [], PARAM_STAGE_VERSION, model_tag=model_tag(client))
         cached = get_cached_parameters(cache_key)
         if cached is not None:
             params = cached

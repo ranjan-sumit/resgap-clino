@@ -27,6 +27,7 @@ import hashlib
 from datetime import datetime, date
 from pathlib import Path
 
+from utils import cache_tag
 from utils.run_storage import restore_sections, split_for_storage, to_utc_iso, utc_now_iso
 
 MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
@@ -195,6 +196,7 @@ def compute_cache_key(
     domain_config: dict | None,
     relevant_domain_keys: list[str],
     stage_logic_version: int,
+    model_tag: str = "",
 ) -> tuple[str, str, str]:
     """
     Shared cache-key computation for all Epic 2 cache tables (AD-3).
@@ -233,7 +235,7 @@ def compute_cache_key(
         ).hexdigest()
     else:
         domain_hash = "none"
-    cache_key = f"{content_hash}:{domain_hash}:{stage_logic_version}"
+    cache_key = f"{content_hash}:{domain_hash}:{stage_logic_version}" + cache_tag.suffix(model_tag)
     return cache_key, content_hash, domain_hash
 
 

@@ -579,9 +579,10 @@ def _run_full_pipeline(
             docling_result = {"text_segments": paper["text_segments"]}
         filename = paper.get("filename", f"paper_{i+1}")
         try:
-            evidence_dicts, diag, _ = extract_evidence_cached(
+            evidence_dicts, diag, from_cache = extract_evidence_cached(
                 filename, wiki_page, docling_result, client=client, use_llm=True,
             )
+            diag = dict(diag or {}, from_cache=from_cache)
         except Exception:
             # Evidence extraction is additive, not load-bearing.
             evidence_dicts, diag = [], {}
@@ -604,7 +605,9 @@ def _run_full_pipeline(
     _trace("Stage 2C — Evidence Extraction",
           f"{len(all_papers)} papers",
           f"{total_evidence} evidence objects, {n_quoted} with a verified quote and page "
-          f"(study types: " + ", ".join(f"{p['study_type'] or '?'}" for p in paper_profiles.values()) + ")")
+          f"(study types: " + ", ".join(f"{p['study_type'] or '?'}" for p in paper_profiles.values()) + ")"
+          + (f"; {n_cached_reads} of {len(reads)} papers served from saved results"
+             if (n_cached_reads := sum(1 for _f, _e, d in reads if (d or {}).get("from_cache"))) else ""))
 
     # ── Stages 3-6 (skipped entirely on a FAIL gate) ──────────────────────
     if not gate_blocked:
@@ -940,6 +943,7 @@ def _run_full_pipeline(
                 "model": _model_bundle(options),
                 "models": options.models,
                 "model_fallbacks": results["model_fallbacks"],
+                "models_that_answered": _audit["call_log"].models_used(),
                 "options": {
                     "use_vision": options.use_vision, "extract_refs": options.extract_refs,
                     "ref_limit": options.ref_limit,

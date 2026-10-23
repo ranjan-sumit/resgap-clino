@@ -32,6 +32,8 @@ import json
 import re
 
 from utils.azure_client import unwrap, LLMCallError
+from utils import cache_tag
+from utils.cache_tag import model_tag
 from utils.database import get_cached_evidence_objects, save_cached_evidence_objects
 from pipeline.agent_config import EVIDENCE_EXTRACTOR
 from packages.research_schemas.evidence_object import (
@@ -51,7 +53,7 @@ from packages.research_schemas.evidence_object import (
 # Bumped 3 -> 4: evidence is now read from the paper's text by the Evidence Reader
 # (verified quotes, real pages, study type); results cached from the wiki-based
 # path have no quotes and must not be served in its place.
-EVIDENCE_STAGE_VERSION = 5
+EVIDENCE_STAGE_VERSION = 6      # 6: the cache key includes the model that read the paper
 
 _DETERMINISTIC_FIELD_MAP = {
     "methods": "Method",
@@ -324,7 +326,7 @@ def extract_evidence_cached(paper_id: str, wiki_page: dict, docling_result: dict
     permanently frozen in place of what should have been a fuller result
     once the transient failure clears."""
     content_hash = _evidence_content_hash(paper_id, wiki_page, docling_result)
-    cache_key = f"{content_hash}:none:{EVIDENCE_STAGE_VERSION}"
+    cache_key = f"{content_hash}:none:{EVIDENCE_STAGE_VERSION}" + cache_tag.suffix(model_tag(client) if use_llm else "")
 
     cached = get_cached_evidence_objects(cache_key)
     if cached is not None:

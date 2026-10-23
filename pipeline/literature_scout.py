@@ -27,9 +27,10 @@ import requests
 
 from pipeline import academic_search as acad
 from utils.azure_client import LLMCallError, unwrap
+from utils.cache_tag import model_tag
 from utils.database import compute_cache_key, get_cached_gap_validation, save_cached_gap_validation
 
-SCOUT_STAGE_VERSION = 5            # v5: entries carry cached_at (expire) and papers carry url/doi
+SCOUT_STAGE_VERSION = 6         # v5: entries carry cached_at (expire) and papers carry url/doi
 CACHE_TTL_SECONDS = 30 * 24 * 3600   # a literature verdict goes stale: new papers appear
 GAP_WORKERS = 4                    # gaps checked at the same time (Semantic Scholar still paced)
 EUROPE_PMC_BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
@@ -261,7 +262,7 @@ def scout_gaps(gaps: list, client, domain_config: dict = None, ss_api_key: str =
             to_search.append(g)
             continue
         key, gap_hash, domain_hash = compute_cache_key(content, domain_config, ["search_boost_terms"],
-                                                       SCOUT_STAGE_VERSION)
+                                                       SCOUT_STAGE_VERSION, model_tag=model_tag(client))
         keyed[id(g)] = (key, gap_hash, domain_hash)
         hit = get_cached_gap_validation(key)
         if hit is not None and _is_fresh(hit, now()):

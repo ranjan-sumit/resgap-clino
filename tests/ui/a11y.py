@@ -28,7 +28,17 @@ def inject_axe(page) -> None:
         page.add_script_tag(url=AXE_URL)
 
 
+def settled(page) -> None:
+    """Wait until the previous screen has finished fading out (Streamlit keeps it, half transparent, marked
+    data-stale, until the new one is drawn); scanning mid-fade reports contrast on text that is leaving."""
+    page.wait_for_function(
+        "() => document.querySelectorAll('[data-stale=\"true\"]').length === 0"
+        " && !document.querySelector('[data-testid=\"stStatusWidget\"]')", timeout=30000)
+    page.wait_for_timeout(600)
+
+
 def scan(page) -> list[dict]:
+    settled(page)
     return page.evaluate(_AXE_JS)
 
 

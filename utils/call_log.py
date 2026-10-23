@@ -54,6 +54,15 @@ class CallLog:
     def failures(self) -> list[dict]:
         return [r for r in self.records if not r["ok"]]
 
+    def models_used(self) -> dict:
+        """The models that actually answered: {"provider:model": {"calls": n, "ok": n}} (a fallback shows up here)."""
+        used: dict = {}
+        for r in self.records:
+            row = used.setdefault(f"{r['provider']}:{r['model']}", {"calls": 0, "ok": 0})
+            row["calls"] += 1
+            row["ok"] += 1 if r["ok"] else 0
+        return used
+
     def summary(self) -> dict:
         calls = self.records
         return {"calls": len(calls), "failed": len(self.failures()), "dropped": self.dropped,
