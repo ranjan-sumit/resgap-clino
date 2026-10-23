@@ -3,6 +3,7 @@ Stage 2: PageIndex Tree Builder
 Converts extracted paper content into a hierarchical tree structure,
 simulating expert navigation of long documents without chunking.
 """
+from pipeline.figures import mark_unsupported
 import re
 
 
@@ -104,13 +105,14 @@ def build_tree(paper: dict) -> dict:
             table_node["children"].append(child)
         root["children"].append(table_node)
 
-    figures = paper.get("figures", [])
+    figures = [f for f in paper.get("figures", []) if f.get("description")]
     if figures:
-        fig_node = make_node(title="Figures (Vision)", content="", level=8)
+        fig_node = make_node(title="Figures (read by a model)", content="", level=8)
         for f in figures:
             child = make_node(
-                title=f"Figure (page {f['page']})",
-                content=f["description"],
+                title=f"{f.get('label', 'Figure')} (page {f['page']})",
+                content=(f.get("caption", "")[:200] + " | " if f.get("caption") else "")
+                + mark_unsupported(f["description"], f.get("numbers_not_in_text", [])),
                 level=9,
             )
             fig_node["children"].append(child)

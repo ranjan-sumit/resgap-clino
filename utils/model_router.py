@@ -279,6 +279,7 @@ class ModelRouter:
         if self.keys.get("gemini"):
             candidates.append(ModelSpec("gemini", get_provider("gemini").default_model))
         tried, last = set(), None
+        system = guard_system(system)                         # paper text in an image is data, like text
         # A provider that timed out on an earlier page of this run is skipped
         # (each hung call costs the full wait), unless nothing else is left.
         hung = getattr(self, "_vision_hung", None)
@@ -293,9 +294,14 @@ class ModelRouter:
                 continue
             tried.add(spec.provider)
             client.set_stage(self.current_stage)
+            if self.budget is not None:
+                self.budget.check()                           # over the cap: no further spend
+            self.limiter.acquire(spec.provider, spec.model)
             started = time.time()
             result = client.vision(system, user_text, image_bytes, max_tokens=max_tokens)
             if not isinstance(result, Failure):
+                if self.budget is not None:
+                    self.budget.add(self.budget.tokens_of(system, user_text, str(result.value or "")) + VISION_IMAGE_TOKENS)
                 self._log(spec, "vision", system, user_text, started, True)
                 return result
             self._log(spec, "vision", system, user_text, started, False, result.error.kind, result.error.detail)
@@ -378,6 +384,9 @@ class ModelRouter:
     # -- council -----------------------------------------------------------------
     def council_backend(self) -> "CouncilBackend":
         return CouncilBackend(self)
+
+
+VISION_IMAGE_TOKENS = 1200      # what one image costs in tokens, as an estimate for the run's budget
 
 
 class CouncilBackend:

@@ -6,6 +6,7 @@ import io
 import os
 import re
 import pdfplumber
+from pipeline import figures as figure_reader
 from pipeline import pdf_limits
 from utils.text_hygiene import find_instructions, strip_invisible, visible_char
 from utils.azure_client import unwrap
@@ -109,8 +110,6 @@ def _extract_text_by_section(pdf_path: str) -> dict:
 
 
 _REFERENCE_HEADINGS = frozenset({"references", "bibliography", "literature cited", "reference list"})
-_VISION_BUDGET_SECONDS = 150
-_MAX_VISION_FAILURES_IN_A_ROW = 2
 _NON_BODY_LABELS = frozenset({"page_header", "page_footer", "page_number"})
 _MIN_STRUCTURAL_SECTIONS = 3
 
@@ -203,82 +202,6 @@ def _extract_tables(pdf_path: str) -> list:
     return tables
 
 
-def _get_figure_pages(pdf_path: str) -> list:
-    """
-    Detect pages that are likely figure-heavy (low text density).
-    Returns list of page indices (0-based).
-    """
-    figure_pages = []
-    with pdfplumber.open(pdf_path) as pdf:
-        for i, page in enumerate(pdf.pages):
-            text = page.extract_text() or ""
-            # Heuristic: page has images but few words → figure page
-            words = len(text.split())
-            has_image_ref = bool(re.search(r"figure|fig\.|chart|graph|diagram", text.lower()))
-            if words < 80 or (has_image_ref and words < 200):
-                figure_pages.append(i)
-    return figure_pages[:5]  # Cap at 5 pages to control API cost
-
-
-def _page_to_image_bytes(pdf_path: str, page_index: int, dpi: int = 150) -> bytes:
-    """Convert a PDF page to PNG image bytes using PyMuPDF."""
-    if not FITZ_AVAILABLE:
-        raise RuntimeError("PyMuPDF not available. Run: pip uninstall fitz frontend PyMuPDF -y && pip install PyMuPDF")
-    doc = fitz.open(pdf_path)
-    page = doc[page_index]
-    mat = fitz.Matrix(dpi / 72, dpi / 72)
-    pix = page.get_pixmap(matrix=mat)
-    return pix.tobytes("png")
-
-
-def _analyze_figures_with_vision(pdf_path: str, client, figure_pages: list, on_progress=None) -> list:
-    """
-    Send figure-heavy pages to client.vision() (utils/azure_client.py's
-    VISION_MODEL -- meta/llama-3.2-11b-vision-instruct on NVIDIA NIM as of
-    B26, 2026-08-22) for analysis. Returns list of figure descriptions.
-
-    B26 fix note: this docstring previously said "GPT-4o Vision" -- a
-    leftover from a different provider/model that was never actually
-    wired up here. The real model in use (gpt-oss-120b, before B26) had
-    no confirmed image support at all and was silently returning "I can't
-    see an image" as if it were a real description; nothing here would
-    have caught that, since unwrap() only raises on a Failure, not on a
-    Success carrying a wrong-but-well-formed answer. Fixed at the source
-    (VISION_MODEL now points at a model that actually works), not by
-    adding output-sniffing here.
-    """
-    import time
-    descriptions = []
-    system = (
-        "You are a research paper analyst. Analyze this page from a research paper. "
-        "Identify and describe any figures, charts, graphs, or result tables. "
-        "Focus on: what is being shown, key values or trends, and any stated limitations or caveats."
-    )
-    started, failures_in_a_row = time.monotonic(), 0
-    for n, page_idx in enumerate(figure_pages, 1):
-        # Figure analysis is a bonus, never worth stalling the run: stop after
-        # two failures in a row, or once this paper has used its time budget.
-        if failures_in_a_row >= _MAX_VISION_FAILURES_IN_A_ROW or time.monotonic() - started > _VISION_BUDGET_SECONDS:
-            descriptions.append({"page": page_idx + 1,
-                                 "description": "[Skipped: figure analysis was failing or taking too long]"})
-            continue
-        if on_progress:
-            on_progress(f"page {n}/{len(figure_pages)}")
-        try:
-            img_bytes = _page_to_image_bytes(pdf_path, page_idx)
-            desc = unwrap(client.vision(
-                system=system,
-                user_text="Describe the figures and tables on this page in detail.",
-                image_bytes=img_bytes,
-            ))
-            descriptions.append({"page": page_idx + 1, "description": desc})
-            failures_in_a_row = 0
-        except Exception as e:
-            failures_in_a_row += 1
-            descriptions.append({"page": page_idx + 1, "description": f"[Vision analysis failed: {e}]"})
-    return descriptions
-
-
 MIN_READABLE_CHARS = 200
 
 
@@ -359,11 +282,17 @@ def parse_pdf(pdf_path: str, filename: str, client=None, use_vision: bool = Fals
     # Tables: the structural parser reads ruled tables as real rows; pdfplumber is the fallback.
     result["tables"] = list(structural_out.get("tables") or []) or _extract_tables(pdf_path)
 
-    # Vision-based figure extraction (optional, requires PyMuPDF)
-    if use_vision and client and FITZ_AVAILABLE:
-        figure_pages = _get_figure_pages(pdf_path)
-        if figure_pages:
-            result["figures"] = _analyze_figures_with_vision(pdf_path, client, figure_pages, on_progress)
+    # Figures are found from the PDF itself (a caption with a picture or chart beside it); no model is involved in that.
+    # With vision on, the first few are shown to the model, each with its caption.
+    if FITZ_AVAILABLE:
+        try:
+            located = figure_reader.find_figures(pdf_path, max_figures=50)
+        except Exception:
+            located = []
+        result["figure_list"] = [{k: f[k] for k in ("label", "page", "caption", "kind")} for f in located]
+        if use_vision and client and located:
+            result["figures"] = figure_reader.analyze_figures(
+                pdf_path, client, located[:figure_reader.MAX_FIGURES], on_progress)
 
     return result
 
@@ -419,11 +348,12 @@ def get_smart_excerpt(paper: dict, max_chars: int = 12000) -> str:
             excerpt_parts.append(table_summary)
 
     # Add figure descriptions
-    figures = paper.get("figures", [])
+    figures = [f for f in paper.get("figures", []) if f.get("description")]
     if figures:
-        fig_summary = "[FIGURES]\n"
+        fig_summary = "[FIGURES -- described by a model from the images; values may be approximate]\n"
         for f in figures[:3]:
-            fig_summary += f"Page {f['page']}: {f['description'][:300]}\n\n"
+            fig_summary += (f"{f.get('label', 'Figure')} (page {f['page']}): "
+                            f"{figure_reader.mark_unsupported(f['description'], f.get('numbers_not_in_text', []))[:360]}\n\n")
         if used_chars + len(fig_summary) < max_chars:
             excerpt_parts.append(fig_summary)
 

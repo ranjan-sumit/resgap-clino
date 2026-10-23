@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline import pdf_parser
+from pipeline import figures as figure_reader
 from utils.azure_client import AzureOpenAIClient, ErrorInfo, Failure, Success
 from utils.model_router import ModelConfig, ModelRouter, ModelSpec
 
@@ -53,41 +53,62 @@ class HardTimeoutTests(unittest.TestCase):
         self.assertEqual(mock_openai.return_value.chat.completions.create.call_count, 1)
 
 
+def _figure_pdf(n_pages: int) -> str:
+    import tempfile
+    import fitz
+    doc = fitz.open()
+    for i in range(n_pages):
+        doc.new_page().insert_text((50, 100), f"Figure {i + 1}. A chart with values 12 and 40.", fontsize=11)
+    path = tempfile.mktemp(suffix=".pdf")
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def _figs(n):
+    return [{"label": f"Figure {i + 1}", "page": i + 1, "caption": f"Figure {i + 1}. A chart with values 12 and 40.",
+             "bbox": (0, 0, 100, 100), "kind": "raster"} for i in range(n)]
+
+
 class FigureLoopTests(unittest.TestCase):
-    def _run(self, results, **patches):
+    def _run(self, results, **kw):
         client = MagicMock()
         client.vision.side_effect = results
-        with patch.object(pdf_parser, "_page_to_image_bytes", return_value=b"img"):
-            return pdf_parser._analyze_figures_with_vision("x.pdf", client, list(range(len(results))), **patches), client
+        path = _figure_pdf(len(results))
+        self.addCleanup(lambda: Path(path).unlink(missing_ok=True))
+        with patch.object(figure_reader, "render_figure", return_value=b"img"):
+            return figure_reader.analyze_figures(path, client, _figs(len(results)), **kw), client
 
     def test_stops_after_two_failures_in_a_row(self):
         fail = Failure(ErrorInfo(kind="timeout", detail="slow"))
         out, client = self._run([fail, fail, fail, fail, fail])
         self.assertEqual(client.vision.call_count, 2)
-        self.assertEqual(len(out), 5)                                  # every page still accounted for
-        self.assertTrue(all(d["description"].startswith("[") for d in out))
-        self.assertIn("Skipped", out[-1]["description"])
+        self.assertEqual(len(out), 5)                                  # every figure still accounted for
+        self.assertTrue(all(d["description"] == "" and d["error"] for d in out))   # a failure is never a description
+        self.assertIn("skipped", out[-1]["error"])
 
     def test_a_success_resets_the_failure_count(self):
         fail = Failure(ErrorInfo(kind="timeout", detail="slow"))
         out, client = self._run([fail, Success("fig"), fail, Success("fig2")])
         self.assertEqual(client.vision.call_count, 4)
-        self.assertEqual([d["description"] for d in out if not d["description"].startswith("[")], ["fig", "fig2"])
+        self.assertEqual([d["description"] for d in out if d["description"]], ["fig", "fig2"])
 
     def test_stops_once_the_time_budget_is_used(self):
         client = MagicMock()
         client.vision.return_value = Success("fig")
+        path = _figure_pdf(4)
+        self.addCleanup(lambda: Path(path).unlink(missing_ok=True))
         clock = iter([0, 1, 2, 999, 999, 999])
-        with patch.object(pdf_parser, "_page_to_image_bytes", return_value=b"img"), \
+        with patch.object(figure_reader, "render_figure", return_value=b"img"), \
              patch("time.monotonic", side_effect=lambda: next(clock)):
-            out = pdf_parser._analyze_figures_with_vision("x.pdf", client, [0, 1, 2, 3])
+            out = figure_reader.analyze_figures(path, client, _figs(4))
         self.assertLess(client.vision.call_count, 4)
-        self.assertIn("Skipped", out[-1]["description"])
+        self.assertIn("skipped", out[-1]["error"])
 
-    def test_progress_is_reported_per_page(self):
+    def test_progress_is_reported_per_figure(self):
         seen = []
         self._run([Success("a"), Success("b")], on_progress=seen.append)
-        self.assertEqual(seen, ["page 1/2", "page 2/2"])
+        self.assertEqual(seen, ["Figure 1 (1/2)", "Figure 2 (2/2)"])
 
 
 class RouterVisionFallThroughTests(unittest.TestCase):

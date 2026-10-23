@@ -431,8 +431,10 @@ def _run_full_pipeline(
     for p in all_papers:
         secs = [k for k, v in p.get("sections", {}).items() if k != "_header" and str(v).strip()]
         figs = p.get("figures") or []
-        bad = sum(1 for f in figs if str(f.get("description", "")).startswith("["))
-        fig_note = f", figures: {len(figs) - bad}/{len(figs)} analysed" if figs else ""
+        bad = sum(1 for f in figs if f.get("error") or not f.get("description"))
+        n_listed = len(p.get("figure_list") or [])
+        fig_note = (f", figures: {len(figs) - bad}/{len(figs)} analysed of {n_listed} found" if figs
+                    else (f", {n_listed} figure(s) found" if n_listed else ""))
         _trace(f"  Parsed {p.get('filename', '?')}",
                f"{p.get('char_count', 0):,} chars",
                f"{len(secs)} sections, {len(p.get('tables', []))} tables{fig_note}",
@@ -538,7 +540,7 @@ def _run_full_pipeline(
             paper_scores.append(score_paper_completeness(
                 reconciled, wiki_page,
                 ref_count=_per_paper.get(paper.get("filename"), len(ref_papers) if not _per_paper else 0),
-                has_figures=bool(paper.get("figures")), paper=paper,
+                has_figures=bool(paper.get("figures") or paper.get("figure_list")), paper=paper,
             ))
 
         corpus_quality_metrics = compute_corpus_quality(
