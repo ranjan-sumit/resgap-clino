@@ -1043,6 +1043,7 @@ CACHE_STAGES = {
     "parameters": "Lab parameters",
     "docling_extractions": "Second-parser check",
     "gap_validations": "Gap literature checks",
+    "references": "Reference lookups",
 }
 
 
@@ -1053,10 +1054,10 @@ def cache_stats() -> list[dict]:
     out = []
     try:
         for table, label in CACHE_STAGES.items():
-            cols = [r["name"] for r in conn.execute(f"PRAGMA table_info({table})")]
+            cols = [r["name"] for r in conn.execute(f'PRAGMA table_info("{table}")')]
             payload = [c for c in cols if c.endswith("_json")]
             size = " + ".join(f"COALESCE(length({c}), 0)" for c in payload) or "0"
-            row = conn.execute(f"SELECT COUNT(*) AS n, COALESCE(SUM({size}), 0) AS b FROM {table}").fetchone()
+            row = conn.execute(f'SELECT COUNT(*) AS n, COALESCE(SUM({size}), 0) AS b FROM "{table}"').fetchone()
             out.append({"table": table, "label": label, "rows": row["n"], "bytes": row["b"]})
     finally:
         conn.close()
@@ -1070,11 +1071,18 @@ def clear_cache(table: str) -> int:
     init_db()
     conn = _get_conn()
     try:
-        n = conn.execute(f"DELETE FROM {table}").rowcount
+        n = conn.execute(f'DELETE FROM "{table}"').rowcount
         conn.commit()
         return n
     finally:
         conn.close()
+
+
+def purge_derived_caches() -> dict:
+    """Empties every cache of results derived from papers and from what was looked up for them. They are keyed by content,
+    not by project, so the part belonging to one deleted project cannot be told from the rest: all of it goes, and the next
+    analysis recomputes what it needs. Returns {table: rows removed}."""
+    return {table: clear_cache(table) for table in CACHE_STAGES}
 
 
 def update_project(project_id: str, name: str, description: str = "", domain: str = "", interest: str = "") -> dict:

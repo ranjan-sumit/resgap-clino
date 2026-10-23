@@ -20,8 +20,15 @@ Pseudomonas aeruginosa), and the two runs extracted different relationships betw
 reconcile is left as different: "FEV1" and "Forced expiratory volume in 1 s", "AAV" and "Adeno-associated viruses", "mRNA" and
 "Messenger RNA". Matching those would need a glossary or a model, and a wrong merge is worse than a visible difference.
 
+## Follow-up: erase on delete (the two items first left open)
+
+| Was open | Fix |
+|---|---|
+| Caches of derived results (paper summaries, evidence, parameters, second-parser output, literature checks, reference lookups) are keyed by the content of a paper, not by a project, so the part belonging to a deleted project cannot be told from the rest. The **reference lookup cache could not even be cleared in Settings**: it was missing from the list (and its table name is a SQL keyword). | The reference cache is listed and clearable. `purge_derived_caches()` empties all six. Because they cannot be attributed to a project, the purge empties them all; other projects recompute what they need. |
+| Deleting a project moved its folder to `_deleted/`, and nothing ever erased it. | `RESGAP_ERASE_ON_DELETE=1` makes every delete permanent: the project folder is erased (read-only files included), copies of that project from earlier deletes go too, a run delete always removes its files, and the derived caches are emptied. Without the variable, deletes stay recoverable. Settings > Saved results lists the folders kept aside and has an "Erase" button, and the delete screens say which of the two will happen. |
+
 ## Still open
 
-- Cached content that is not keyed by a run (extracted wiki pages, parameters, evidence, references, literature checks) outlives a deleted run; it is keyed by the content of the paper. "Saved results" in Settings clears each cache; a deployment with a deletion requirement needs a purge that does it as part of deleting a project.
-- Project folders on disk: deleting a project moves its folder aside rather than erasing it (PR-18); a deployment needs the erase step as well.
+- Backups (`scripts/backup.py`, the Backup tab) contain whatever existed when they were made, deleted data included. A deployment with a deletion requirement needs a retention rule for backup files; the app does not expire them beyond keeping the newest seven.
 - Snapshots are compared by name only. Two runs on different papers can be diffed, and the result says little.
+- Erasing a file on a journaling or copy-on-write disk or SSD does not guarantee the bytes are overwritten; that belongs to the storage layer (encryption at rest, with the key destroyed).

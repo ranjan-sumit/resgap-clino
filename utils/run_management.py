@@ -2,14 +2,17 @@
 
 Every operation keeps the database and the project folder consistent, and nothing is destroyed without
 a way back: archiving only hides a run, merging archives the duplicates, and deleting a project moves
-its folder to `<projects>/_deleted/` instead of erasing it.
+its folder to `<projects>/_deleted/` instead of erasing it. A deployment that must really delete sets
+RESGAP_ERASE_ON_DELETE=1: deletes then erase the folder, remove a run's files and empty the caches of derived results.
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import sqlite3
+import stat
 from datetime import datetime
 from pathlib import Path
 
@@ -41,8 +44,25 @@ def run_footprint(project_id: str, run_id: str) -> dict:
     return {"files": [f["filename"] for f in files], "feedback": len(feedback)}
 
 
+def erase_on_delete() -> bool:
+    """A deployment policy (RESGAP_ERASE_ON_DELETE=1): deleting is permanent. A deleted project's folder is erased instead of
+    kept in `_deleted`, a deleted run's files always go, and the caches of derived results are emptied."""
+    return os.getenv("RESGAP_ERASE_ON_DELETE", "").strip().lower() in ("1", "true", "yes")
+
+
+def _rmtree(path: Path) -> None:
+    """Erase a folder, including read-only files (Windows refuses to delete those otherwise)."""
+    def _writable(func, p, _exc):
+        os.chmod(p, stat.S_IWRITE)
+        func(p)
+    shutil.rmtree(path, onerror=_writable)
+
+
 def delete_run(project_id: str, run_id: str, remove_files: bool = False) -> None:
-    """Deletes a run's database rows. Its files stay on disk unless `remove_files` (papers are never removed)."""
+    """Deletes a run's database rows. Its files stay on disk unless `remove_files` (papers are never removed);
+    with the erase policy the files always go and the derived-result caches are emptied too."""
+    erase = erase_on_delete()
+    remove_files = remove_files or erase
     if remove_files:
         folder = project_store.project_dir(project_id) / "runs" / run_id
         for f in db.list_project_files(project_id, run_id=run_id):
@@ -50,6 +70,8 @@ def delete_run(project_id: str, run_id: str, remove_files: bool = False) -> None
                 _drop_file_row(project_id, f["id"])
         shutil.rmtree(folder, ignore_errors=True)
     db.delete_run(run_id)
+    if erase:
+        db.purge_derived_caches()
 
 
 def _drop_file_row(project_id: str, file_id: int) -> None:
@@ -143,14 +165,47 @@ def update_project(project_id: str, name: str, description: str, domain: str, in
     return project
 
 
-def delete_project(project_id: str) -> Path | None:
-    """Deletes a project from the database and moves its folder to `_deleted/` (kept, not erased).
-    Returns where the folder went, or None when there was no folder."""
+def deleted_folder() -> Path:
+    return project_store.projects_root() / "_deleted"
+
+
+def deleted_folder_footprint() -> dict:
+    """What the `_deleted` folder holds: {"projects": n, "bytes": n}."""
+    root = deleted_folder()
+    if not root.is_dir():
+        return {"projects": 0, "bytes": 0}
+    return {"projects": sum(1 for p in root.iterdir() if p.is_dir()),
+            "bytes": sum(f.stat().st_size for f in root.rglob("*") if f.is_file())}
+
+
+def empty_deleted_folder() -> int:
+    """Erases everything earlier project deletes moved aside. Returns how many project folders went."""
+    n = deleted_folder_footprint()["projects"]
+    if deleted_folder().is_dir():
+        _rmtree(deleted_folder())
+    return n
+
+
+def delete_project(project_id: str, erase: bool | None = None) -> Path | None:
+    """Deletes a project from the database. By default its folder moves to `_deleted/` (kept, so a mistake can be undone);
+    with `erase` (or the RESGAP_ERASE_ON_DELETE policy) the folder is erased, folders of this project that an earlier delete
+    left in `_deleted/` go too, and the caches of derived results are emptied. Returns where the folder went, or None when
+    there was no folder or it was erased."""
     project = db.get_project(project_id)
     if project is None:
         raise ValueError(f"Unknown project: {project_id}")
+    erase = erase_on_delete() if erase is None else erase
     folder = project_store.projects_root() / project["folder"]
     db.delete_project_rows(project_id)                  # raises for the default project, before anything moves
+    if erase:
+        if folder.exists():
+            _rmtree(folder)
+        trash = deleted_folder()
+        if trash.is_dir():
+            for old in trash.glob(f"{project['folder']}-*"):
+                _rmtree(old)
+        db.purge_derived_caches()
+        return None
     if not folder.exists():
         return None
     target_dir = project_store.projects_root() / "_deleted"

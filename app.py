@@ -198,7 +198,8 @@ import hashlib
 from utils.run_storage import to_local_display
 from utils.database import with_sections, cache_stats as db_cache_stats, clear_cache as db_clear_cache, _db_path as db_path_for_display
 from utils.database import get_run_manifests_bulk, load_run_gate_fields_bulk, set_run_archived
-from utils.run_management import (best_to_keep, delete_project as delete_project_everywhere,
+from utils.run_management import (best_to_keep, delete_project as delete_project_everywhere, deleted_folder_footprint,
+                                  empty_deleted_folder, erase_on_delete,
                                   delete_run as delete_run_everywhere, find_duplicate_groups, merge_runs,
                                   project_footprint, rename_run, run_footprint,
                                   update_project as update_project_settings)
@@ -1084,7 +1085,12 @@ def _render_project_view(project: dict, runs: list[dict]) -> None:
                 st.markdown(f"- **{html.escape(r['name'])}**: {len(_fp['files'])} saved file(s)"
                             + (f" ({', '.join(_fp['files'][:4])})" if _fp["files"] else "")
                             + f", {_fp['feedback']} feedback item(s)")
-            _also_files = st.checkbox("Also delete the saved files from the project folder", key="delete_files_too")
+            if erase_on_delete():
+                st.caption("On this deployment a delete is permanent: the saved files go too, and the saved results kept for "
+                           "papers are emptied.")
+                _also_files = True
+            else:
+                _also_files = st.checkbox("Also delete the saved files from the project folder", key="delete_files_too")
             if (st.checkbox("I understand this cannot be undone", key="confirm_delete_runs")
                     and st.button(f"Delete {len(selected)} run(s)", key="delete_runs_btn")):
                 for r in selected:
@@ -1154,7 +1160,9 @@ def _render_project_view(project: dict, runs: list[dict]) -> None:
             show_warning(f"This removes {len(_fp['runs'])} run(s) and {_fp['n_files']} file record(s) "
                        f"({_fp['n_papers']} paper(s)) from the database"
                        + (": " + ", ".join(_fp["runs"][:6]) + ("…" if len(_fp["runs"]) > 6 else "") if _fp["runs"] else "")
-                       + ". The project folder is moved to a _deleted folder, not erased.")
+                       + (". Everything is erased permanently: the project folder, the saved results for papers, and any "
+                          "copy an earlier delete kept." if erase_on_delete() else
+                          ". The project folder is moved to a _deleted folder, not erased (Settings > Saved results can erase it)."))
             if (st.checkbox("I understand this deletes the project and its runs", key=f"confirm_delete_project_{pid}")
                     and st.button("Delete project", key=f"delete_project_btn_{pid}")):
                 delete_project_everywhere(pid)
@@ -1333,6 +1341,17 @@ def _render_settings() -> None:
             if c3.button("Clear", key=f"clear_{_row['table']}", disabled=_row["rows"] == 0):
                 _n = db_clear_cache(_row["table"])
                 st.toast(f"Cleared {_n} saved result(s) for {_row['label']}.")
+                st.rerun()
+        _trash = deleted_folder_footprint()
+        if _trash["projects"]:
+            st.markdown("")
+            t1, t2 = st.columns([4, 1], vertical_alignment="center")
+            t1.markdown("**Deleted projects kept aside**")
+            t1.caption(f"{_trash['projects']} project folder(s), {_fmt_bytes(_trash['bytes'])}. Deleting a project keeps its "
+                       "folder here in case of a mistake; erase them when you are sure.")
+            if t2.button("Erase", key="empty_deleted"):
+                _n = empty_deleted_folder()
+                st.toast(f"Erased {_n} deleted project folder(s).")
                 st.rerun()
         if not hide_paths():
             st.caption(f"Database: {db_path_for_display()}")
