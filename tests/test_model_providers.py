@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.model_providers import (
     PROVIDER_REGISTRY, DEFAULT_PROVIDER_KEY, get_provider, build_client,
 )
-from utils.azure_client import NVIDIA_BASE_URL, MASTER_MODEL, FALLBACK_MODEL
+from utils.azure_client import NVIDIA_BASE_URL, MASTER_MODEL
 
 
 class ProviderRegistryShapeTests(unittest.TestCase):
@@ -45,7 +45,7 @@ class ProviderRegistryShapeTests(unittest.TestCase):
         cfg = get_provider("nvidia")
         self.assertEqual(cfg.base_url, NVIDIA_BASE_URL)
         self.assertEqual(cfg.default_model, MASTER_MODEL)
-        self.assertEqual(cfg.fallback_model, FALLBACK_MODEL)
+        self.assertIsNone(cfg.fallback_model)             # the old one (kimi-k3) was retired (HTTP 410)
 
     def test_gemini_defaults_to_the_fast_model_its_full_run_was_verified_on(self):
         cfg = PROVIDER_REGISTRY["gemini"]
@@ -61,10 +61,11 @@ class ProviderRegistryShapeTests(unittest.TestCase):
         for key in ("openai", "qwen"):
             self.assertFalse(PROVIDER_REGISTRY[key].verified_live, f"{key} should be verified_live=False")
 
-    def test_nvidia_known_models_include_deepseek_and_kimi(self):
+    def test_nvidia_lists_no_model_that_the_provider_has_retired(self):
         models = PROVIDER_REGISTRY["nvidia"].known_models
-        self.assertTrue(any("deepseek" in m for m in models))
-        self.assertTrue(any("kimi" in m for m in models))
+        for retired in ("moonshotai/kimi-k3", "deepseek-ai/deepseek-v4-flash-0731", "openai/gpt-oss-120b"):
+            self.assertNotIn(retired, models)               # all answer 410 Gone (checked live 2026-10-23)
+        self.assertIn(PROVIDER_REGISTRY["nvidia"].default_model, models)
 
     def test_every_provider_has_at_least_one_known_model(self):
         for key, cfg in PROVIDER_REGISTRY.items():
@@ -94,18 +95,18 @@ class BuildClientTests(unittest.TestCase):
     def test_nvidia_default_model_matches_current_production_behavior(self, mock_make):
         client = build_client("nvidia", "fake-key")
         self.assertEqual(client.model, MASTER_MODEL)
-        self.assertEqual(client.fallback_model, FALLBACK_MODEL)
+        self.assertIsNone(client.fallback_model)
 
     @patch("utils.azure_client.make_nvidia_client")
     def test_nvidia_custom_model_override(self, mock_make):
-        client = build_client("nvidia", "fake-key", model="deepseek-ai/deepseek-v4-flash-0731")
-        self.assertEqual(client.model, "deepseek-ai/deepseek-v4-flash-0731")
+        client = build_client("nvidia", "fake-key", model="nvidia/nemotron-3.5-super-vl-120b-a12b")
+        self.assertEqual(client.model, "nvidia/nemotron-3.5-super-vl-120b-a12b")
 
     @patch("utils.azure_client.OpenAI")
     def test_openai_provider_uses_its_own_base_url_and_default_model(self, mock_openai_cls):
         client = build_client("openai", "fake-key")
         mock_openai_cls.assert_called_once_with(
-            base_url="https://api.openai.com/v1", api_key="fake-key",
+            base_url="https://api.openai.com/v1", api_key="fake-key", max_retries=0,
         )
         self.assertEqual(client.model, "gpt-5.6-luna")
         self.assertEqual(client.fallback_model, "gpt-5.6-terra")
@@ -114,7 +115,7 @@ class BuildClientTests(unittest.TestCase):
     def test_gemini_provider_uses_its_own_base_url(self, mock_openai_cls):
         build_client("gemini", "fake-key")
         mock_openai_cls.assert_called_once_with(
-            base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key="fake-key",
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key="fake-key", max_retries=0,
         )
 
     @patch("utils.azure_client.OpenAI")

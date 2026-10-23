@@ -46,7 +46,7 @@ class ChatResultTests(unittest.TestCase):
             client = AzureOpenAIClient(
                 api_key="other-key", base_url="https://api.openai.com/v1", model="gpt-5.6-luna",
             )
-        mock_openai_cls.assert_called_once_with(base_url="https://api.openai.com/v1", api_key="other-key")
+        mock_openai_cls.assert_called_once_with(base_url="https://api.openai.com/v1", api_key="other-key", max_retries=0)
         self.assertEqual(client.model, "gpt-5.6-luna")
 
     def test_non_nvidia_base_url_defaults_fallback_to_none(self):

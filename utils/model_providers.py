@@ -79,10 +79,12 @@ PROVIDER_REGISTRY = {
         # (entitled but timed out on a trivial live test call -- kept in
         # known_models as a manually-selectable option, just not the
         # default fallback while it's unreliable).
-        default_model="openai/gpt-oss-20b", fallback_model="moonshotai/kimi-k3",
+        # Checked live 2026-10-23: moonshotai/kimi-k3 and deepseek-ai/deepseek-v4-flash-0731 both answer HTTP 410 Gone
+        # (retired) and are gone from NVIDIA's model list, so they are removed, and there is no built-in fallback model
+        # (the one that was configured was dead). Models retire often here: use "Refresh model list" for what a key can use.
+        default_model="openai/gpt-oss-20b", fallback_model=None,
         known_models=(
             "openai/gpt-oss-20b",
-            "moonshotai/kimi-k3", "deepseek-ai/deepseek-v4-flash-0731",
             # Added 2026-10-20: 120B vision-language model, answers on this
             # account (13 s for a one-line reply with thinking off). Slow, so
             # it suits council seats, not the call-heavy jobs.
@@ -106,7 +108,9 @@ PROVIDER_REGISTRY = {
         # pipeline run was verified on, and it is fast (one wiki page in ~6s
         # vs ~42s on NVIDIA's gpt-oss-20b). gemini-3.6-flash is the fallback.
         default_model="gemini-3.5-flash-lite", fallback_model="gemini-3.6-flash",
-        known_models=("gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-3.7-flash"),
+        # gemini-3.7-flash is left out of the suggested list: it timed out at 125 s and 182 s on a one-word request (2026-10-23).
+        # It is still offered when "Refresh model list" shows it for your key.
+        known_models=("gemini-3.5-flash-lite", "gemini-3.6-flash"),
         # Live-checked 2026-10-19 with a real key: /models lists all three IDs,
         # each answered a chat call, a full 2-paper pipeline run completed on
         # gemini-3.5-flash-lite, and image input (vision_model below) described

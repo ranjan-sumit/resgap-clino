@@ -221,6 +221,7 @@ def _local_time(ts: str) -> str:
     return to_local_display(ts, getattr(st.context, "timezone", None))
 
 from ui.glossary import lookup as glossary_lookup
+from utils.provider_policy import provider_allowed
 from ui.messages import show_error, show_info, show_warning
 from ui.components import (esc, collapse_sidebar_on_phones, empty_state, error_state, loading_state, badge as _badge, tier_badge as _tier_badge, card as _card,
                            section_label as _section_label, item as _item, skeleton as _skeleton)
@@ -331,7 +332,7 @@ def _provider_name(pk: str) -> str:
 
 
 def _provider_options(role: str) -> list:
-    options = [*PROVIDER_REGISTRY, CUSTOM_PROVIDER]
+    options = [pk for pk in (*PROVIDER_REGISTRY, CUSTOM_PROVIDER) if provider_allowed(pk)]
     return [_NO_FALLBACK] + options if role == "fallback" else options
 
 
@@ -1296,8 +1297,10 @@ def _render_settings() -> None:
             help="Leave blank to use SEMANTIC_SCHOLAR_API_KEY. Without a key the free, rate-limited tier is used.")
         _now = resolve_keys(_S, PROVIDER_REGISTRY, CUSTOM_PROVIDER)
         st.session_state["_available_providers"] = _now["available"]     # what was just typed counts at once
+        if _now.get("custom_base_problem"):
+            show_warning(f"The custom endpoint address is not used: {_now['custom_base_problem']}")
         st.markdown("**Status**")
-        for _pk in (*PROVIDER_REGISTRY, CUSTOM_PROVIDER):
+        for _pk in (pk for pk in (*PROVIDER_REGISTRY, CUSTOM_PROVIDER) if provider_allowed(pk)):
             st.caption(f"{_provider_name(_pk)}: {source_label(_now['sources'][_pk])}")
         st.caption(f"Semantic Scholar: {source_label(_now['ss_source'])}")
 

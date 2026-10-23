@@ -216,6 +216,44 @@ def _stream_options_error(err: str) -> bool:
     return "stream_options" in low or "include_usage" in low
 
 
+# Request parameters a provider's model has refused, learned from its own error and remembered per (base URL, model).
+# OpenAI's newer models answer a request with `max_tokens` or a non-default `temperature` / `top_p` with HTTP 400
+# ("Unsupported parameter: 'max_tokens' ... Use 'max_completion_tokens' instead", "'temperature' does not support 0.1 with this
+# model. Only the default (1) value is supported"). Every other provider this app uses accepts them, so nothing changes for those.
+_PARAM_COMPAT: dict = {}
+_REFUSAL_WORDS = ("unsupported", "not support", "does not support", "only the default", "not allowed", "invalid")
+
+
+def _apply_compat(kwargs: dict, base_url: str, model: str) -> dict:
+    c = _PARAM_COMPAT.get((base_url, model))
+    if not c:
+        return kwargs
+    kwargs = dict(kwargs)
+    if c.get("completion_tokens") and "max_tokens" in kwargs:
+        kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+    for name in c.get("drop", ()):
+        kwargs.pop(name, None)
+    return kwargs
+
+
+def _learn_compat(err: str, base_url: str, model: str) -> bool:
+    """Record what this error says the model refuses. True only when that is new, so a retry can never loop."""
+    low = err.lower()
+    c = _PARAM_COMPAT.get((base_url, model)) or {"drop": set()}
+    changed = False
+    if "max_completion_tokens" in low and "max_tokens" in low and not c.get("completion_tokens"):
+        c["completion_tokens"], changed = True, True
+    if any(w in low for w in _REFUSAL_WORDS):
+        for param in ("temperature", "top_p"):
+            if f"'{param}'" in low or f'"{param}"' in low or f"{param} " in low:
+                if param not in c["drop"]:
+                    c["drop"].add(param)
+                    changed = True
+    if changed:
+        _PARAM_COMPAT[(base_url, model)] = c
+    return changed
+
+
 # Extra request fields some models need. Gemini's "thinking" models spend a
 # large and variable share of the token budget on hidden reasoning, which
 # breaks strict-JSON stages (cut-off or malformed output) and, for
@@ -243,7 +281,9 @@ def extra_body_for(base_url: str, model: str) -> dict | None:
 
 
 def make_nvidia_client(api_key: str) -> OpenAI:
-    return OpenAI(base_url=NVIDIA_BASE_URL, api_key=api_key)
+    # max_retries=0: this client retries by itself (with the provider's Retry-After). The SDK's own two silent retries
+    # multiplied every timeout by three (a 60 s limit took 182 s to fail, measured 2026-10-23).
+    return OpenAI(base_url=NVIDIA_BASE_URL, api_key=api_key, max_retries=0)
 
 
 class AzureOpenAIClient:
@@ -276,7 +316,7 @@ class AzureOpenAIClient:
         # A different base_url (another provider) builds a plain OpenAI
         # client directly against it.
         self.client  = make_nvidia_client(api_key) if base_url == NVIDIA_BASE_URL \
-            else OpenAI(base_url=base_url, api_key=api_key)
+            else OpenAI(base_url=base_url, api_key=api_key, max_retries=0)
         self.api_key = api_key
         self.model   = model
         # Real bug found live (2026-08-23): moonshotai/kimi-k3 (NVIDIA NIM)
@@ -381,6 +421,7 @@ class AzureOpenAIClient:
         extra = extra_body_for(self._base_url, model)
         if extra:
             create_kwargs["extra_body"] = extra
+        create_kwargs = _apply_compat(create_kwargs, self._base_url, model)
 
         try:
             # See _collect_stream()'s docstring: the SDK's own `timeout=`
@@ -400,6 +441,10 @@ class AzureOpenAIClient:
         except Exception as e:
             err = str(e)
             kind = _classify_error(err)
+            if _learn_compat(err, self._base_url, model):          # e.g. this model wants max_completion_tokens
+                return self.chat(system, user, temperature, max_tokens,
+                                  timeout_seconds=timeout_seconds, max_retries=max_retries,
+                                  _retry=_retry, _model=_model)
             # This provider rejected stream_options -- degrade once (never
             # counted against MAX_RETRIES, since it isn't a transient
             # failure) and remember for every future call to this base_url.
@@ -526,6 +571,7 @@ class AzureOpenAIClient:
             )
             if want_usage:
                 create_kwargs["stream_options"] = {"include_usage": True}
+            create_kwargs = _apply_compat(create_kwargs, self._base_url, self.vision_model)
             # Same real-wall-clock-deadline fix as chat() -- see
             # _collect_stream()'s docstring. Starts before create()
             # returns for the same reason as chat()'s deadline.
@@ -540,6 +586,8 @@ class AzureOpenAIClient:
             return Success(content)
         except Exception as e:
             err = str(e)
+            if _learn_compat(err, self._base_url, self.vision_model):
+                return self._vision_call(system, user_text, image_bytes, max_tokens, _retry=_retry)
             # This provider rejected stream_options -- degrade once (never
             # counted against MAX_RETRIES) and remember for every future
             # call to this base_url, exactly like chat().

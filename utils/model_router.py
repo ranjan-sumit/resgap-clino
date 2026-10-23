@@ -36,6 +36,7 @@ import requests
 
 from utils.azure_client import AzureOpenAIClient, ErrorInfo, Failure, Success, _retry_after_seconds
 from utils.model_providers import MODEL_RPM_LIMITS, PROVIDER_REGISTRY, _MODEL_TOP_P_OVERRIDES, get_provider
+from utils.provider_policy import ProviderNotAllowed, check_endpoint, check_provider, endpoint_problem, provider_allowed
 from utils.rate_limiter import RateLimiter
 from utils.text_hygiene import guard_system
 
@@ -203,7 +204,9 @@ def key_for(spec: ModelSpec, keys: dict) -> str:
 def build_spec_client(spec: ModelSpec, api_key: str, token_meter=None) -> AzureOpenAIClient:
     """A client for one (provider, model). No same-provider fallback here: the
     router owns fallback, and a provider's built-in fallback model may be retired."""
+    check_provider(spec.provider)                         # the deployment's allow-list
     if spec.provider == CUSTOM_PROVIDER:
+        check_endpoint(spec.base_url)                     # https, no credentials in the address, no metadata service
         return AzureOpenAIClient(api_key=api_key, base_url=spec.base_url, model=spec.model,
                                  fallback_model=None, token_meter=token_meter, vision_model=None)
     cfg = PROVIDER_REGISTRY[spec.provider]
@@ -430,6 +433,15 @@ def friendly_error(error: ErrorInfo) -> str:
         if wait:
             bits.append(f"· retry in about {wait:.0f} s")
         return " ".join(bits) + ". This is the provider throttling you, not a problem with the model."
+    low = detail.lower()
+    if "end of life" in low or ("410" in detail and "gone" in low):
+        return ("The provider has retired this model (HTTP 410). Choose another in Settings > Models; "
+                "'Refresh model list' shows what your key can use.")
+    if "404" in detail and "not found" in low:
+        return ("The provider does not offer this model to your key (HTTP 404). Choose another in Settings > Models; "
+                "'Refresh model list' shows what your key can use.")
+    if "401" in detail or "invalid api key" in low or "incorrect api key" in low:
+        return "The provider did not accept the API key. Check it in Settings > API keys."
     return detail[:300]
 
 
@@ -440,8 +452,11 @@ def _test_one(spec: ModelSpec, keys: dict, roles: list, factory, timeout: int) -
     if not key:
         out["error"] = f"No API key for {spec.provider_label}."
         return out
-    if spec.provider == CUSTOM_PROVIDER and not spec.base_url:
-        out["error"] = "The custom endpoint needs a base URL."
+    if not provider_allowed(spec.provider):
+        out["error"] = f"{spec.provider_label} is not allowed on this deployment."
+        return out
+    if spec.provider == CUSTOM_PROVIDER and endpoint_problem(spec.base_url):
+        out["error"] = endpoint_problem(spec.base_url)
         return out
     boost = token_boost(spec.model, spec.provider)
     try:
@@ -516,8 +531,10 @@ def fetch_models(provider: str, api_key: str, base_url: str = "", timeout: int =
     else:
         cfg = PROVIDER_REGISTRY.get(provider)
         base = cfg.base_url if cfg else ""
-    if not base or not api_key:
+    if not base or not api_key or not provider_allowed(provider):
         return []
+    if provider == CUSTOM_PROVIDER and endpoint_problem(base):
+        return []                                         # the key is never sent to an address the policy refuses
     try:
         r = requests.get(base.rstrip("/") + "/models", headers={"Authorization": f"Bearer {api_key}"},
                          timeout=timeout)

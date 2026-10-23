@@ -328,7 +328,15 @@ class FriendlyErrorTests(unittest.TestCase):
 
     def test_other_errors_keep_their_own_text(self):
         from utils.model_router import friendly_error
-        self.assertEqual(friendly_error(ErrorInfo("api_error", "Error code: 410 Gone")), "Error code: 410 Gone")
+        self.assertEqual(friendly_error(ErrorInfo("api_error", "Error code: 500 boom")), "Error code: 500 boom")
+
+    def test_a_retired_model_a_missing_model_and_a_bad_key_are_explained(self):
+        from utils.model_router import friendly_error
+        gone = friendly_error(ErrorInfo("api_error", "Error code: 410 - {'title': 'Gone', 'detail': 'The model has reached its end of life'}"))
+        self.assertIn("retired this model", gone)
+        self.assertIn("Refresh model list", gone)
+        self.assertIn("does not offer this model", friendly_error(ErrorInfo("api_error", "Error code: 404 - Function not found for account")))
+        self.assertIn("did not accept the API key", friendly_error(ErrorInfo("api_error", "Error code: 401 - Incorrect API key provided")))
 
 
 class SplitClient(FakeClient):

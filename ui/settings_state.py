@@ -41,12 +41,15 @@ def resolve_keys(settings: dict, registry: dict, custom_provider: str, env=None)
     ck_env = (env.get("CUSTOM_LLM_API_KEY", "") or "").strip()
     keys[custom_provider] = ck_typed or ck_env
     sources[custom_provider] = "typed" if ck_typed else ("environment" if ck_env else None)
-    available = {pk for pk in registry if keys[pk]}
-    if keys[custom_provider] and custom_base:
+    from utils.provider_policy import endpoint_problem, provider_allowed
+    available = {pk for pk in registry if keys[pk] and provider_allowed(pk)}
+    custom_problem = endpoint_problem(custom_base) if custom_base else None
+    if keys[custom_provider] and custom_base and provider_allowed(custom_provider) and not custom_problem:
         available.add(custom_provider)
     ss_typed = (settings.get("ss_key") or "").strip()
     ss_env = (env.get("SEMANTIC_SCHOLAR_API_KEY", "") or "").strip()
     return {"keys": keys, "sources": sources, "available": available, "custom_base": custom_base,
+            "custom_base_problem": custom_problem,
             "ss_key": ss_typed or ss_env, "ss_source": "typed" if ss_typed else ("environment" if ss_env else None)}
 
 
