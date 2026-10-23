@@ -25,6 +25,7 @@ from packages.research_schemas.evidence_object import (
     EVIDENCE_TYPES, CONFIDENCE_LEVELS, EvidenceObject, Provenance,
 )
 from pipeline.agent_config import EVIDENCE_READER
+from pipeline.agent_schemas import keep_valid, valid_or_empty
 from utils.azure_client import LLMCallError, unwrap
 
 STUDY_TYPES = (
@@ -36,7 +37,7 @@ STUDY_TYPE_TAG = "[study_type: "
 _NON_BODY = frozenset({"page_header", "page_footer", "page_number"})
 _REFERENCE_HEADINGS = ("references", "bibliography", "literature cited", "reference list")
 _PASSAGE_TARGET_CHARS = 1100
-_MAX_BODY_CHARS = 200_000          # ~50k tokens: far inside the model's window, a guard only
+_MAX_BODY_CHARS = 400_000          # read in parts of ~18k characters; beyond this the rest is NOT read and is reported
 _MIN_BODY_CHARS = 1500             # below this the PDF has no usable text (scanned): use the wiki fallback
 _FUZZY_MIN_RATIO = 0.82
 
@@ -75,10 +76,13 @@ _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
 
 # ── passages ────────────────────────────────────────────────────────────────
 
-def build_passages(text_segments: list) -> list:
+def build_passages(text_segments: list, info: dict | None = None) -> list:
     """[{"id": "P1", "page": 3, "section": "3. Results", "text": "..."}], in reading order.
     Consecutive blocks under one heading on one page are merged up to ~1100 chars; the
-    reference list and page furniture (headers, footers, page numbers) are left out."""
+    reference list and page furniture (headers, footers, page numbers) are left out.
+    Past _MAX_BODY_CHARS the remaining body text is not read; `info["unread_chars"]` says how much."""
+    info = info if info is not None else {}
+    info["unread_chars"] = 0
     passages, section, in_refs = [], None, False
     cur = None
 
@@ -101,6 +105,9 @@ def build_passages(text_segments: list) -> list:
             continue
         if in_refs:
             continue
+        if total >= _MAX_BODY_CHARS:
+            info["unread_chars"] += len(text)
+            continue
         page = seg.get("page")
         if label == "table":                      # never merged into prose: a row quoted from it must be findable
             flush()
@@ -113,8 +120,6 @@ def build_passages(text_segments: list) -> list:
             cur = {"page": page, "section": section, "text": ""}
         cur["text"] += (" " if cur["text"] else "") + text
         total += len(text)
-        if total >= _MAX_BODY_CHARS:
-            break
     flush()
     return passages
 
@@ -226,8 +231,10 @@ def read_paper(paper_id: str, text_segments: list, client, domain_hint: str = ""
     diag = {"reader": True, "usable": False, "passages": 0, "parts": 1, "proposed": 0, "verified_exact": 0,
             "verified_fuzzy": 0, "dropped_unverified": 0, "dropped_invalid": 0, "dropped_number_mismatch": 0,
             "study_type": None, "error": None}
-    passages = build_passages(text_segments)
+    info: dict = {}
+    passages = build_passages(text_segments, info)
     diag["passages"] = len(passages)
+    diag["unread_chars"] = info["unread_chars"]
     if sum(len(p["text"]) for p in passages) < _MIN_BODY_CHARS:
         diag["error"] = "no usable text layer (scanned PDF?)"
         return [], diag
@@ -254,6 +261,7 @@ def read_paper(paper_id: str, text_segments: list, client, domain_hint: str = ""
         data = _parse_object(raw)
         if not data or not isinstance(data.get("evidence"), list):
             return None, "reply could not be read"
+        data["evidence"], data["_schema_rejected"] = keep_valid("reader_item", data["evidence"], client)
         return data, None
 
     if len(parts) == 1:
@@ -269,6 +277,10 @@ def read_paper(paper_id: str, text_segments: list, client, domain_hint: str = ""
 
     study_type = next((d.get("study_type") for d in good if d.get("study_type") in STUDY_TYPES), "other")
     diag["study_type"] = study_type
+    rejected = sum(d.get("_schema_rejected", 0) for d in good)
+    diag["schema_rejected"] = rejected
+    diag["proposed"] += rejected
+    diag["dropped_invalid"] += rejected
     data = {"evidence": [it for d in good for it in d["evidence"]],
             "study_type_reason": next((d.get("study_type_reason") for d in good if d.get("study_type_reason")), "")}
     if len(good) < len(parts):

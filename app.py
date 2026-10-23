@@ -223,7 +223,7 @@ def _local_time(ts: str) -> str:
 
 from ui.glossary import lookup as glossary_lookup
 from ui.messages import show_error, show_info, show_warning
-from ui.components import (collapse_sidebar_on_phones, empty_state, error_state, loading_state, badge as _badge, tier_badge as _tier_badge, card as _card,
+from ui.components import (esc, collapse_sidebar_on_phones, empty_state, error_state, loading_state, badge as _badge, tier_badge as _tier_badge, card as _card,
                            section_label as _section_label, item as _item, skeleton as _skeleton)
 
 
@@ -423,7 +423,7 @@ def _model_row(role: str) -> None:
     tip = ROLE_HELP.get(role, "Used when a role's own model fails. A different provider is best, so one outage "
                               "cannot take out both.")
     c_role, c_prov, c_model = st.columns([1.1, 1.3, 2.2], vertical_alignment="center")
-    c_role.markdown(f'<span title="{html.escape(tip)}" style="font-weight:600;font-size:0.9rem;">{label}</span>',
+    c_role.markdown(f'<span title="{html.escape(tip)}" style="font-weight:600;font-size:0.9rem;">{esc(label)}</span>',
                     unsafe_allow_html=True)
     # A fixed snapshot of the labels (not a function that reads session state), so
     # they are the same wherever Streamlit evaluates them.
@@ -723,9 +723,9 @@ _hero_points = [
 ]
 _hero_steps = ["Parse", "Evidence", "Knowledge graph", "Gap detection", "Validation", "Proposals"]
 _points_html = "".join(
-    f'<div class="hero-point">{_CHECK}<div><b>{t}</b><span>{d}</span></div></div>' for t, d in _hero_points)
+    f'<div class="hero-point">{_CHECK}<div><b>{esc(t)}</b><span>{esc(d)}</span></div></div>' for t, d in _hero_points)
 _flow_html = "".join(
-    f'<div class="flow-step"><div class="flow-dot">{i}</div><div class="flow-label">{s}</div></div>'
+    f'<div class="flow-step"><div class="flow-dot">{i}</div><div class="flow-label">{esc(s)}</div></div>'
     for i, s in enumerate(_hero_steps, 1))
 # The hero is for first-time visitors: once the project has a run, results come first.
 _show_hero = st.session_state["view"] == "main" and not (st.session_state.results or list_runs(limit=1, project_id=st.session_state.current_project_id))
@@ -786,8 +786,8 @@ def _render_run_comparison(id_a: str, id_b: str, name_a: str = "the older run", 
                   ("Proposals in common", pr0["common_count"])]
         for col, (lbl, val) in zip(st.columns(len(_cards)), _cards):
             with col:
-                st.markdown(f'<div class="stat-box"><span class="stat-number" style="font-size:1.4rem;">{val}</span>'
-                            f'<span class="stat-label">{lbl}</span></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="stat-box"><span class="stat-number" style="font-size:1.4rem;">{esc(val)}</span>'
+                            f'<span class="stat-label">{esc(lbl)}</span></div>', unsafe_allow_html=True)
         st.markdown(f"**Papers:** {p['common_count']} common · "
                     f"{len(p['added'])} added · {len(p['removed'])} removed")
         st.markdown(f"**Evidence objects:** {e['count_a']} → {e['count_b']} "
@@ -812,17 +812,17 @@ def _render_run_comparison(id_a: str, id_b: str, name_a: str = "the older run", 
             st.markdown("")
             _section_label(f"New gaps in the newer run ({html.escape(name_b)})")
             for t in gp["added"][:15]:
-                _item(f"🆕 {t}")
+                _item(f"🆕 {esc(t)}")
         if gp["removed"]:
             st.markdown("")
             _section_label(f"Gaps no longer generated (only in the older run, {html.escape(name_a)})")
             for t in gp["removed"][:15]:
-                _item(f"➖ {t}")
+                _item(f"➖ {esc(t)}")
         if gp["confidence_changes"]:
             st.markdown("")
             _section_label("Confidence changes")
             for c in gp["confidence_changes"][:15]:
-                _item(f"🔀 {c['title']}: {c['confidence_a']} → {c['confidence_b']}")
+                _item(f"🔀 {esc(c['title'])}: {esc(c['confidence_a'])} → {esc(c['confidence_b'])}")
     except ValueError as e:
         show_error(str(e))
 
@@ -873,7 +873,7 @@ def _render_lineage(run_id: str) -> None:
             by_id = {n["artifact_id"]: n for n in tech["nodes"]}
             for e in tech["edges"]:
                 child = by_id.get(e["child"], {})
-                _item(f"🔗 {e['parent']} → {e['child']} ({child.get('artifact_type','?')})")
+                _item(f"🔗 {esc(e['parent'])} → {esc(e['child'])} ({esc(child.get('artifact_type','?'))})")
             if tech["fan_in_edges"]:
                 st.caption(f"{len(tech['fan_in_edges'])} fan-in edge(s) (e.g. N papers → 1 evidence set)")
             if tech["orphans"]:
@@ -893,7 +893,7 @@ def _render_lineage(run_id: str) -> None:
             n_unresolved = (len(u["evidence_ids_not_found"]) + len(u["relationship_ids_not_found"])
                             + len(u["entity_ids_not_found"]))
             _item(
-                f"🧩 {g['title']} [{g['source']}/{g['evidence_basis']}] — "
+                f"🧩 {esc(g['title'])} [{esc(g['source'])}/{esc(g['evidence_basis'])}] — "
                 f"{len(c['evidence'])} evidence · {len(c['relationships'])} relationships · "
                 f"{len(c['proposals'])} proposal(s)"
                 + (f" · ⚠️ {n_unresolved} unresolved id(s)" if n_unresolved else "")
@@ -942,7 +942,7 @@ def _render_graph_history(project_run_ids: set) -> None:
                     st.markdown("")
                     _section_label("Entities only in the " + ("first" if rid == id_a else "second") + " graph")
                     for name_ in diff[key][:15]:
-                        _item(f"🔹 {name_}")
+                        _item(f"🔹 {esc(name_)}")
         except Exception as e:
             show_error("Diff failed", exc=e)
 
@@ -1573,7 +1573,7 @@ if st.session_state.current_run_id and st.session_state.results:
     _rm_name, _rm_when, _rm_stats = _hdr["name"], _hdr["when"], _hdr["stats"]
     _chips = "".join(
         f'<span style="font-size:0.72rem;color:#004b93;background:#e5f2ff;border:1px solid #7ab8f5;'
-        f'border-radius:10px;padding:0.1rem 0.5rem;">{c}</span>' for c in _hdr["chips"])
+        f'border-radius:10px;padding:0.1rem 0.5rem;">{chip_html}</span>' for chip_html in _hdr["chips"])
     st.markdown(
         '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:0.4rem 1rem;'
         'background:#edf6ff;border:1px solid #c9dff5;border-left:3px solid #0066cc;'
@@ -1582,7 +1582,7 @@ if st.session_state.current_run_id and st.session_state.results:
         '<span style="font-size:0.72rem;font-weight:600;letter-spacing:0.08em;'
         'text-transform:uppercase;color:#004b93;">Run</span>'
         f'<span style="font-size:0.9rem;font-weight:600;color:#0b1f3a;">{_rm_name}</span>'
-        f'<span style="font-size:0.82rem;color:#4a6580;">{_rm_when}{_rm_stats}</span>'
+        f'<span style="font-size:0.82rem;color:#4a6580;">{esc(_rm_when)}{esc(_rm_stats)}</span>'
         f'<span style="display:flex;gap:0.4rem;margin-left:auto;">{_chips}</span>'
         '</div>',
         unsafe_allow_html=True)
@@ -1812,8 +1812,8 @@ def _render_overview(res: dict) -> None:
     cols = st.columns(5)
     for col, (val, lbl) in zip(cols, overview(res)):
         with col:
-            st.markdown(f'<div class="stat-box"><span class="stat-number">{val}</span>'
-                        f'<span class="stat-label">{lbl}</span></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="stat-box"><span class="stat-number">{esc(val)}</span>'
+                        f'<span class="stat-label">{esc(lbl)}</span></div>', unsafe_allow_html=True)
     chips = quality_chips(res)
     if chips:
         st.caption(" · ".join(chips))
@@ -1828,8 +1828,8 @@ def _render_overview(res: dict) -> None:
             (ref_sum.get("total", 0), "Total corpus", "#8a5a00"),
         ]):
             with col:
-                st.markdown(f'<div class="stat-box"><span class="stat-number" style="color:{color};">{val}</span>'
-                            f'<span class="stat-label">{lbl}</span></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="stat-box"><span class="stat-number" style="color:{color};">{esc(val)}</span>'
+                            f'<span class="stat-label">{esc(lbl)}</span></div>', unsafe_allow_html=True)
     elif c_stats:
         st.caption(_note)
 
@@ -2009,7 +2009,7 @@ def _render_gaps(res: dict) -> None:
             score = f" · {r['score']}/5" if r["score"] is not None else ""
             ch = _CHALLENGER_BADGES.get(g.get("challenger_status"))
             st.markdown(
-                f'<div class="gap-card {r["status"]}"><div class="gap-title">'
+                f'<div class="gap-card {esc(r["status"])}"><div class="gap-title">'
                 f'{("#" + str(r["rank"]) + " ") if r["rank"] else ""}{html.escape(r["title"])}</div>'
                 f'<div class="gap-meta">{_badge(label, color, bg, border, title=_def)}'
                 f'{_badge(html.escape(r["finder"]) + score, "#4a6580", "#f2f5f8", "#c9dff5")}'
@@ -2212,7 +2212,7 @@ if st.session_state.results:
                 padding:0.8rem 1.2rem;margin:0.8rem 0;">
       <span style="font-size:1.4rem;">{res_cfg['icon']}</span>
       <span style="font-size:0.9rem;color:#0b1f3a;font-weight:500;margin-left:0.8rem;">
-        {context.get('domain','')} — Domain-Tuned Analysis</span>
+        {esc(context.get('domain',''))} — Domain-Tuned Analysis</span>
     </div>""", unsafe_allow_html=True)
 
     # Feedback on the whole run (per-gap feedback is in the Research Gaps tab).
@@ -2297,9 +2297,9 @@ if st.session_state.results:
             for link in shared[:6]:
                 st.markdown(_card(
                     "Shared Concept",
-                    f"<strong>{link.get('concept','')}</strong> — {link.get('context','')}<br>"
+                    f"<strong>{esc(link.get('concept',''))}</strong> — {esc(link.get('context',''))}<br>"
                     f"<span style='font-family:\"DM Mono\",monospace;font-size:0.7rem;color:#0066cc;'>"
-                    f"{', '.join(link.get('papers',[]))}</span>"
+                    f"{esc(', '.join(link.get('papers',[])))}</span>"
                 ), unsafe_allow_html=True)
 
     # ── Tab 2: Reference Corpus ────────────────────────────────────────────────
@@ -2315,8 +2315,8 @@ if st.session_state.results:
             ]):
                 with col:
                     st.markdown(f'<div class="stat-box"><span class="stat-number" '
-                                f'style="font-size:1.3rem;color:{color};">{val}</span>'
-                                f'<span class="stat-label">{lbl}</span></div>',
+                                f'style="font-size:1.3rem;color:{color};">{esc(val)}</span>'
+                                f'<span class="stat-label">{esc(lbl)}</span></div>',
                                 unsafe_allow_html=True)
             if ref_diagnostics.get("errors"):
                 with st.expander("Reference extraction warnings"):
@@ -2340,8 +2340,8 @@ if st.session_state.results:
             ]):
                 with col:
                     st.markdown(f'<div class="stat-box"><span class="stat-number" '
-                                f'style="font-size:1.3rem;color:{color};">{val}</span>'
-                                f'<span class="stat-label">{lbl}</span></div>',
+                                f'style="font-size:1.3rem;color:{color};">{esc(val)}</span>'
+                                f'<span class="stat-label">{esc(lbl)}</span></div>',
                                 unsafe_allow_html=True)
             st.markdown("")
 
@@ -2480,7 +2480,7 @@ if st.session_state.results:
             st.markdown(
                 f'<div style="border:1px solid {color}22; background:{color}11; '
                 f'border-radius:8px; padding:0.6rem 0.9rem; margin-bottom:0.75rem;">'
-                f'<span style="color:{color}; font-weight:600;">{icon} Graph Quality: {gq["build_status"]}</span> '
+                f'<span style="color:{color}; font-weight:600;">{icon} Graph Quality: {esc(gq["build_status"])}</span> '
                 f'&nbsp;·&nbsp; score {gq["quality_score"]:.2f} '
                 f'&nbsp;·&nbsp; extraction coverage {gq["extraction_coverage"]:.0%} '
                 f'&nbsp;·&nbsp; evidence coverage {gq["evidence_coverage"]:.0%} '
@@ -2500,8 +2500,8 @@ if st.session_state.results:
         ]):
             with col:
                 st.markdown(f'<div class="stat-box" title="{html.escape(glossary_lookup(lbl), quote=True)}"><span class="stat-number" '
-                            f'style="font-size:1.5rem;">{val}</span>'
-                            f'<span class="stat-label">{lbl}</span></div>',
+                            f'style="font-size:1.5rem;">{esc(val)}</span>'
+                            f'<span class="stat-label">{esc(lbl)}</span></div>',
                             unsafe_allow_html=True)
         st.markdown("")
 
@@ -2529,9 +2529,9 @@ if st.session_state.results:
                     if si < n and ti < n:
                         ex += [px[si], px[ti], None]; ey += [py[si], py[ti], None]
                         mx.append((px[si]+px[ti])/2); my.append((py[si]+py[ti])/2)
-                        mtext.append(f"{nodes[si]['name']} → {nodes[ti]['name']}<br>"
-                                     f"<b>{str(e.get('relation','')).replace('_',' ')}</b>"
-                                     + (f"<br>{textwrap.shorten(e['evidence'], 140)}" if e.get("evidence") else ""))
+                        mtext.append(f"{esc(nodes[si]['name'])} → {esc(nodes[ti]['name'])}<br>"
+                                     f"<b>{esc(str(e.get('relation','')).replace('_',' '))}</b>"
+                                     + (f"<br>{esc(textwrap.shorten(e['evidence'], 140))}" if e.get("evidence") else ""))
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(x=ex, y=ey, mode="lines", showlegend=False,
                                          line=dict(width=1.6, color="#9db8d6"), hoverinfo="none"))
@@ -2547,8 +2547,8 @@ if st.session_state.results:
                         textposition="top center", textfont=dict(size=10, color="#0b1f3a"),
                         marker=dict(size=[nodes[i]["size"] + 4 for i in idx], color=nodes[idx[0]]["color"],
                                     line=dict(width=1, color="#ffffff")),
-                        hovertext=[f"<b>{nodes[i]['name']}</b><br>{ntype} · {nodes[i]['importance']} importance"
-                                   f"<br>{'; '.join(nodes[i].get('papers', []))[:120]}" for i in idx],
+                        hovertext=[f"<b>{esc(nodes[i]['name'])}</b><br>{esc(ntype)} · {esc(nodes[i]['importance'])} importance"
+                                   f"<br>{esc('; '.join(nodes[i].get('papers', []))[:120])}" for i in idx],
                         hoverinfo="text"))
                 fig.update_layout(paper_bgcolor="#ffffff", plot_bgcolor="#ffffff",
                     font=dict(color="#0b1f3a", size=11),
@@ -2564,13 +2564,13 @@ if st.session_state.results:
 
         for comm in graph.get("communities",[]):
             with st.expander(f"🏘️ {comm.get('theme','Community')}"):
-                st.markdown(f'<div class="stage-body">{comm.get("summary","")}</div>',
+                st.markdown(f'<div class="stage-body">{esc(comm.get("summary",""))}</div>',
                             unsafe_allow_html=True)
                 if comm.get("gap_signal"):
                     st.markdown(
                         f'<div style="background:#fff7e6;border:1px solid #f0c36a;border-radius:4px;'
                         f'padding:0.5rem 0.8rem;margin-top:0.5rem;font-size:0.82rem;color:#8a5a00;">'
-                        f'⚠️ {comm["gap_signal"]}</div>', unsafe_allow_html=True)
+                        f'⚠️ {esc(comm["gap_signal"])}</div>', unsafe_allow_html=True)
 
         entities = graph.get("entities",[])
         if entities:
@@ -2589,10 +2589,10 @@ if st.session_state.results:
                 ent = o.get("entity",{})
                 st.markdown(
                     f'<div class="stage-card" style="padding:0.6rem 1rem;margin-bottom:0.3rem;">'
-                    f'<span style="font-family:\'DM Mono\',monospace;color:#004b93;">{ent.get("name","")}</span>'
+                    f'<span style="font-family:\'DM Mono\',monospace;color:#004b93;">{esc(ent.get("name",""))}</span>'
                     f'<span style="font-family:\'DM Mono\',monospace;color:#4a6580;font-size:0.7rem;'
-                    f'margin-left:0.6rem;">[{ent.get("type","")}]</span>'
-                    f'<div style="font-size:0.78rem;color:#4a6580;">{o.get("signal","")}</div></div>',
+                    f'margin-left:0.6rem;">[{esc(ent.get("type",""))}]</span>'
+                    f'<div style="font-size:0.78rem;color:#4a6580;">{esc(o.get("signal",""))}</div></div>',
                     unsafe_allow_html=True)
 
     # ── Tab 4: Research Gaps ───────────────────────────────────────────────────
@@ -2633,7 +2633,7 @@ if st.session_state.results:
             comp_stat = st.empty()
             def cupd(msg, pct):
                 comp_prog.progress(pct)
-                comp_stat.markdown(_card("Computational Lab", f"⟳ {msg}"),
+                comp_stat.markdown(_card("Computational Lab", f"⟳ {esc(msg)}"),
                                    unsafe_allow_html=True)
             try:
                 # Same per-role models as the main run; the council seats and chair
@@ -2734,7 +2734,7 @@ if st.session_state.results:
                 🔀 {cr.get('derived_count',0)} cross-paper derived
               </div>
               <div style="font-size:0.78rem;color:#4a6580;margin-top:0.3rem;">
-                {sufficiency.get('why_score_is_low','')}
+                {esc(sufficiency.get('why_score_is_low',''))}
               </div>
             </div>""", unsafe_allow_html=True)
 
@@ -2772,11 +2772,11 @@ if st.session_state.results:
                         st.markdown(
                             f'<div class="wiki-item" style="margin-bottom:0.4rem;">'
                             f'{_tier_badge(tier_t)}'
-                            f'<span style="color:#004b93;">{p.get("name","")}</span> = '
+                            f'<span style="color:#004b93;">{esc(p.get("name",""))}</span> = '
                             f'<span style="color:{conf_c};font-family:\'DM Mono\',monospace;">'
-                            f'{p.get("value","")}{ci}</span> {p.get("unit","")}'
+                            f'{esc(p.get("value",""))}{ci}</span> {esc(p.get("unit",""))}'
                             f'<span style="color:#4a6580;font-size:0.7rem;"> '
-                            f'[{p.get("source_paper","")[:45]}]{derived_t}</span></div>',
+                            f'[{esc(p.get("source_paper","")[:45])}]{derived_t}</span></div>',
                             unsafe_allow_html=True)
 
             st.download_button("⬇ Download parameters.csv", data=cr["csv_data"],
@@ -2792,11 +2792,11 @@ if st.session_state.results:
                     f'border-left:4px solid {cc};border-radius:8px;'
                     f'padding:1.2rem 1.5rem;margin-bottom:1rem;">'
                     f'<div style="font-size:1.05rem;color:#0b1f3a;font-weight:500;">'
-                    f'{h.get("hypothesis_id","H?")}  {h.get("title","")}</div>'
+                    f'{esc(h.get("hypothesis_id","H?"))}  {esc(h.get("title",""))}</div>'
                     f'<div style="font-size:0.87rem;color:#0b1f3a;margin-top:0.4rem;">'
-                    f'{h.get("claim","")}</div>'
+                    f'{esc(h.get("claim",""))}</div>'
                     f'<div style="margin-top:0.5rem;">'
-                    + _badge(f"Novelty {h.get('novelty_score',0)}/10","#004b93","#e5f2ff","#7ab8f5")
+                    + _badge(f"Novelty {esc(h.get('novelty_score',0))}/10","#004b93","#e5f2ff","#7ab8f5")
                     + _badge(conf.title()+" Conf",cc,"#ffffff",cc)
                     + '</div></div>',
                     unsafe_allow_html=True)
@@ -2806,13 +2806,13 @@ if st.session_state.results:
                 with st.expander(f"Evidence + opportunities for {h.get('hypothesis_id','')}"):
                     hc1,hc2 = st.columns(2)
                     with hc1:
-                        _section_label("Mechanism"); _item(h.get("mechanism",""))
+                        _section_label("Mechanism"); _item(esc(h.get("mechanism","")))
                         st.markdown("")
-                        _section_label("Validation Study"); _item(h.get("validation_study",""),"#004b93")
+                        _section_label("Validation Study"); _item(esc(h.get("validation_study","")),"#004b93")
                     with hc2:
-                        _section_label("Clinical Opportunity"); _item(h.get("clinical_opportunity",""),"#087f5b")
+                        _section_label("Clinical Opportunity"); _item(esc(h.get("clinical_opportunity","")),"#087f5b")
                         st.markdown("")
-                        _section_label("Commercial Opportunity"); _item(h.get("commercial_opportunity",""),"#8a5a00")
+                        _section_label("Commercial Opportunity"); _item(esc(h.get("commercial_opportunity","")),"#8a5a00")
 
             # Simulation
             st.markdown(f"#### Stage 10 — Simulation: {sim_results.get('model_used','')}")
@@ -2837,7 +2837,7 @@ if st.session_state.results:
                     st.markdown(
                         f'<div style="margin-bottom:0.5rem;">'
                         f'<div style="font-family:\'DM Mono\',monospace;font-size:0.75rem;color:#0b1f3a;">'
-                        f'{i}. {s["parameter"]}{label_extra}</div>'
+                        f'{i}. {esc(s["parameter"])}{label_extra}</div>'
                         f'<div style="background:#c9dff5;border-radius:3px;height:6px;margin-top:2px;">'
                         f'<div style="background:#0066cc;width:{bar}%;height:6px;border-radius:3px;"></div>'
                         f'</div></div>', unsafe_allow_html=True)
@@ -2883,13 +2883,13 @@ if st.session_state.results:
                     f'padding:1.2rem 1.5rem;margin-bottom:1rem;">'
                     f'<div style="display:flex;justify-content:space-between;">'
                     f'<div style="font-family:\'DM Mono\',monospace;font-size:0.62rem;color:{cc};">🔬 NOVEL FINDING</div>'
-                    f'<div>{_badge(g["confidence"],cc,"#ffffff",cc)}'
+                    f'<div>{_badge(esc(g["confidence"]),cc,"#ffffff",cc)}'
                     f'{_badge(freq,"#4a6580","#f2f5f8","#c9dff5")}</div></div>'
                     f'<div style="font-size:1.05rem;color:#0b1f3a;font-weight:600;margin:0.5rem 0 0.4rem;">'
-                    f'{nf.get("title","")}</div>'
-                    f'<div style="font-size:0.88rem;color:#0b1f3a;line-height:1.7;">{nf.get("claim","")}</div>'
+                    f'{esc(nf.get("title",""))}</div>'
+                    f'<div style="font-size:0.88rem;color:#0b1f3a;line-height:1.7;">{esc(nf.get("claim",""))}</div>'
                     f'<div style="font-size:0.75rem;color:#4a6580;margin-top:0.4rem;font-style:italic;">'
-                    f'What\'s new: {nf.get("what_makes_it_new","")}</div></div>',
+                    f'What\'s new: {esc(nf.get("what_makes_it_new",""))}</div></div>',
                     unsafe_allow_html=True)
                 if nf.get("unsupported_numbers"):
                     st.caption("⚠️ This finding states figures no paper reports ("
@@ -2905,8 +2905,8 @@ if st.session_state.results:
                         f'border-left:3px solid {cc};border-radius:5px;'
                         f'padding:0.6rem 0.9rem;margin-bottom:0.35rem;">'
                         f'<div style="display:flex;justify-content:space-between;">'
-                        f'<div style="font-size:0.85rem;color:#0b1f3a;">{icon} {g["representative"]}</div>'
-                        f'<div>{_badge(g["confidence"],cc,"#ffffff",cc)}'
+                        f'<div style="font-size:0.85rem;color:#0b1f3a;">{icon} {esc(g["representative"])}</div>'
+                        f'<div>{_badge(esc(g["confidence"]),cc,"#ffffff",cc)}'
                         f'{_badge(g["frequency"],"#4a6580","#f2f5f8","#c9dff5")}</div></div></div>',
                         unsafe_allow_html=True)
 
@@ -2964,12 +2964,12 @@ if st.session_state.results:
                     f'border-left:3px solid #0066cc;border-radius:6px;'
                     f'padding:0.8rem 1.2rem;margin-bottom:0.5rem;">'
                     f'<div style="font-family:\'DM Mono\',monospace;font-size:0.7rem;color:#0066cc;">'
-                    f'{entry.get("status","✅")} STAGE {i} — {entry["stage"]}</div>'
+                    f'{esc(entry.get("status","✅"))} STAGE {i} — {esc(entry["stage"])}</div>'
                     f'<div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-top:0.5rem;">'
                     f'<div><span style="font-family:\'DM Mono\',monospace;font-size:0.62rem;color:#4a6580;">IN: </span>'
-                    f'<span style="font-size:0.8rem;color:#0b1f3a;">{entry["inputs"]}</span></div>'
+                    f'<span style="font-size:0.8rem;color:#0b1f3a;">{esc(entry["inputs"])}</span></div>'
                     f'<div><span style="font-family:\'DM Mono\',monospace;font-size:0.62rem;color:#4a6580;">OUT: </span>'
-                    f'<span style="font-size:0.8rem;color:#087f5b;">{entry["outputs"]}</span></div>'
+                    f'<span style="font-size:0.8rem;color:#087f5b;">{esc(entry["outputs"])}</span></div>'
                     f'</div></div>',
                     unsafe_allow_html=True)
 

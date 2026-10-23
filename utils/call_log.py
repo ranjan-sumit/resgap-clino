@@ -26,6 +26,8 @@ class CallLog:
         self.max_records = max_records
         self.records: list[dict] = []
         self.dropped = 0
+        self.schema_errors: list[dict] = []        # items an agent returned in the wrong shape (rejected)
+        self.schema_error_count = 0
         self._lock = threading.Lock()
 
     def redact(self, text) -> str:
@@ -51,6 +53,14 @@ class CallLog:
             else:
                 self.records.append(rec)
 
+    def record_schema_error(self, *, stage: str, agent: str, detail: str) -> None:
+        """An agent returned an item of the wrong shape; the item was rejected."""
+        with self._lock:
+            if len(self.schema_errors) < self.max_records:
+                self.schema_errors.append({"kind": "schema_error", "stage": stage or "", "agent": agent,
+                                           "error": self.redact(detail)})
+            self.schema_error_count += 1
+
     def failures(self) -> list[dict]:
         return [r for r in self.records if not r["ok"]]
 
@@ -66,11 +76,12 @@ class CallLog:
     def summary(self) -> dict:
         calls = self.records
         return {"calls": len(calls), "failed": len(self.failures()), "dropped": self.dropped,
+                "schema_errors": self.schema_error_count,
                 "seconds": round(sum(r["latency_s"] for r in calls), 1)}
 
     def to_jsonl(self) -> str:
         with self._lock:
-            lines = [json.dumps(r, ensure_ascii=False) for r in self.records]
+            lines = [json.dumps(r, ensure_ascii=False) for r in self.records + self.schema_errors]
         if self.dropped:
             lines.append(json.dumps({"note": f"{self.dropped} further calls not logged (cap {self.max_records})"}))
         return "\n".join(lines) + ("\n" if lines else "")

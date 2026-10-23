@@ -8,6 +8,8 @@ are historical names that the router maps to roles; they do not name a provider 
 import json
 import re
 
+from pipeline.agent_schemas import valid_or_empty
+
 MODEL_SELECTION_AGENTS = [
     {
         "name": "Dr. Statistician", "role": "Biostatistician", "model_key": "gpt_20b",
@@ -165,7 +167,8 @@ def _backend_for(client) -> object:
     return client.council_backend()
 
 
-def run_council(agents: list, context: str, final_prompt: str, backend, master_key: str = "gpt_120b") -> dict:
+def run_council(agents: list, context: str, final_prompt: str, backend, master_key: str = "gpt_120b",
+                final_schema: str | None = None, client=None) -> dict:
     agent_responses = []
     failures = []
     transcript_lines = []
@@ -232,6 +235,8 @@ def run_council(agents: list, context: str, final_prompt: str, backend, master_k
                      "chair_error": raw_consensus.get("error", "")}
     else:
         consensus = _robust_parse(raw_consensus, dict)
+        if consensus and valid_or_empty("council_consensus", consensus, client) is None:
+            consensus = {}
         if not consensus:
             consensus = {"consensus": raw_consensus, "key_points": [], "confidence": "medium"}
 
@@ -244,6 +249,8 @@ def run_council(agents: list, context: str, final_prompt: str, backend, master_k
         final_decision = {"chair_error": raw_final.get("error", "")}
     else:
         final_decision = _robust_parse(raw_final, dict)
+        if final_decision and final_schema and valid_or_empty(final_schema, final_decision, client) is None:
+            final_decision = {}
         if not final_decision:
             final_decision = {"decision": raw_final}
 
@@ -273,7 +280,8 @@ def council_select_model(params: list, sufficiency: dict, context: dict, client)
         f"Researcher interest: {context.get('interest','')}\n\n"
         f"Extracted parameters:\n{json.dumps(summary, indent=2)}"
     )
-    return run_council(MODEL_SELECTION_AGENTS, council_context, MODEL_COUNCIL_FINAL_PROMPT, backend=backend)
+    return run_council(MODEL_SELECTION_AGENTS, council_context, MODEL_COUNCIL_FINAL_PROMPT, backend=backend,
+                       final_schema="council_model_choice", client=client)
 
 
 def council_synthesise_insights(
@@ -304,4 +312,5 @@ def council_synthesise_insights(
         f"RESEARCH GAPS previously identified:\n{json.dumps(gap_titles, indent=2)}\n\n"
         f"Parameters used: {len(params)}"
     )
-    return run_council(INSIGHT_SYNTHESIS_AGENTS, council_context, INSIGHT_COUNCIL_FINAL_PROMPT, backend=backend)
+    return run_council(INSIGHT_SYNTHESIS_AGENTS, council_context, INSIGHT_COUNCIL_FINAL_PROMPT, backend=backend,
+                       final_schema="council_insights", client=client)

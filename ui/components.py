@@ -38,6 +38,12 @@ def badge(text, color="#0066cc", bg="#e5f2ff", border="#7ab8f5", title=""):
             f'margin-right:0.3rem;">{text}</span>')
 
 
+def esc(value) -> str:
+    """Text for putting inside HTML: every character that could start markup is escaped. Use it for anything that
+    came from a paper, a model or a user (titles, claims, names, error text); tests refuse unescaped values."""
+    return html.escape("" if value is None else str(value), quote=True)
+
+
 def sidebar_collapse_script(max_width: int = 768) -> str:
     """The script that closes the sidebar on a narrow screen (a no-op on a wide one). It lives here, as a
     plain string, so its content can be tested; app.py hands it to a zero-height frame."""

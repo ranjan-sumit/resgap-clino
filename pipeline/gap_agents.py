@@ -28,6 +28,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from pipeline.agent_config import GAP_CRITIC, GAP_FINDER
 from packages.research_schemas.gap_identity import attach_gap_identity
+from pipeline.agent_schemas import keep_valid, valid_or_empty
 from utils.azure_client import LLMCallError, unwrap
 
 MAX_GAPS = 12
@@ -263,6 +264,10 @@ def _run_finder(client, lens: str, system: str, user: str, by_handle: dict, titl
     if items is None:
         diag["error"] = "reply could not be read"
         return [], diag
+    items, rejected = keep_valid("finder_gap", items, client)
+    diag["schema_rejected"] = rejected
+    diag["proposed"] += rejected
+    diag["dropped_ungrounded"] += rejected
     out = []
     for g in items:
         diag["proposed"] += 1
@@ -294,6 +299,7 @@ def _critic(client, candidates: list, feedback_text: str = ""):
     reviews = _parse_list(raw, "reviews")
     if reviews is None:
         return {}, "reply could not be read"
+    reviews, _ = keep_valid("critic_review", reviews, client)
     return {str(r.get("id")): r for r in reviews if r.get("id")}, None
 
 

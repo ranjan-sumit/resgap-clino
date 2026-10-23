@@ -7,6 +7,7 @@ import difflib
 import json
 import re
 from domain_config import inject_domain_into_proposal_prompt
+from pipeline.agent_schemas import keep_valid
 from utils.azure_client import unwrap
 
 # How many leading hex chars of gap_id to expose to the LLM as a copyable
@@ -196,7 +197,7 @@ Make proposals specific enough that a researcher could begin working on them imm
         raw = unwrap(client.chat_json(
             system_prompt, user_prompt, max_tokens=10000, timeout_seconds=300, max_retries=3
         ))
-        proposals = _parse_proposals(raw)
+        proposals, _ = keep_valid("proposal", _parse_proposals(raw), client)
         if proposals or not (raw or "").strip():
             break
 
@@ -278,7 +279,8 @@ def review_proposals(proposals: list, gaps: list, client, domain_config: dict = 
     if not isinstance(reviews, list):
         diag["error"] = "review reply could not be read"
         return proposals, diag
-    by_index = {r.get("index"): r for r in reviews if isinstance(r, dict)}
+    reviews, _ = keep_valid("proposal_review", [r for r in reviews if isinstance(r, dict)], client)
+    by_index = {r.get("index"): r for r in reviews}
 
     kept, to_revise = [], []
     for i, p in enumerate(proposals):
@@ -314,7 +316,7 @@ def review_proposals(proposals: list, gaps: list, client, domain_config: dict = 
                     max_retries=PROPOSAL_REVIEWER.max_retries))
             except LLMCallError:
                 continue                              # keep the original rather than lose it
-            revised = _parse_proposals(raw)
+            revised, _ = keep_valid("proposal", _parse_proposals(raw), client)
             if revised:
                 new = revised[0]
                 for keep_key in ("addresses_gap_id", "addresses_gap_id_resolution", "addresses_gap_ref", "addresses_gap"):

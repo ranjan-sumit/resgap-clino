@@ -93,9 +93,11 @@ class ReviewTests(unittest.TestCase):
         out, _ = review_proposals([prop(1), prop(2)], GAPS, FakeClient([review(0, "accept")]))
         self.assertEqual(len(out), 2)
 
-    def test_an_unknown_verdict_is_treated_as_accept(self):
+    def test_a_review_with_an_unknown_verdict_is_rejected_and_the_proposal_is_kept_unreviewed(self):
         out, diag = review_proposals([prop(1)], GAPS, FakeClient([review(0, "maybe")]))
-        self.assertEqual(out[0]["review"]["verdict"], "accept")
+        self.assertEqual(len(out), 1)
+        self.assertNotIn("review", out[0])
+        self.assertEqual(diag["reviewed"], 0)
 
     def test_the_reviewer_sees_the_gap_evidence_and_what_search_found(self):
         seen = {}

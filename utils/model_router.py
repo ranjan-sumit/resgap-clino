@@ -37,6 +37,7 @@ import requests
 from utils.azure_client import AzureOpenAIClient, ErrorInfo, Failure, Success, _retry_after_seconds
 from utils.model_providers import MODEL_RPM_LIMITS, PROVIDER_REGISTRY, _MODEL_TOP_P_OVERRIDES, get_provider
 from utils.rate_limiter import RateLimiter
+from utils.text_hygiene import guard_system
 
 CUSTOM_PROVIDER = "custom"
 
@@ -309,6 +310,7 @@ class ModelRouter:
     def _invoke(self, client, spec: ModelSpec, method: str, system: str, user: str, kwargs: dict):
         kwargs = dict(kwargs)
         kwargs["max_tokens"] = int(kwargs["max_tokens"] * token_boost(spec.model, spec.provider))
+        system = guard_system(system)                 # every prompt says paper text is data, never instructions
         client.set_stage(self.current_stage)
         if self.budget is not None:
             self.budget.check()          # over the cap: no further spend

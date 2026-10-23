@@ -24,7 +24,7 @@ def run_header(run_meta: dict | None, fallback_name: str = "", res: dict | None 
         chips.append({"ok": "Completed", "degraded": "Completed with warnings", "failed": "Had failures"}[status]
                      if res.get("pipeline_trace") else "No stage trace")
         if res.get("gate_blocked"):
-            chips.append("Quality gate failed")
+            chips.append("Quality check failed")
         main = ((res.get("models") or {}).get("roles") or {}).get("extraction") or {}
         if isinstance(main, dict) and main.get("model"):
             chips.append(html.escape(str(main["model"])))

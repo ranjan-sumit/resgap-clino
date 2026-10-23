@@ -27,6 +27,7 @@ import requests
 
 from pipeline import academic_search as acad
 from utils.azure_client import LLMCallError, unwrap
+from pipeline.agent_schemas import keep_valid, valid_or_empty
 from utils.cache_tag import model_tag
 from utils.database import compute_cache_key, get_cached_gap_validation, save_cached_gap_validation
 
@@ -177,6 +178,7 @@ def plan_queries(gaps: list, client) -> tuple[dict, str | None]:
     rows = value.get("queries") if isinstance(value, dict) else None
     if not isinstance(rows, list):
         return {}, "query planner reply could not be read"
+    rows, _ = keep_valid("scout_plan_row", [r for r in rows if isinstance(r, dict)], client)
     by_id = {}
     for r in rows:
         if isinstance(r, dict) and isinstance(r.get("queries"), list):
@@ -198,7 +200,7 @@ def _assess(gap: dict, papers: list, client) -> tuple[dict, bool]:
         raw = unwrap(client.chat_json(_ASSESSOR_PROMPT, user, max_tokens=500))
         m = re.search(r'\{.*\}', raw or "", re.DOTALL)
         result = json.loads(m.group()) if m else None
-        if isinstance(result, dict) and result.get("status") in ("open", "partial", "solved"):
+        if isinstance(result, dict) and valid_or_empty("scout_assessment", result, client) is not None:
             rel = [n for n in (result.get("relevant") or []) if isinstance(n, int) and 1 <= n <= len(shown)]
             result["relevant"] = rel[:3]
             return result, True

@@ -7,6 +7,7 @@ import os
 import re
 import pdfplumber
 from pipeline import pdf_limits
+from utils.text_hygiene import find_instructions, strip_invisible, visible_char
 from utils.azure_client import unwrap
 
 # PyMuPDF — needed for page-to-image conversion (vision analysis).
@@ -65,9 +66,12 @@ def _extract_text_by_section(pdf_path: str) -> dict:
     current_section = "_header"
     full_text = []
 
+    removed = 0
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            page_text = page.extract_text() or ""
+            page_text = page.filter(visible_char).extract_text() or ""
+            page_text, n = strip_invisible(page_text)
+            removed += n
             for line in page_text.split("\n"):
                 sec = _detect_section(line)
                 if sec:
@@ -82,6 +86,7 @@ def _extract_text_by_section(pdf_path: str) -> dict:
         "sections": sections,
         "full_text": "\n".join(full_text),
         "char_count": len("\n".join(full_text)),
+        "invisible_removed": removed,
     }
 
 
@@ -326,6 +331,12 @@ def parse_pdf(pdf_path: str, filename: str, client=None, use_vision: bool = Fals
     result["full_text"] = text_data["full_text"]
     result["char_count"] = text_data["char_count"]
     _strip_furniture(result, segments)
+    seg_hygiene = structural_out.get("hygiene") or {}
+    result["hygiene"] = {                       # what was found in, or taken out of, this paper's text
+        "hidden_chars": int(seg_hygiene.get("hidden_chars", 0)),
+        "invisible_removed": int(seg_hygiene.get("invisible_removed", 0)) + int(text_data.get("invisible_removed", 0)),
+        "instruction_hits": find_instructions(result["full_text"]),
+    }
 
     # Tables: the structural parser reads ruled tables as real rows; pdfplumber is the fallback.
     result["tables"] = list(structural_out.get("tables") or []) or _extract_tables(pdf_path)

@@ -1,4 +1,4 @@
-﻿"""Which model answered a cached step, as a short string for cache keys.
+"""Which model answered a cached step, as a short string for cache keys.
 
 A cached result belongs to the (provider, model) that produced it: the same paper read by two models must give two
 entries, and switching the model must recompute. Clients without a model (tests, plain fakes) give an empty tag.

@@ -383,6 +383,16 @@ def _run_full_pipeline(
                     warn(f"'{filename}' was skipped: reading it {e}.")
                     continue
                 paper["tier"] = 1
+                _hy = paper.get("hygiene") or {}
+                if _hy.get("instruction_hits"):
+                    warn(f"'{filename}' contains text that reads like instructions to an AI model. It is treated as "
+                         f"ordinary paper text and not followed: {_hy['instruction_hits'][0]!r}")
+                    _trace(f"  Possible instructions in {filename}", "paper text",
+                           f"{len(_hy['instruction_hits'])} instruction-like phrase(s); not followed; e.g. {_hy['instruction_hits'][0]!r}", "⚠️")
+                if _hy.get("hidden_chars") or _hy.get("invisible_removed"):
+                    _trace(f"  Hidden text in {filename}", "paper text",
+                           f"{_hy.get('hidden_chars', 0)} characters of unreadable-size text left out; "
+                           f"{_hy.get('invisible_removed', 0)} invisible characters removed")
                 all_papers.append(paper)
                 all_trees.append(build_tree(paper))
                 readable_papers.append((filename, content))
@@ -597,6 +607,10 @@ def _run_full_pipeline(
         reader = (diag or {}).get("reader") or {}
         paper_profiles[filename] = {"study_type": study_type_of(evidence_dicts),
                                     "quoted_items": sum(1 for e in evidence_dicts if (e.get("provenance") or {}).get("quote"))}
+        if reader.get("unread_chars"):
+            warn(f"'{filename}' is very long: {reader['unread_chars']:,} characters at the end were not read.")
+            _trace(f"  Evidence for {filename}", "paper text",
+                   f"{reader['unread_chars']:,} characters beyond the reading limit were not read", "⚠️")
         if reader and not reader.get("usable"):
             _trace(f"  Evidence for {filename}", "paper text",
                    f"reader could not run ({reader.get('error')}); used the wiki summary instead", "⚠️")

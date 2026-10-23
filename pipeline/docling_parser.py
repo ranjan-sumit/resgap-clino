@@ -24,6 +24,7 @@ from pathlib import Path
 
 from utils.database import get_cached_docling_extraction, save_cached_docling_extraction
 from pipeline.pdf_parser import _detect_section
+from utils.text_hygiene import strip_invisible, visible_span
 
 try:
     import pymupdf
@@ -33,7 +34,7 @@ except ImportError:  # PyMuPDF < 1.24.3 only exposes the legacy module name
 # Bumped 2 -> 3 on the Docling -> PyMuPDF swap: a v2 cache row holds Docling
 # output (different segmentation and labels) and must not be served as if the
 # new engine produced it (AD-3's stage_logic_version convention).
-DOCLING_STAGE_VERSION = 4     # 4: furniture found anywhere on the page; tables become segments
+DOCLING_STAGE_VERSION = 5     # 5: hidden text left out, invisible characters removed (4: furniture anywhere; tables as segments)
 
 _MARGIN_FRACTION = 0.08        # top/bottom band scanned for running headers/footers
 _REPEAT_FRACTION = 0.5         # margin text on >= this share of pages is a running header/footer
@@ -54,9 +55,11 @@ def _norm_margin(text: str) -> str:
     return re.sub(r"\d+", "#", " ".join(text.lower().split()))
 
 
-def _read_blocks(doc) -> list[dict]:
+def _read_blocks(doc, stats: dict | None = None) -> list[dict]:
     """Flatten every text block of every page into
-    {page, text, size, bold, y0, y1, page_h, bbox}."""
+    {page, text, size, bold, y0, y1, page_h, bbox}. Text a reader cannot see (microscopic, or white and
+    instruction-like) is left out and invisible characters are removed; both are counted in `stats`."""
+    stats = stats if stats is not None else {}
     blocks = []
     for pno, page in enumerate(doc, 1):
         page_h = page.rect.height
@@ -68,6 +71,13 @@ def _read_blocks(doc) -> list[dict]:
                 parts = []
                 for span in line.get("spans", []):
                     t = span.get("text", "")
+                    if not t.strip():
+                        continue
+                    if not visible_span(span):
+                        stats["hidden_chars"] = stats.get("hidden_chars", 0) + len(t)
+                        continue
+                    t, removed = strip_invisible(t)
+                    stats["invisible_removed"] = stats.get("invisible_removed", 0) + removed
                     if not t.strip():
                         continue
                     parts.append(t)
@@ -246,7 +256,8 @@ def extract_with_docling(pdf_path: str, filename: str) -> dict:
         return result
 
     with pymupdf.open(pdf_path) as doc:
-        blocks = _read_blocks(doc)
+        hygiene = {}
+        blocks = _read_blocks(doc, hygiene)
         tables, table_boxes = _extract_tables(doc)
         n_pages = len(doc)
 
@@ -279,6 +290,8 @@ def extract_with_docling(pdf_path: str, filename: str) -> dict:
         "char_count": len(full_text),
         "tables": tables,
         "text_segments": text_segments,
+        "hygiene": {"hidden_chars": hygiene.get("hidden_chars", 0),
+                    "invisible_removed": hygiene.get("invisible_removed", 0)},
         "from_cache": False,
     }
 

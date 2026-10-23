@@ -115,7 +115,7 @@ class InsightCouncilContextTests(unittest.TestCase):
     def _context_sent(self, sim):
         seen = {}
 
-        def fake_run_council(agents, context_text, final_prompt, backend=None):
+        def fake_run_council(agents, context_text, final_prompt, backend=None, **_kw):
             seen["ctx"] = context_text
             return {}
         with patch("pipeline.llm_council.run_council", side_effect=fake_run_council), \

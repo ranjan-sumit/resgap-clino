@@ -15,6 +15,7 @@ from utils.azure_client import unwrap, LLMCallError
 from utils.cache_tag import model_tag
 from utils.database import compute_cache_key, get_cached_parameters, save_cached_parameters
 from pipeline.param_quality import annotate_parameters
+from pipeline.agent_schemas import keep_valid
 
 logger = logging.getLogger(__name__)
 
@@ -213,7 +214,7 @@ def extract_parameters(wiki: dict, papers: list, client, study_types: dict | Non
             )
             try:
                 raw = unwrap(client.chat_json(PARAM_EXTRACTION_PROMPT, user_prompt, max_tokens=6000))
-                params = _robust_parse(raw, list)
+                params, _ = keep_valid("parameter", _robust_parse(raw, list), client)
                 # B16 fix: cache the raw, pre-augmentation params — paper_index
                 # below is only valid for THIS call, never cache it.
                 # Review fix: only cache when params is non-empty (a genuine
@@ -267,7 +268,7 @@ def derive_cross_paper_parameters(params: list, client) -> list:
     )
 
     raw = unwrap(client.chat_json(CROSS_PAPER_DERIVATION_PROMPT, user_prompt, max_tokens=3000))
-    derived = _robust_parse(raw, list)
+    derived, _ = keep_valid("parameter", _robust_parse(raw, list), client)
 
     result = []
     for p in derived:
