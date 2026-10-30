@@ -99,7 +99,7 @@ from utils.database import (
     DEFAULT_PROJECT_ID, list_projects, get_project, list_feedback, upsert_feedback,
     list_project_files, attach_comp_results, update_run_proposals,
 )
-from utils import project_store, run_jobs
+from utils import audit_log, project_store, run_jobs
 from utils.run_jobs import start_job
 from pipeline.feedback_context import POSITIVE_REASONS, NEGATIVE_REASONS
 from pipeline import pdf_limits
@@ -189,7 +189,8 @@ from ui.compat import plotly_full_width, table_full_width
 from ui.run_board import board_rows
 from utils.export import ALL_SECTION_IDS, REPORT_SECTIONS
 from ui.lab_view import kind_badge, lab_verdict, parameters_by_paper
-from ui.graph_view import filter_relations, grounding_summary, orphan_explanation, relation_rows
+from ui.graph_view import (bridge_rows, entity_rows, filter_relations, grounding_summary, orphan_explanation,
+                           orphan_rows, relation_counts, relation_rows, top_connected, type_counts)
 from ui.gaps_view import (SORTS as GAP_SORTS, compare_proposals, filter_gaps, gap_rows, proposal_rows,
                           sort_gaps)
 from ui.evidence_view import (citation, evidence_rows, filter_evidence, match_evidence, paper_titles,
@@ -203,7 +204,14 @@ from utils.run_management import (best_to_keep, delete_project as delete_project
                                   delete_run as delete_run_everywhere, find_duplicate_groups, merge_runs,
                                   project_footprint, rename_run, run_footprint,
                                   update_project as update_project_settings)
-from utils.cost_guard import DEFAULT_CAP_TOKENS, describe_estimate, estimate_cost, estimate_run
+from utils.cost_guard import DEFAULT_CAP_TOKENS, describe_estimate, estimate_cost, estimate_run, load_prices
+from utils import run_planner as rplan
+
+
+def _audit_export(kind: str) -> dict:
+    """Keyword arguments for st.download_button that record the download in the audit log when it is clicked."""
+    return {"on_click": audit_log.record,
+            "args": ("export.report", "run", st.session_state.get("current_run_id") or "", {"format": kind})}
 
 
 @st.cache_data(show_spinner=False, max_entries=64, ttl=3600)     # capped: one small number per file, but never unbounded
@@ -419,13 +427,48 @@ def _refresh_model_lists() -> None:
     _set_widget_state(st.session_state["model_config"])   # a model may now be in the list instead of "Custom…"
 
 
+_NO_PICK = "Choose a recommendation"
+_MODEL_COLS = [0.9, 3.0, 1.35, 1.95]
+
+
+def _set_role_widgets(role: str, provider: str, model: str) -> None:
+    st.session_state[f"mp_{role}"] = provider
+    if model in _model_choices(provider):
+        st.session_state[f"mm_{role}"], st.session_state[f"mc_{role}"] = model, ""
+    else:
+        st.session_state[f"mm_{role}"], st.session_state[f"mc_{role}"] = _CUSTOM_MODEL, model
+
+
+def _on_suggestion(role: str) -> None:
+    """A recommended model was picked for this job: show it in the provider and model boxes and save it."""
+    spec = st.session_state.get(f"_ms_map_{role}", {}).get(st.session_state.get(f"ms_{role}"))
+    if spec:
+        _set_role_widgets(role, *spec)
+        _on_model_change()
+
+
 def _model_row(role: str) -> None:
     label = ROLE_LABELS.get(role, "Fallback")
     tip = ROLE_HELP.get(role, "Used when a role's own model fails. A different provider is best, so one outage "
                               "cannot take out both.")
-    c_role, c_prov, c_model = st.columns([1.1, 1.3, 2.2], vertical_alignment="center")
+    c_role, c_sugg, c_prov, c_model = st.columns(_MODEL_COLS, vertical_alignment="center")
     c_role.markdown(f'<span title="{html.escape(tip)}" style="font-weight:600;font-size:0.9rem;">{esc(label)}</span>',
                     unsafe_allow_html=True)
+    # Recommended models for this job (the ones the three tiers use). Shows the one in use, or a prompt.
+    cfg = st.session_state["model_config"]
+    current = cfg.fallback if role == "fallback" else cfg.spec_for(role)
+    suggestions = {rplan.option_label(o): (o["provider"], o["model"]) for o in
+                   rplan.job_options(role, st.session_state.get("_available_providers", set()), rplan.effective_prices())}
+    if suggestions:
+        st.session_state[f"_ms_map_{role}"] = suggestions
+        st.session_state[f"ms_{role}"] = next((lbl for lbl, spec in suggestions.items()
+                                               if current and spec == (current.provider, current.model)), _NO_PICK)
+        c_sugg.selectbox("Recommended", [_NO_PICK, *suggestions], key=f"ms_{role}", label_visibility="collapsed",
+                         on_change=_on_suggestion, args=(role,),
+                         help="Models the Economy, Balanced and Thorough tiers use for this job, with their prices. "
+                              "Pick one to use it; the boxes to the right then show it.")
+    else:
+        c_sugg.caption("Add an API key for suggestions.")
     # A fixed snapshot of the labels (not a function that reads session state), so
     # they are the same wherever Streamlit evaluates them.
     _labels = {p: _provider_label(p) for p in _provider_options(role)}
@@ -497,8 +540,11 @@ def _render_model_picker() -> list:
                             f'<span style="color:#c81e1e;font-size:0.82rem;">{html.escape(r["error"])}</span>',
                             unsafe_allow_html=True)
 
-    with st.expander("Choose models"):
-        st.caption("Each job can use a different provider and model. Hover a name to see what it does.")
+    with st.expander("Choose models", expanded=True):
+        st.caption("Each job can use a different provider and model. Pick a recommended model in the second column, "
+                   "or choose any provider and model yourself. Hover a job name to see what it does.")
+        for _col, _title in zip(st.columns(_MODEL_COLS), ("Job", "Recommended (USD per 1M tokens, in/out)", "Provider", "Model")):
+            _col.markdown(f'<div class="sb-section" style="margin:0 0 0.2rem;">{_title}</div>', unsafe_allow_html=True)
         for role in MAIN_ROLES:
             _model_row(role)
             if notes.get(role):
@@ -532,6 +578,279 @@ def _render_model_picker() -> list:
     return issues
 
 
+def _gx_bar(labels: list, values: list, colors: list):
+    """A small horizontal bar chart for the Graph screen (largest bar on top, value at the bar's end)."""
+    import plotly.graph_objects as go
+    short = [l if len(l) <= 26 else l[:25] + "…" for l in labels]
+    fig = go.Figure(go.Bar(x=values[::-1], y=short[::-1], orientation="h", marker=dict(color=colors[::-1]),
+                           text=values[::-1], textposition="outside", cliponaxis=False,
+                           customdata=labels[::-1], hovertemplate="%{customdata}: %{x}<extra></extra>"))
+    fig.update_layout(paper_bgcolor="#ffffff", plot_bgcolor="#ffffff", showlegend=False,
+                      font=dict(color="#0b1f3a", size=11), height=max(190, 32 * len(labels) + 30),
+                      margin=dict(l=0, r=28, t=4, b=4), xaxis=dict(visible=False),
+                      yaxis=dict(automargin=True, showgrid=False, fixedrange=True))
+    return fig
+
+
+def _gx_table(headers: list, rows_html: str, scroll: bool = False) -> None:
+    """A fixed HTML table in the same style as the glossary and coverage tables."""
+    st.markdown(
+        f'<div class="cv-wrap{" tbl-scroll" if scroll else ""}"><table class="gl-table cv-table"><thead><tr>'
+        + "".join(f"<th>{esc(h)}</th>" for h in headers) + f"</tr></thead><tbody>{rows_html}</tbody></table></div>",
+        unsafe_allow_html=True)
+
+
+# ── Run planner: from the papers, a budget and the purpose, choose models and depth, and show the cost ──
+# The logic is in utils/run_planner.py (pure, tested). This part draws it and applies a tier.
+# One slate hue in four shades, so the cost bar reads without a rainbow.
+_RP_COLORS = {rplan.ROLE_EXTRACTION: "#334e68", rplan.ROLE_WIKI: "#627d98", rplan.ROLE_ANALYSIS: "#9fb3c8",
+              rplan.ROLE_CHAIR: "#d0dae5"}
+_RP_COUNCIL = ((rplan.ROLE_COUNCIL_A, "Seat 1"), (rplan.ROLE_COUNCIL_B, "Seat 2"), (rplan.ROLE_COUNCIL_C, "Seat 3"),
+               (rplan.ROLE_CHAIR, "Chair"))
+# analysis option -> the suffix of its widget key (set_<suffix> in Settings, wiz_<suffix> in the wizard)
+_RP_OPTION_WIDGETS = {"extract_refs": "refs", "ref_limit": "reflimit", "enable_quality_engine": "quality",
+                      "enable_gap_challenger": "challenger", "use_vision": "vision"}
+
+
+def _last_run_usage() -> dict | None:
+    """Token usage recorded for this project's newest run that has any, with the run's name."""
+    import sqlite3
+    try:
+        for r in list_runs(limit=10, project_id=st.session_state.get("current_project_id")):
+            usage = (get_run_manifest(r["id"]) or {}).get("token_usage")
+            if isinstance(usage, dict) and usage.get("total"):
+                return {**usage, "name": r["name"]}
+    except (sqlite3.Error, OSError, ValueError, KeyError):
+        return None
+    return None
+
+
+def _tier_in_use(plan: dict) -> bool:
+    cfg = st.session_state["model_config"]
+    return bool(plan["roles"]) and all((cfg.spec_for(r).provider, cfg.spec_for(r).model) == spec
+                                       for r, spec in plan["roles"].items())
+
+
+def _apply_tier(tier: str, scanned: bool, mode: str = "mix") -> None:
+    """Make a tier the model assignment and the default analysis options (for this session's Settings and,
+    if one is open, the New analysis form). `mode` is the planner's Providers choice."""
+    available = st.session_state.get("_available_providers", set())
+    plan = rplan.resolve_assignment(tier, rplan.restrict_providers(available, mode, preview=True))
+    if not plan["roles"] or rplan.providers_needed(plan) - available:
+        return                                       # a provider in the plan has no key (the button is off in that case)
+    cfg = ModelConfig({r: ModelSpec(p, m) for r, (p, m) in plan["roles"].items()},
+                      ModelSpec(*plan["fallback"]) if plan["fallback"] else None)
+    st.session_state["model_config"] = cfg
+    save_config(cfg)
+    for k in [k for k in st.session_state if str(k).startswith(("mp_", "mm_", "mc_"))]:
+        del st.session_state[k]                      # the model pickers re-read the new config
+    st.session_state.pop("_model_test", None)
+    opts = dict(rplan.TIER_OPTIONS[tier])
+    if scanned:
+        opts["use_vision"] = True
+    targets = [_S] + ([st.session_state["_wiz"]["opts"]] if st.session_state.get("_wiz") else [])
+    for store in targets:
+        store.update(opts)
+    for prefix in ("set", "wiz"):                    # widgets that exist keep their own copy, so update it too
+        for opt, suffix in _RP_OPTION_WIDGETS.items():
+            if opt in opts and f"{prefix}_{suffix}" in st.session_state:
+                st.session_state[f"{prefix}_{suffix}"] = opts[opt]
+    st.toast(f"{rplan.TIER_INFO[tier]['label']} applied.")
+
+
+def _rp_card_html(tier: str, plan: dict, cost: dict, tokens: dict, opts: dict, council: dict, *, recommended: bool,
+                  over_budget: bool) -> str:
+    """One tier as a card. Every card has the same parts in the same order (so the three line up); anything
+    that differs between tiers and needs explaining goes in the shared notes under the cards."""
+    info = rplan.TIER_INFO[tier]
+    badges = ('<span class="rp-badge">Recommended</span>' if recommended else "") + (
+        '<span class="rp-badge warn">Above budget</span>' if over_budget else "")
+    mid = cost["mid"]
+    if mid == 0 and cost["unpriced"]:
+        money, sub = '<div class="rp-cost na">No price set</div>', "Add prices under Prices below."
+    else:
+        money = f'<div class="rp-cost">{esc(rplan.fmt_range(cost["low"], cost["high"]))}</div>'
+        sub = f'about {rplan.fmt_usd(mid)} · {tokens["total"]:,} tokens'
+    bar = "".join(f'<span style="width:{(cost["by_role"].get(r) or 0) / mid * 100:.1f}%;background:{_RP_COLORS[r]}"></span>'
+                  for r in rplan.PLAN_ROLES) if mid else ""
+
+    def _model(role: str) -> str:
+        return esc(plan["roles"][role][1]) if role in plan["roles"] else "none"
+
+    main_rows = "".join(f'<div class="rp-row"><span class="rp-role">{esc(rplan.ROLE_NAMES[r])}</span>'
+                        f'<span class="rp-model">{_model(r)}</span></div>' for r in rplan.PLAN_ROLES)
+    council_rows = "".join(f'<div class="rp-row"><span class="rp-role">{esc(label)}</span>'
+                           f'<span class="rp-model">{_model(r)}</span></div>' for r, label in _RP_COUNCIL)
+    council_cost = ("No price for some seats" if council["unpriced"]
+                    else f'About {rplan.fmt_usd(council["usd"])} per gap evaluated')
+    includes = "".join(f'<span class="{"on" if opts.get(k) else "off"}">{"✓" if opts.get(k) else "–"} {esc(label)}</span>'
+                       for k, label in rplan.OPTION_LABELS)
+    saving = (f'{round(cost["saving"] * 100)}% less than the review model for every job'
+              if cost["saving"] is not None and cost["saving"] >= 0.05 else "&nbsp;")
+    return (f'<div class="rp-card{" rec" if recommended else ""}"><div class="rp-head"><span class="rp-name">{esc(info["label"])}</span>'
+            f'{badges}</div><div class="rp-tag">{esc(info["tagline"])}</div>{money}<div class="rp-sub">{sub}</div>'
+            f'<div class="rp-bar">{bar}</div><div class="rp-save">{saving}</div>'
+            f'<div class="rp-group">Analysis run</div>{main_rows}'
+            f'<div class="rp-group">Computational Lab council</div>{council_rows}'
+            f'<div class="rp-sub">{esc(council_cost)}</div>'
+            f'<div class="rp-incl">{includes}</div><div class="rp-speed">Speed: {esc(rplan.SPEED[tier])}</div></div>')
+
+
+def _render_run_planner(*, key: str, paper_chars: list | None = None) -> None:
+    """Three tiers for the papers loaded (or a typical run), each with its models, depth and cost range."""
+    available = st.session_state.get("_available_providers", set())
+    st.markdown('<div class="section-label" style="margin:0;">Run planner</div>', unsafe_allow_html=True)
+    st.caption("Pick what the result is for and which providers to use. Each tier sets the model for every job and "
+               "how much checking is done, and shows what it should cost for these papers.")
+    if not available:
+        show_info("Add an API key under Settings > API keys to plan a run.")
+        return
+    st.session_state.setdefault(f"{key}_purpose", "review")
+    st.session_state.setdefault(f"{key}_providers", rplan.default_mode(available))
+    c_purpose, c_prov, c_budget = st.columns([2.2, 2.2, 1], vertical_alignment="bottom")
+    purpose = c_purpose.segmented_control("What is the result for?", list(rplan.PURPOSES), key=f"{key}_purpose",
+                                          format_func=rplan.PURPOSES.get) or "review"
+    mode = c_prov.segmented_control("Providers", list(rplan.PROVIDER_MODES), key=f"{key}_providers",
+                                    format_func=rplan.PROVIDER_MODES.get,
+                                    help="Mix puts Gemini on the reading and a GPT model where one model judges "
+                                         "another's work, so writer and judge come from different providers. "
+                                         "It needs both keys; with one key the plan uses that provider.") or "mix"
+    # Show the plan for the chosen providers even when a key is missing, so the modes can be compared.
+    plan_available = rplan.restrict_providers(available, mode, preview=True)
+    _lacking = plan_available - available
+    if _lacking:
+        st.caption("No key yet for " + " and ".join(_provider_name(p) for p in sorted(_lacking)) + ". The cards show the "
+                   "plan you would get with it. The Use buttons switch on once the key is added under Settings > API keys.")
+    budget = float(c_budget.number_input("Budget in USD (0 = no limit)", min_value=0.0, value=0.0, step=0.5,
+                                         key=f"{key}_budget",
+                                         help="The planner never goes above the tier your purpose suggests, but it "
+                                              "steps down to a cheaper tier if the upper estimate is over this."))
+    if paper_chars is None:
+        c_n, c_pages, c_scan = st.columns([1, 1, 2], vertical_alignment="bottom")
+        n_papers = int(c_n.number_input("Papers", min_value=2, max_value=5, value=3, key=f"{key}_n"))
+        pages = int(c_pages.number_input("Pages per paper", min_value=1, max_value=200, value=15, key=f"{key}_pages"))
+        chars, scan_default = rplan.chars_for_pages(n_papers, pages), False
+    else:
+        chars, scan_default = paper_chars, rplan.scanned_count(paper_chars) > 0
+        c_scan = st.container()
+        st.caption(f"{len(chars)} paper(s), about {sum(chars) // rplan.CHARS_PER_PAGE} pages of text.")
+    scanned = c_scan.checkbox("Papers are scanned or figure-heavy", value=scan_default, key=f"{key}_scanned",
+                              help="Turns on figure and table analysis and adds the cost of reading page images.")
+
+    last = _last_run_usage()
+    shares = rplan.role_shares_from_usage((last or {}).get("by_stage"))
+    prices = rplan.effective_prices()
+    plans, tokens, costs, opts_by_tier = {}, {}, {}, {}
+    for tier in rplan.TIERS:
+        opts_by_tier[tier] = {**rplan.TIER_OPTIONS[tier], "use_vision": bool(scanned)}
+        plans[tier] = rplan.resolve_assignment(tier, plan_available)
+        tokens[tier] = rplan.plan_tokens(chars, opts_by_tier[tier], shares)
+        costs[tier] = rplan.tier_cost(plans[tier]["roles"], tokens[tier], prices)
+    pick, why = rplan.choose_tier(purpose, budget, costs)
+    st.markdown(f'<div class="rp-reco"><b>Recommended: {esc(rplan.TIER_INFO[pick]["label"])}</b>'
+                f'<span>{esc(why)}</span></div>', unsafe_allow_html=True)
+
+    councils = {tier: rplan.council_cost_per_gap(plans[tier]["roles"], prices) for tier in rplan.TIERS}
+    cols = st.columns(3)
+    for col, tier in zip(cols, rplan.TIERS):
+        with col:
+            over = bool(budget) and costs[tier]["high"] > budget and not (costs[tier]["mid"] == 0)
+            st.markdown(_rp_card_html(tier, plans[tier], costs[tier], tokens[tier], opts_by_tier[tier], councils[tier],
+                                      recommended=(tier == pick), over_budget=over), unsafe_allow_html=True)
+            in_use = _tier_in_use(plans[tier])
+            blocked = bool(rplan.providers_needed(plans[tier]) - available)
+            st.button("In use" if in_use else ("Add a key to use" if blocked else f"Use {rplan.TIER_INFO[tier]['label']}"),
+                      key=f"{key}_use_{tier}", on_click=_apply_tier, args=(tier, bool(scanned), mode),
+                      disabled=in_use or blocked or not plans[tier]["roles"], width="stretch")
+    st.markdown('<div class="rp-legend">' + "".join(
+        f'<span><i style="background:{_RP_COLORS[r]}"></i>{esc(rplan.ROLE_NAMES[r])}</span>' for r in rplan.PLAN_ROLES)
+        + '<span class="rp-legend-note">Bar: where the money goes</span></div>', unsafe_allow_html=True)
+
+    # Things worth knowing, once, instead of repeated inside each card.
+    notes = []
+    missing = [p for p in dict.fromkeys(p for t in rplan.TIERS for p in plans[t]["missing"])]
+    if missing:
+        notes.append("Add " + " or ".join(_provider_name(p) for p in missing) + " key under Settings > API keys to use "
+                     "models from a second provider in the council and as the fallback.")
+    if any(opts_by_tier[t].get("extract_refs") for t in rplan.TIERS):
+        notes.append(rplan.REFERENCE_NOTE)
+    seen = {tuple(spec) for t in rplan.TIERS for spec in plans[t]["roles"].values()}
+    for p, m in sorted(seen):
+        note = rplan.model_note(p, m)
+        if note:
+            notes.append(f"{m}: {note}")
+    for t in rplan.TIERS:
+        if costs[t]["unpriced"] and costs[t]["mid"]:
+            notes.append(f"{rplan.TIER_INFO[t]['label']}: no price for "
+                         + ", ".join(rplan.ROLE_NAMES[r] for r in costs[t]["unpriced"]) + ", so it is left out of the total.")
+    if notes:
+        st.markdown('<div class="rp-notes"><b>Good to know</b>' + "".join(f"<div>{esc(n)}</div>" for n in notes) + "</div>",
+                    unsafe_allow_html=True)
+
+    if last:
+        actual = rplan.usage_cost(last.get("by_model"), prices)
+        st.caption(f"Your last run here ({last['name']}) used {int(last['total']):,} tokens, "
+                   f"about {rplan.fmt_usd(actual['usd'])} at these prices"
+                   + (f" (no price for {', '.join(actual['unpriced'])})" if actual["unpriced"] else "") + ".")
+
+    with st.expander("Computational Lab council: cost per gap"):
+        st.caption("What one council evaluation of one gap costs with each tier's seats and chair. The token sizes "
+                   "per seat are planning assumptions.")
+        n_gaps = int(st.number_input("Gaps to evaluate", min_value=1, max_value=50, value=8, key=f"{key}_gaps"))
+        lab_rows = ""
+        for tier in rplan.TIERS:
+            c = rplan.council_cost_per_gap(plans[tier]["roles"], prices)
+            lab_rows += (f'<tr><td class="cv-paper">{esc(rplan.TIER_INFO[tier]["label"])}</td>'
+                         f'<td class="cv-num">{esc(rplan.fmt_usd(c["usd"]))}</td>'
+                         f'<td class="cv-num">{esc(rplan.fmt_usd(c["usd"] * n_gaps))}</td>'
+                         f'<td>{esc("Some seats have no price" if c["unpriced"] else "")}</td></tr>')
+        _gx_table(["Tier", "Per gap", f"For {n_gaps} gaps", ""], lab_rows)
+
+    with st.expander("How these numbers are made"):
+        src = (f"your last run ({last['name']})" if shares else "a planning assumption (25% extraction, 30% wiki, "
+               "35% analysis, 10% review) until a run has recorded its tokens")
+        st.markdown(
+            "- **Tokens:** about 4 times the paper text plus 6,000 per paper, calibrated on a real 3-paper run. "
+            "The range runs from 0.7 to 1.7 times that.\n"
+            f"- **Split across jobs:** {src}.\n"
+            "- **Input and output:** assumed 75% input and 25% output.\n"
+            f"- **Prices:** the table below, as of {rplan.PRICES_AS_OF}. A model with no price is named and left out "
+            "of the total, never guessed.\n"
+            "- **Not counted:** hidden reasoning tokens, retries and unusually long outputs. Real cost can be higher.")
+
+    with st.expander("Prices"):
+        import pandas as pd
+        st.caption(f"US dollars per million tokens. {rplan.PRICE_SOURCE} Price table dated {rplan.PRICES_AS_OF}. "
+                   "Edit a price or add a row (provider/model, for example openai/gpt-6.1-sol), then save. "
+                   "Your prices are kept in model_prices.json and always win.")
+        if rplan.price_age_days() > 90:
+            show_warning(f"These prices are {rplan.price_age_days()} days old. Check them before relying on a cost.")
+        mine = load_prices()
+        table =pd.DataFrame([{"Model": k, "Input": v[0], "Output": v[1], "Source": "You" if k in mine else "Built-in"}
+                              for k, v in sorted(prices.items())])
+        edited = st.data_editor(table, key=f"{key}_prices", hide_index=True, num_rows="dynamic", disabled=["Source"])
+        if st.button("Save prices", key=f"{key}_save_prices"):
+            new, bad = {}, []
+            for _, row in edited.iterrows():
+                name = str(row["Model"] or "").strip()
+                try:
+                    if name:
+                        p_in, p_out = float(row["Input"]), float(row["Output"])
+                        if p_in != p_in or p_out != p_out or p_in < 0 or p_out < 0:     # NaN or negative
+                            raise ValueError(name)
+                        new[name] = (p_in, p_out)
+                except (TypeError, ValueError):
+                    bad.append(name)
+            if bad or any("/" not in n for n in new):
+                show_warning("Each row needs a model written as provider/model and two numbers: "
+                             + ", ".join(bad or [n for n in new if "/" not in n]))
+            else:
+                rplan.save_user_prices(new)
+                st.toast("Prices saved.")
+                st.rerun()
+    st.markdown("---")
+
+
 # ── Settings state, resolved on every run (the widgets are on the Settings page) ──────────────
 from ui.settings_state import (DEFAULT_OPTIONS, hide_paths, model_issues as _model_issues_for,
                                new_settings, resolve_keys, source_label)
@@ -563,7 +882,15 @@ def _model_issues() -> list:
 
 # ── Sidebar: where am I, and the four things to do ─────────────────────────────────────────
 with st.sidebar:
-    st.markdown(f'<div class="sb-brand">{html.escape(_BRANDING["product_name"])}</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="sb-brand">'
+        '<div class="sb-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round">'
+        '<circle cx="12" cy="12" r="3"/><circle cx="5" cy="6" r="1.6"/><circle cx="19" cy="7" r="1.6"/>'
+        '<circle cx="12" cy="20" r="1.6"/><path d="M10 10.2L6.3 7.1M14.1 10.5l3.7-2.4M12 15v3.4"/></svg></div>'
+        f'<div class="sb-brand-text"><div class="sb-name">{html.escape(_BRANDING["product_name"])}</div>'
+        f'<div class="sb-sub">{html.escape(_BRANDING["tagline"])}</div></div>'
+        '</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sb-section">Workspace</div>', unsafe_allow_html=True)
 
     _projects = list_projects()
     _project_ids = [p["id"] for p in _projects]
@@ -577,13 +904,15 @@ with st.sidebar:
         "Project", _project_ids, key="project_select", on_change=_on_project_change,
         format_func=lambda pid: f"{_project_by_id[pid]['name']} ({_project_by_id[pid]['run_count']} runs)",
         label_visibility="collapsed")
-    st.button("New project", key="new_project_btn", on_click=_go, args=("new_project",))
     st.button("New analysis", key="new_analysis_btn", type="primary", on_click=_go, args=("new_analysis",),
               width="stretch")
-    st.button("Settings", key="settings_btn", on_click=_go, args=("settings",))
+    _sb_a, _sb_b = st.columns(2, gap="small")
+    with _sb_a:
+        st.button("New project", key="new_project_btn", on_click=_go, args=("new_project",), width="stretch")
+    with _sb_b:
+        st.button("Settings", key="settings_btn", on_click=_go, args=("settings",), width="stretch")
 
-    st.markdown("---")
-    st.markdown("##### Run")
+    st.markdown('<div class="sb-section sb-section-gap">Run history</div>', unsafe_allow_html=True)
     runs = list_runs(limit=30, project_id=st.session_state.current_project_id)
     _run_by_id = {r["id"]: r for r in runs}
 
@@ -615,7 +944,6 @@ if st.session_state.pop("_collapse_sidebar", False):
 # ── Main header (hero) ────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
   .hero, .hero * { font-family: Inter, "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif !important; }
   .hero {
     position: relative; overflow: hidden;
@@ -678,20 +1006,188 @@ st.markdown("""
     .flow-step { flex: 0 0 33%; }
     .flow-step::after { display: none; }
   }
-  .sb-brand {
-    font-size: 1.05rem; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
-    color: var(--accent-strong); padding: 0.3rem 0 0.7rem; margin-bottom: 0.4rem;
-    border-bottom: 1px solid var(--border);
-    font-family: Inter, "Segoe UI", system-ui, sans-serif !important;
+  .hero-art { margin-left: auto; flex: none; }
+  .hero-art svg { display: block; width: 8.5rem; height: auto; }
+  .hero-slim {
+    display: flex; align-items: center; gap: 1.1rem; margin: 0 0 1rem;
+    padding: 0.7rem 1.2rem; background: linear-gradient(100deg, #ffffff 0%, #f0f7ff 100%);
+    border: 1px solid var(--border); border-radius: 12px;
+    box-shadow: 0 1px 2px rgba(11, 31, 58, 0.05);
+    font-family: Inter, "Segoe UI", system-ui, sans-serif;
   }
+  .hero-slim .hero-art { margin: 0; order: 0; }
+  .hero-slim .hero-art svg { width: 6.5rem; }
+  .hero-slim-text { flex: 1; min-width: 0; }
+  .hero-slim-title { font-size: 0.98rem; font-weight: 700; letter-spacing: -0.01em; color: var(--text); }
+  .hero-slim-desc { font-size: 0.8rem; color: var(--muted); margin-top: 0.1rem; }
+  .hero-slim-pills { display: flex; gap: 0.4rem; flex-wrap: wrap; justify-content: flex-end; }
+  .hero-slim-pills span {
+    font-size: 0.7rem; font-weight: 600; color: var(--accent-strong); background: #e5f2ff;
+    border: 1px solid #b9d6f2; border-radius: 999px; padding: 0.15rem 0.55rem; white-space: nowrap;
+  }
+  @media (max-width: 900px) { .hero-slim-pills { display: none; } .hero-art svg { width: 5.5rem; } }
+  @media (max-width: 560px) { .hero-slim .hero-art { display: none; } }
+  .proj-head, .run-bar { font-family: Inter, "Segoe UI", system-ui, sans-serif; }
+  .proj-head { margin: 0 0 0.8rem; line-height: 1.3; }
+  .proj-eyebrow { display: block; font-size: 0.7rem; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin-bottom: 0.15rem; }
+  .proj-title { display: block; font-size: 1.4rem; font-weight: 700; letter-spacing: -0.02em; color: var(--text); }
+  .proj-meta { display: block; font-size: 0.8rem; color: var(--muted); margin-top: 0.15rem; }
+  .run-bar {
+    display: flex; align-items: center; justify-content: space-between; gap: 0.5rem 1rem; margin: 0.2rem 0 0.9rem;
+    padding: 0.65rem 1rem; background: var(--surface); border: 1px solid var(--border);
+    border-left: 3px solid var(--accent); border-radius: 10px;
+  }
+  .run-bar .rb-main { min-width: 0; line-height: 1.3; }
+  .run-bar .rb-name { display: block; font-size: 0.95rem; font-weight: 600; color: var(--text); }
+  .run-bar .rb-meta { display: block; font-size: 0.8rem; color: var(--muted); margin-top: 0.15rem; }
+  .run-bar .rb-id { font-family: 'DM Mono', ui-monospace, monospace; font-size: 0.75rem; }
+  .rb-status { flex: none; font-size: 0.75rem; font-weight: 600; color: #0a6b43; background: #e6f6ee; border: 1px solid #b7e2cd; border-radius: 999px; padding: 0.15rem 0.65rem; white-space: nowrap; }
+  .rb-status.warn { color: #8a5a00; background: #fff8e6; border-color: #f0d9a0; }
+  .stat-box { padding: 0.75rem 0.8rem !important; border-radius: 10px !important; box-shadow: 0 1px 2px rgba(11, 31, 58, 0.04); }
+  .stat-box .stat-number { font-size: 1.55rem !important; line-height: 1.15; font-weight: 600; }
+  .stat-box .stat-label { font-size: 0.66rem !important; letter-spacing: 0.09em; }
+  .nav-note { font-size: 0.8rem; color: var(--muted); margin: 0.1rem 0 0; font-family: Inter, "Segoe UI", system-ui, sans-serif; }
+  .nav-rule { height: 1px; background: var(--border); margin: 0.6rem 0 0.5rem; }
+  .gl-table { width: 100%; border-collapse: collapse; font-family: Inter, "Segoe UI", system-ui, sans-serif; font-size: 0.85rem; }
+  .gl-table th { text-align: left; font-size: 0.7rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); padding: 0.4rem 0.7rem; border-bottom: 1px solid var(--border); }
+  .gl-table td { padding: 0.5rem 0.7rem; border-bottom: 1px solid #eaf1f9; color: var(--text); line-height: 1.45; vertical-align: top; }
+  .gl-table .gl-term { width: 11rem; font-weight: 600; white-space: nowrap; }
+  .gl-table .gl-group td { background: #f0f7ff; font-size: 0.7rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent-strong); padding: 0.35rem 0.7rem; }
+  .cv-wrap { overflow-x: auto; margin: 0.4rem 0 0.9rem; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+  .cv-table td, .cv-table th { padding: 0.55rem 0.8rem; }
+  .cv-table th { background: #f6faff; }
+  .cv-table tr:last-child td { border-bottom: none; }
+  .cv-table .cv-paper { min-width: 16rem; font-weight: 500; }
+  .cv-table .cv-num { text-align: right; font-variant-numeric: tabular-nums; }
+  .cv-table th.cv-num { text-align: right; }
+  .cv-table .cv-status { white-space: nowrap; font-weight: 600; }
+  .cv-table .cv-status.ok { color: #0a6b43; }
+  .cv-table .cv-status.warn { color: #8a5a00; white-space: normal; }
+  .cv-key { font-size: 0.8rem !important; margin-top: 0.2rem; }
+  .cv-key td { padding: 0.35rem 0.7rem; border-bottom: 1px solid #eaf1f9; color: var(--muted); }
+  .cv-key td.gl-term { width: 13rem; color: var(--text); font-weight: 600; }
+  .cv-key tr:last-child td { border-bottom: none; }
+  .cv-end { height: 0.6rem; }
+  /* Run planner: neutral on purpose. Colour is kept for the single recommended card and the page's own accent. */
+  .rp-reco { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.3rem 0.8rem; margin: 0.4rem 0 0.8rem; padding: 0.55rem 0.9rem;
+    background: #f6f8fa; border: 1px solid var(--border); border-radius: 8px;
+    font-family: Inter, "Segoe UI", system-ui, sans-serif; font-size: 0.85rem; color: var(--muted); }
+  .rp-reco b { color: var(--text); font-size: 0.9rem; }
+  .rp-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 0.9rem 1rem 0.8rem;
+    margin-bottom: 0.5rem; font-family: Inter, "Segoe UI", system-ui, sans-serif; }
+  .rp-card.rec { border: 1.5px solid #243b53; }
+  .rp-head { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; min-height: 1.6rem; }
+  .rp-name { font-size: 1rem; font-weight: 600; color: var(--text); }
+  .rp-badge { font-size: 0.68rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #243b53;
+    border: 1px solid #9fb3c8; border-radius: 4px; padding: 0.05rem 0.4rem; }
+  .rp-badge.warn { color: #8a5a00; border-color: #d9b45f; }
+  .rp-tag { font-size: 0.78rem; color: var(--muted); margin: 0.2rem 0 0.8rem; min-height: 2.3rem; line-height: 1.4; }
+  .rp-cost { font-size: 1.3rem; font-weight: 600; letter-spacing: -0.02em; color: var(--text); line-height: 1.2; }
+  .rp-cost.na { font-size: 1rem; color: var(--muted); }
+  .rp-sub { font-size: 0.76rem; color: var(--muted); margin: 0.15rem 0 0.5rem; }
+  .rp-bar { display: flex; height: 0.35rem; border-radius: 999px; overflow: hidden; background: #eef2f6; margin-bottom: 0.4rem; }
+  .rp-bar span { display: block; height: 100%; }
+  .rp-save { font-size: 0.74rem; color: var(--muted); min-height: 1.1rem; margin-bottom: 0.4rem; }
+  .rp-group { font-size: 0.66rem; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin: 0.7rem 0 0.2rem; }
+  .rp-row { display: flex; align-items: baseline; gap: 0.5rem; padding: 0.22rem 0; border-top: 1px solid #eef2f6; font-size: 0.8rem; }
+  .rp-role { flex: none; width: 5.2rem; color: var(--muted); }
+  .rp-model { color: var(--text); overflow-wrap: anywhere; }
+  .rp-incl { display: flex; flex-wrap: wrap; gap: 0.2rem 0.8rem; margin: 0.7rem 0 0.3rem; font-size: 0.76rem; min-height: 2.5rem; align-content: flex-start; }
+  .rp-incl .on { color: var(--text); font-weight: 500; }
+  .rp-incl .off { color: #9aa5b1; }
+  .rp-speed { font-size: 0.74rem; color: var(--muted); }
+  .rp-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 1rem; margin: 0.4rem 0 0.6rem; font-size: 0.74rem; color: var(--muted); font-family: Inter, "Segoe UI", system-ui, sans-serif; }
+  .rp-legend i { display: inline-block; width: 0.6rem; height: 0.35rem; border-radius: 2px; margin-right: 0.35rem; vertical-align: 0.1rem; }
+  .rp-legend-note { margin-left: auto; }
+  .rp-notes { margin: 0.4rem 0 0.8rem; padding: 0.6rem 0.9rem; border-top: 1px solid var(--border); font-size: 0.78rem; line-height: 1.5; color: var(--muted);
+    font-family: Inter, "Segoe UI", system-ui, sans-serif; }
+  .rp-notes b { display: block; color: var(--text); font-size: 0.78rem; margin-bottom: 0.15rem; }
+  /* the tier buttons: outlined, not the page's solid blue */
+  [class*="st-key-rp_"][class*="_use_"] button { background: var(--surface) !important; color: #243b53 !important;
+    border: 1px solid #9fb3c8 !important; box-shadow: none !important; font-weight: 500 !important; }
+  [class*="st-key-rp_"][class*="_use_"] button:hover:not(:disabled) { background: #f6f8fa !important; border-color: #243b53 !important; }
+  [class*="st-key-rp_"][class*="_use_"] button:disabled { background: transparent !important; color: var(--muted) !important; border-color: var(--border) !important; }
+  .tbl-scroll { max-height: 24rem; overflow-y: auto; }
+  .tbl-scroll thead th { position: sticky; top: 0; z-index: 1; }
+  .gx-guide { margin: 0 0 0.8rem; padding: 0.75rem 1rem; background: #f0f7ff; border: 1px solid #d3e5f8; border-radius: 10px; font-family: Inter, "Segoe UI", system-ui, sans-serif; }
+  .gx-guide-title { font-size: 0.7rem; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent-strong); margin-bottom: 0.5rem; }
+  .gx-guide-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0.6rem 1.2rem; font-size: 0.8rem; line-height: 1.45; color: var(--muted); }
+  .gx-guide-grid b { display: block; color: var(--text); font-size: 0.82rem; margin-bottom: 0.1rem; }
+  .gx-gap { margin-top: 1.4rem; }
+  .cv-table .br-cell { width: 50%; font-size: 0.85rem; line-height: 1.5; font-weight: 400; }
+  .cv-table .br-paper { margin-top: 0.35rem; font-size: 0.75rem; color: var(--accent-strong); font-weight: 500; }
+  .gx-card-title { font-size: 0.88rem; font-weight: 600; color: var(--text); margin: 0 0 0.2rem; }
+  .gx-comm { display: flex; gap: 0.8rem; padding: 0.9rem 1rem; margin: 0 0 0.6rem; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+  .gx-comm-body { font-size: 0.85rem; line-height: 1.55; color: var(--muted); margin-top: 0.25rem; }
+  .gx-gapnote { margin: 0.6rem 0 0; }
+  .gx-dot { display: inline-block; width: 0.7rem; height: 0.7rem; border-radius: 50%; margin-right: 0.5rem; vertical-align: -0.05rem; }
+  /* Overview panels */
+  .ov-h { font-size: 0.72rem; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin: 0 0 0.6rem; }
+  .ov-row { display: flex; gap: 0.75rem; padding: 0.6rem 0; border-top: 1px solid #eaf1f9; }
+  .ov-row:first-of-type { border-top: none; padding-top: 0.1rem; }
+  .ov-rank {
+    flex: none; width: 1.5rem; height: 1.5rem; border-radius: 6px; background: #e5f2ff; color: var(--accent-strong);
+    font-size: 0.78rem; font-weight: 600; display: flex; align-items: center; justify-content: center; margin-top: 0.1rem;
+  }
+  .ov-title { font-size: 0.92rem; font-weight: 600; line-height: 1.4; color: var(--text); }
+  .ov-meta { font-size: 0.78rem; color: var(--muted); margin-top: 0.15rem; }
+  .ov-body {
+    font-size: 0.84rem; line-height: 1.55; color: var(--muted); margin: 0.5rem 0 0.4rem;
+    display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .st-key-ov_all_gaps button, .st-key-ov_all_props button {
+    background: transparent !important; border: none !important; box-shadow: none !important;
+    color: var(--accent-strong) !important; padding: 0.2rem 0 !important; min-height: 0; font-size: 0.85rem !important; font-weight: 600 !important;
+  }
+  .st-key-ov_all_gaps button::after, .st-key-ov_all_props button::after { content: " →"; white-space: pre; }
+  .st-key-ov_all_gaps button:hover, .st-key-ov_all_props button:hover { background: transparent !important; text-decoration: underline; }
+  .info-chip {
+    display: flex; gap: 0.5rem; align-items: flex-start; margin: 0.6rem 0 0.4rem; padding: 0.5rem 0.8rem;
+    font-size: 0.8rem; line-height: 1.45; color: #4a3a00; background: #fff8e6;
+    border: 1px solid #f0d9a0; border-radius: 8px;
+  }
+  [data-testid="stMainBlockContainer"] [data-testid="stExpander"] { border-radius: 10px; }
+  .sb-brand, .sb-brand * { font-family: Inter, "Segoe UI", system-ui, sans-serif !important; }
+  .sb-brand {
+    display: flex; align-items: center; gap: 0.65rem;
+    padding: 0.2rem 0 1rem; margin-bottom: 0.9rem; border-bottom: 1px solid var(--border);
+  }
+  .sb-mark {
+    width: 2.25rem; height: 2.25rem; border-radius: 9px; flex: none;
+    display: flex; align-items: center; justify-content: center;
+    background: linear-gradient(135deg, var(--accent-strong), var(--accent));
+    box-shadow: 0 2px 6px rgba(0, 76, 147, 0.25);
+  }
+  .sb-mark svg { width: 1.35rem; height: 1.35rem; }
+  .sb-brand-text { min-width: 0; line-height: 1.2; }
+  .sb-name { font-size: 1.05rem; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent-strong) !important; }
+  .sb-sub { font-size: 0.72rem; font-weight: 500; color: var(--muted) !important; margin-top: 0.15rem; }
+  .sb-section {
+    font-size: 0.68rem; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--muted) !important; margin: 0 0 0.45rem;
+  }
+  .sb-section-gap { margin-top: 1.4rem; padding-top: 1rem; border-top: 1px solid var(--border); }
   [data-testid="stSidebar"] .stButton > button {
     background: var(--surface) !important; color: var(--accent-strong) !important;
     border: 1px solid var(--border) !important; width: 100%;
-    justify-content: flex-start; text-align: left; font-weight: 500 !important;
+    justify-content: center; font-weight: 500 !important; font-size: 0.86rem !important;
+    border-radius: 8px !important; min-height: 2.5rem; padding: 0.4rem 0.6rem !important;
+    box-shadow: 0 1px 2px rgba(11, 31, 58, 0.04);
+    transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
   }
+  [data-testid="stSidebar"] .stButton > button[kind="primary"] {
+    background: linear-gradient(135deg, var(--accent-strong), var(--accent)) !important;
+    border-color: var(--accent-strong) !important; font-weight: 600 !important;
+    box-shadow: 0 2px 8px rgba(0, 76, 147, 0.25); padding: 0.4rem 0.6rem !important;
+  }
+  [data-testid="stSidebar"] .stButton > button[kind="primary"],
+  [data-testid="stSidebar"] .stButton > button[kind="primary"] * { color: #ffffff !important; }
+  [data-testid="stSidebar"] .stButton > button[kind="primary"]:hover { filter: brightness(1.08); box-shadow: 0 4px 12px rgba(0, 76, 147, 0.32); }
   [data-testid="stSidebar"] .stButton > button:hover {
     background: var(--accent-soft) !important; border-color: #7ab8f5 !important;
   }
+  [data-testid="stSidebar"] [data-baseweb="select"] > div { border-radius: 8px !important; background: var(--surface) !important; }
+  [data-testid="stSidebar"] [data-testid="stCaptionContainer"] { font-size: 0.76rem; line-height: 1.4; }
   [data-testid="stSidebar"] .stButton > button:disabled {
     background: #f2f5f8 !important; color: #8aa0b8 !important; border-color: #e3eefb !important;
   }
@@ -714,9 +1210,24 @@ _CHECK = ('<svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="9" fi
           '<path d="M6 10.4l2.6 2.6L14 7.6" stroke="#0066cc" stroke-width="1.8" stroke-linecap="round" '
           'stroke-linejoin="round"/></svg>')
 _MARK = ('<svg viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round">'
-         '<path d="M6.5 7.5L17 6.5M6.5 7.5L11 17.5M17 6.5L11 17.5"/>'
-         '<circle cx="6.5" cy="7.5" r="2.2" fill="#ffffff"/><circle cx="17" cy="6.5" r="2.2" fill="#ffffff"/>'
-         '<circle cx="11" cy="17.5" r="2.2" fill="#ffffff"/></svg>')
+         '<circle cx="12" cy="12" r="3"/><circle cx="5" cy="6" r="1.6"/><circle cx="19" cy="7" r="1.6"/>'
+         '<circle cx="12" cy="20" r="1.6"/><path d="M10 10.2L6.3 7.1M14.1 10.5l3.7-2.4M12 15v3.4"/></svg>')
+# Small hero illustration: papers -> knowledge graph -> the highlighted open gap.
+_HERO_ART = (
+    '<svg viewBox="0 0 168 72" fill="none" role="img" aria-label="Papers feed a knowledge graph that reveals a research gap">'
+    '<g stroke="#7ab8f5" stroke-width="1.2" fill="#ffffff">'
+    '<rect x="4" y="14" width="22" height="30" rx="3"/><rect x="10" y="9" width="22" height="30" rx="3"/>'
+    '<rect x="16" y="4" width="22" height="30" rx="3"/></g>'
+    '<g stroke="#b9d6f2" stroke-width="1.4" stroke-linecap="round"><path d="M22 12h10M22 18h10M22 24h6"/></g>'
+    '<path d="M46 20h18" stroke="#7ab8f5" stroke-width="1.4" stroke-dasharray="3 3"/>'
+    '<path d="M62 16l5 4-5 4" stroke="#0066cc" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>'
+    '<g stroke="#7ab8f5" stroke-width="1.3"><path d="M84 14L102 26M102 26L120 12M102 26L96 52M102 26L124 44M120 12L138 20"/>'
+    '<path d="M96 52L124 44" stroke-dasharray="3 3" stroke="#f0a43a"/></g>'
+    '<g fill="#e5f2ff" stroke="#0066cc" stroke-width="1.5"><circle cx="84" cy="14" r="5"/><circle cx="102" cy="26" r="6.5"/>'
+    '<circle cx="120" cy="12" r="5"/><circle cx="138" cy="20" r="4.5"/><circle cx="96" cy="52" r="5"/><circle cx="124" cy="44" r="5"/></g>'
+    '<circle cx="110" cy="48" r="9" fill="#fff4e0" stroke="#f0a43a" stroke-width="1.6" stroke-dasharray="3 2.5"/>'
+    '<path d="M110 44v4.5M110 52v.5" stroke="#b86e00" stroke-width="1.8" stroke-linecap="round"/>'
+    '</svg>')
 _hero_points = [
     ("Evidence-linked", "Every gap is traced to evidence in your papers."),
     ("Literature-validated", "Checked against Europe PMC, Semantic Scholar and arXiv."),
@@ -738,12 +1249,13 @@ if _show_hero:
         f'<div class="hero-name">{html.escape(_BRANDING["product_name"])}</div>'
         '<div class="hero-divider"></div>'
         f'<div class="hero-platform">{html.escape(_BRANDING["tagline"])}</div>'
+        f'<div class="hero-art">{_HERO_ART}</div>'
         '</div>'
         '<div class="hero-grid">'
         '<div>'
-        '<div class="hero-h1">Identify and validate the research gaps across your literature.</div>'
-        '<div class="hero-desc">Upload 2&ndash;5 papers. AI agents read them, map what is already known, '
-        'and surface the open questions &mdash; with the evidence behind each one.</div>'
+        '<div class="hero-h1">Find research gaps in your literature.</div>'
+        '<div class="hero-desc">Upload 2 to 5 papers. The analysis reads them, maps what is already known, '
+        'and lists open questions with the evidence for each.</div>'
         '</div>'
         f'<div class="hero-points">{_points_html}</div>'
         '</div>'
@@ -751,6 +1263,17 @@ if _show_hero:
         f'<div class="hero-flow">{_flow_html}</div>'
         '</div>',
         unsafe_allow_html=True)
+elif st.session_state["view"] == "main":
+    # Repeat visitors get the same message in one slim row, so results stay near the top.
+    st.markdown(
+        '<div class="hero-slim">'
+        f'<div class="hero-art">{_HERO_ART}</div>'
+        '<div class="hero-slim-text">'
+        f'<div class="hero-slim-title">{html.escape(_BRANDING["product_name"])} - {html.escape(_BRANDING["tagline"])}</div>'
+        '<div class="hero-slim-desc">Agents read your papers, map what is already known, and list open questions '
+        'with the evidence.</div></div>'
+        '<div class="hero-slim-pills"><span>Evidence-linked</span><span>Literature-validated</span><span>Auditable runs</span></div>'
+        '</div>', unsafe_allow_html=True)
 
 # ── Project: tools shared by the Project view ───────────────────────────────
 # The run-comparison tools used to live in the sidebar. They are in the Project
@@ -1063,9 +1586,11 @@ def _render_project_view(project: dict, runs: list[dict]) -> None:
         if run.get("archived"):
             if _c3.button("Restore", key=f"unarchive_{run['id']}"):
                 set_run_archived(run["id"], False)
+                audit_log.record("run.restored", "run", run["id"], {"project": pid})
                 st.rerun()
         elif _c3.button("Archive", key=f"archive_{run['id']}", help="Hide it from lists. Nothing is deleted."):
             set_run_archived(run["id"], True)
+            audit_log.record("run.archived", "run", run["id"], {"project": pid})
             if st.session_state.current_run_id == run["id"]:
                 _clear_results()
             st.rerun()
@@ -1185,7 +1710,7 @@ def _render_project_view(project: dict, runs: list[dict]) -> None:
                 st.rerun()
 
     # The zip is built when the download is requested, not kept in the session (it can be hundreds of megabytes).
-    st.download_button("Download project (.zip)", data=lambda: project_store.build_project_zip(pid),
+    st.download_button("Download project (.zip)", data=lambda: (audit_log.record("export.project_zip", "project", pid), project_store.build_project_zip(pid))[1],
                        file_name=f"{project_store.safe_filename(project['name'])}.zip",
                        mime="application/zip", key=f"dl_zip_{pid}")
     st.caption("The zip holds the papers, every run's results and reports, a database export with the project's runs "
@@ -1302,8 +1827,8 @@ def _fmt_bytes(n: int) -> str:
 def _render_settings() -> None:
     st.button("← Back", key="settings_back", on_click=_go, args=("main",))
     st.markdown("## Settings")
-    t_keys, t_models, t_defaults, t_cache, t_backup = st.tabs(
-        ["API keys", "Models", "Analysis defaults", "Saved results", "Backup"])
+    t_keys, t_models, t_defaults, t_cache, t_backup, t_audit = st.tabs(
+        ["API keys", "Models", "Analysis defaults", "Saved results", "Backup", "Audit log"])
 
     with t_keys:
         st.caption("Keys stay in this browser session's memory and are never written to disk. A key set in the "
@@ -1333,6 +1858,7 @@ def _render_settings() -> None:
         st.caption(f"Semantic Scholar: {source_label(_now['ss_source'])}")
 
     with t_models:
+        _render_run_planner(key="rp_set")
         _render_model_picker()
 
     with t_defaults:
@@ -1377,6 +1903,37 @@ def _render_settings() -> None:
             st.download_button(f"Download {_bk[0]} ({_fmt_bytes(len(_bk[1]))})", _bk[1], file_name=_bk[0],
                                mime="application/zip", key="download_backup",
                                on_click=lambda: st.session_state.pop("_backup", None))
+
+    with t_audit:
+        _render_audit_tab()
+
+
+def _render_audit_tab() -> None:
+    """Policy in effect, then the audit log: who did what, newest first, with a check that no entry was changed or removed."""
+    from utils import egress
+    st.markdown("**Policy in effect**")
+    st.caption(f"Network: {egress.describe()}")
+    st.caption("Model providers: " + (os.getenv("RESGAP_ALLOWED_PROVIDERS", "").strip() or "all built-in providers and a custom endpoint")
+               + " · Deleting: " + ("permanent (erased)" if erase_on_delete() else "kept aside for undo"))
+    st.markdown("**Activity**")
+    st.caption("Every run, delete, backup, export and settings change is recorded here with who did it. Entries cannot be edited "
+               "or removed from the app, and each one is chained to the one before it, so tampering is detected below.")
+    _check = audit_log.verify()
+    if _check["ok"]:
+        st.success(f"Intact: {_check['count']} entries, none changed or removed.")
+    else:
+        st.error(f"The audit log has been altered. {_check['problem']}")
+    _labels = {audit_log.describe(a): a for a in audit_log.ACTIONS}
+    _pick = st.selectbox("Show", ["All activity", *sorted(_labels)], key="audit_filter")
+    _events = audit_log.list_events(limit=500, action=_labels.get(_pick))
+    if not _events:
+        st.caption("Nothing recorded yet.")
+        return
+    st.dataframe([{"When (UTC)": e["at"][:19].replace("T", " "), "Who": e["actor"], "What": audit_log.describe(e["action"]),
+                   "On": f"{e['target_type']} {e['target_id']}".strip(), "Details": e["detail"]} for e in _events],
+                 use_container_width=True, hide_index=True)
+    st.download_button("Download as CSV", data=audit_log.to_csv(_events), file_name="audit_log.csv", mime="text/csv",
+                       key="audit_csv", on_click=audit_log.record, args=("audit.exported", "audit_log", "", {"rows": len(_events)}))
 
 
 def _within_size_limit(files: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]:
@@ -1537,10 +2094,14 @@ def _render_new_analysis() -> None:
         for msg in _issues:
             show_error(msg)
         if papers:
-            _est = estimate_run([_pdf_text_chars(hashlib.sha256(d).hexdigest(), d) for _, d in papers],
-                                extract_refs=w["opts"]["extract_refs"], gap_challenger=w["opts"]["enable_gap_challenger"])
+            _chars = [_pdf_text_chars(hashlib.sha256(d).hexdigest(), d) for _, d in papers]
+            _est = estimate_run(_chars, extract_refs=w["opts"]["extract_refs"],
+                                gap_challenger=w["opts"]["enable_gap_challenger"])
             _ms = _cfg.spec_for(ROLE_ANALYSIS)
-            st.caption(describe_estimate(_est, w["cap"], estimate_cost(_est["tokens"], _ms.provider, _ms.model)))
+            st.caption(describe_estimate(_est, w["cap"], estimate_cost(_est["tokens"], _ms.provider, _ms.model,
+                                                                       prices=rplan.effective_prices())))
+            with st.expander("Plan this run: recommended models and cost", expanded=False):
+                _render_run_planner(key="rp_wiz", paper_chars=_chars)
         w["run_name"] = st.text_input("Run name (optional)", value=w["run_name"], key="wiz_runname",
                                       placeholder="e.g., Diabetes AI review")
         w["bg"] = st.checkbox("Keep running in the background (safe to refresh the page)", value=w["bg"],
@@ -1574,14 +2135,13 @@ def _render_new_analysis() -> None:
 _cur_project = get_project(st.session_state.current_project_id) or get_project(DEFAULT_PROJECT_ID)
 _cur_project_stats = _project_by_id.get(_cur_project["id"], {})
 _proj_runs = list_runs(limit=1000, project_id=_cur_project["id"])
+_last_run = f" · last run {html.escape(_local_time(_proj_runs[0]['created_at']))}" if _proj_runs else ""
 st.markdown(
-    '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:0.3rem 1rem;'
-    'font-family:Inter,Segoe UI,system-ui,sans-serif;margin:0 0 0.5rem;">'
-    '<span style="font-size:0.72rem;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;'
-    'color:#4a6580;">Project</span>'
-    f'<span style="font-size:1rem;font-weight:600;color:#0b1f3a;">{html.escape(_cur_project["name"])}</span>'
-    f'<span style="font-size:0.82rem;color:#4a6580;">{len(_proj_runs)} run(s) · '
-    f'{_cur_project_stats.get("paper_count", 0)} paper(s) saved</span>'
+    '<div class="proj-head">'
+    '<span class="proj-eyebrow">Project</span>'
+    f'<span class="proj-title">{html.escape(_cur_project["name"])}</span>'
+    f'<span class="proj-meta">{len(_proj_runs)} run(s) · '
+    f'{_cur_project_stats.get("paper_count", 0)} paper(s) saved{_last_run}</span>'
     '</div>', unsafe_allow_html=True)
 
 # ── Which page ─────────────────────────────────────────────────────────────────────────────────
@@ -1612,19 +2172,18 @@ if st.session_state.current_run_id and st.session_state.results:
                       get_run_manifest(st.session_state.current_run_id),
                       getattr(st.context, "timezone", None))
     _rm_name, _rm_when, _rm_stats = _hdr["name"], _hdr["when"], _hdr["stats"]
-    _chips = "".join(
-        f'<span style="font-size:0.72rem;color:#004b93;background:#e5f2ff;border:1px solid #7ab8f5;'
-        f'border-radius:10px;padding:0.1rem 0.5rem;">{chip_html}</span>' for chip_html in _hdr["chips"])
+    _dom = (st.session_state.results.get("context") or {}).get("domain", "")
+    _rid = str(st.session_state.current_run_id)
+    _status, *_details = _hdr["chips"] or [""]
+    _status_cls = "rb-status" if _status == "Completed" else "rb-status warn"
+    # One quiet line of detail: when, counts, model, duration, domain, ID. Only the status is a pill.
+    _meta = " · ".join(p for p in [
+        f"{esc(_rm_when)}{esc(_rm_stats)}".strip(" ·"), *_details, esc(_dom),
+        f'<span class="rb-id" title="Run ID: {esc(_rid)}">{esc(_rid[:8])}</span>'] if p)
     st.markdown(
-        '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:0.4rem 1rem;'
-        'background:#edf6ff;border:1px solid #c9dff5;border-left:3px solid #0066cc;'
-        'border-radius:8px;padding:0.65rem 1.1rem;margin-bottom:0.9rem;'
-        'font-family:Inter,Segoe UI,system-ui,sans-serif;">'
-        '<span style="font-size:0.72rem;font-weight:600;letter-spacing:0.08em;'
-        'text-transform:uppercase;color:#004b93;">Run</span>'
-        f'<span style="font-size:0.9rem;font-weight:600;color:#0b1f3a;">{_rm_name}</span>'
-        f'<span style="font-size:0.82rem;color:#4a6580;">{esc(_rm_when)}{esc(_rm_stats)}</span>'
-        f'<span style="display:flex;gap:0.4rem;margin-left:auto;">{_chips}</span>'
+        '<div class="run-bar">'
+        f'<div class="rb-main"><span class="rb-name">{_rm_name}</span><span class="rb-meta">{_meta}</span></div>'
+        + (f'<span class="{_status_cls}">{_status}</span>' if _status else "") +
         '</div>',
         unsafe_allow_html=True)
 
@@ -1871,7 +2430,7 @@ def _render_overview(res: dict) -> None:
                 st.markdown(f'<div class="stat-box"><span class="stat-number" style="color:{color};">{esc(val)}</span>'
                             f'<span class="stat-label">{esc(lbl)}</span></div>', unsafe_allow_html=True)
     elif c_stats:
-        st.caption(_note)
+        st.markdown(f'<div class="info-chip"><span>ℹ️</span><span>{esc(_note)}</span></div>', unsafe_allow_html=True)
 
     warnings = warnings_summary(res)
     if warnings:
@@ -1881,51 +2440,80 @@ def _render_overview(res: dict) -> None:
 
     top = top_gaps(res)
     left, right = st.columns([3, 2])
-    with left:
-        st.markdown("#### Top gaps")
+    with left, st.container(border=True):
+        st.markdown('<div class="ov-h">Top gaps</div>', unsafe_allow_html=True)
         if not top:
             st.caption("No gaps were found in this run." if not res.get("gate_blocked")
                        else "Gap analysis was skipped (quality gate).")
         for g in top:
             status = f" · {html.escape(g['status'].replace('_', ' '))}" if g["status"] else ""
-            st.markdown(f"**{g['rank'] or '–'}. {html.escape(g['title'])}**  \n"
-                        f"<span style='color:#4a6580;font-size:0.82rem;'>{g['papers']} supporting paper(s)"
-                        f"{status}</span>", unsafe_allow_html=True)
+            st.markdown(f'<div class="ov-row"><span class="ov-rank">{esc(g["rank"] or "–")}</span><div>'
+                        f'<div class="ov-title">{html.escape(g["title"])}</div>'
+                        f'<div class="ov-meta">{g["papers"]} supporting paper(s){status}</div></div></div>',
+                        unsafe_allow_html=True)
         if top:
             st.button("See all gaps", key="ov_all_gaps", on_click=_set_tab, args=("Gaps",))
-    with right:
-        st.markdown("#### Leading proposal")
+    with right, st.container(border=True):
+        st.markdown('<div class="ov-h">Leading proposal</div>', unsafe_allow_html=True)
         prop = top_proposal(res)
         if prop is None:
             st.caption("No proposals in this run.")
         else:
-            st.markdown(f"**{html.escape(prop['title'])}**")
-            st.caption((prop["problem"] or "")[:300])
+            st.markdown(f'<div class="ov-title">{html.escape(prop["title"])}</div>'
+                        f'<div class="ov-body">{html.escape(prop["problem"] or "")}</div>', unsafe_allow_html=True)
             st.button("See all proposals", key="ov_all_props", on_click=_set_tab, args=("Proposals",))
 
     with st.expander("Glossary: what the labels mean"):
-        for _term in ("open", "partial", "solved", "unverified", "evidence item", "verified quote", "quote rate",
-                      "paper coverage", "orphan signals", "communities", "measured", "opinion", "simulation skipped"):
-            st.markdown(f"**{_term.title()}** — {glossary_lookup(_term)}")
+        _GLOSSARY = {
+            "Gap status": ("open", "partial", "solved", "unverified"),
+            "Evidence": ("evidence item", "verified quote", "quote rate", "paper coverage"),
+            "Knowledge graph": ("communities", "orphan signals"),
+            "Study findings": ("measured", "opinion", "simulation skipped"),
+        }
+        _rows = "".join(
+            f'<tr class="gl-group"><td colspan="2">{esc(_grp)}</td></tr>' + "".join(
+                f'<tr><td class="gl-term">{esc(_t.capitalize())}</td><td>{esc(glossary_lookup(_t))}</td></tr>'
+                for _t in _terms)
+            for _grp, _terms in _GLOSSARY.items())
+        st.markdown(f'<table class="gl-table"><thead><tr><th>Term</th><th>Meaning</th></tr></thead>'
+                    f'<tbody>{_rows}</tbody></table>', unsafe_allow_html=True)
 
     # One row per paper, so a paper that silently contributed nothing is visible.
     _cov = paper_coverage(res)
     if _cov:
         import pandas as pd
         _bad = [r for r in _cov if r["status"] != "ok"]
-        with st.expander(f"Paper coverage — {len(_cov) - len(_bad)} of {len(_cov)} papers fully processed"
-                         + (" · ⚠️ check" if _bad else ""), expanded=bool(_bad)):
-            _table(pd.DataFrame([{
-                "Paper": r["title"][:44] + ("…" if len(r["title"]) > 44 else ""),
-                "Type": study_type_label(r["study_type"]).replace("systematic or narrative ", "")
-                                                         .replace(" or questionnaire", "").replace(" or lab", ""),
-                "Wiki": r["wiki_items"], "Evid.": r["evidence"], "Quoted": r["quoted"],
-                "Entities": r["entities"], "Gaps": r["gaps"], "Props": r["proposals"],
-                "OK": "✅" if r["status"] == "ok" else "⚠️ " + "; ".join(r["problems"]),
-            } for r in _cov]), hide_index=True)
-            st.caption("Wiki = facts compiled from the paper · Evid. = evidence items · Quoted = items with a verified "
-                       "quote and page · Entities = knowledge-graph entities · Gaps / Props = gaps and proposals "
-                       "that rest on the paper.")
+        with st.expander(f"Paper coverage: {len(_cov) - len(_bad)} of {len(_cov)} papers fully processed"
+                         + (" · ⚠️ needs attention" if _bad else ""), expanded=bool(_bad)):
+            st.caption("What each uploaded paper contributed to this analysis. A paper with a warning in the "
+                       "Status column added little or nothing and may need a closer look.")
+            _cov_cols = ["Paper", "Study type", "Facts extracted", "Evidence items", "Verified quotes",
+                         "Graph entities", "Gaps supported", "Proposals supported", "Status"]
+            _cov_rows = ""
+            for r in _cov:
+                _type = (study_type_label(r["study_type"]).replace("systematic or narrative ", "")
+                         .replace(" or questionnaire", "").replace(" or lab", "").capitalize())
+                _ok = r["status"] == "ok"
+                _status = ("✓ Processed" if _ok else "⚠ Needs attention: " + "; ".join(r["problems"]))
+                _cov_rows += (
+                    f'<tr><td class="cv-paper">{esc(r["title"])}</td><td>{esc(_type)}</td>'
+                    + "".join(f'<td class="cv-num">{esc(r[k])}</td>' for k in
+                              ("wiki_items", "evidence", "quoted", "entities", "gaps", "proposals"))
+                    + f'<td class="cv-status {"ok" if _ok else "warn"}">{esc(_status)}</td></tr>')
+            st.markdown(
+                '<div class="cv-wrap"><table class="gl-table cv-table"><thead><tr>'
+                + "".join(f'<th{" class=cv-num" if 2 <= i <= 7 else ""}>{c}</th>' for i, c in enumerate(_cov_cols))
+                + f'</tr></thead><tbody>{_cov_rows}</tbody></table></div>', unsafe_allow_html=True)
+            _cov_key = [
+                ("Facts extracted", "Statements compiled from the paper."),
+                ("Evidence items", "Findings pulled from the paper."),
+                ("Verified quotes", "Evidence items matched to an exact quote and page."),
+                ("Graph entities", "Concepts from the paper in the knowledge graph."),
+                ("Gaps / proposals supported", "How many results rely on this paper."),
+            ]
+            st.markdown('<table class="gl-table cv-key"><tbody>'
+                        + "".join(f'<tr><td class="gl-term">{esc(t)}</td><td>{esc(d)}</td></tr>' for t, d in _cov_key)
+                        + '</tbody></table><div class="cv-end"></div>', unsafe_allow_html=True)
 
 
 def _set_tab(name: str) -> None:
@@ -2245,16 +2833,7 @@ if st.session_state.results:
     ref_diagnostics = st.session_state.ref_diagnostics or res.get("ref_diagnostics", {})
     corpus     = st.session_state.corpus or res.get("papers", [])
 
-    # Domain banner
-    res_cfg = get_domain_config(context.get("domain","General AI/ML"))
-    st.markdown(f"""
-    <div style="background:#edf6ff;border:1px solid #7ab8f5;border-radius:8px;
-                padding:0.8rem 1.2rem;margin:0.8rem 0;">
-      <span style="font-size:1.4rem;">{res_cfg['icon']}</span>
-      <span style="font-size:0.9rem;color:#0b1f3a;font-weight:500;margin-left:0.8rem;">
-        {esc(context.get('domain',''))} — Domain-Tuned Analysis</span>
-    </div>""", unsafe_allow_html=True)
-
+    # (The domain now shows as a chip in the run bar above.)
     # Feedback on the whole run (per-gap feedback is in the Research Gaps tab).
     _rf_run = st.session_state.current_run_id
     _rf_project = (get_run_row(_rf_run) or {}).get("project_id") if _rf_run else None
@@ -2277,10 +2856,41 @@ if st.session_state.results:
             "Run it again with “Continue even if the quality check fails” ticked in the New analysis options to force it."
         )
 
-    _TABS = ["Overview", "Evidence", "Wiki", "References", "Graph", "Gaps", "Proposals", "Lab", "Trace", "Export"]
+    # Ten sections in three groups; result_tab stays the single source of truth for what is on screen.
+    _TAB_GROUPS = {
+        "Results": ["Overview", "Gaps", "Proposals"],
+        "Evidence": ["Evidence", "References", "Graph", "Wiki"],
+        "Audit": ["Lab", "Trace", "Export"],
+    }
+    _TABS = [t for tabs in _TAB_GROUPS.values() for t in tabs]
     if st.session_state.get("result_tab") not in _TABS:
         st.session_state["result_tab"] = "Overview"
-    _tab = st.segmented_control("Section", _TABS, key="result_tab", label_visibility="collapsed") or "Overview"
+    _group = next(g for g, tabs in _TAB_GROUPS.items() if st.session_state["result_tab"] in tabs)
+    # The control's key follows the group on screen, so a jump to a section in another group (a button
+    # elsewhere sets result_tab) always starts a fresh control showing that group. A click on a different
+    # group moves to that group's first section.
+    _picked = st.segmented_control("Group", list(_TAB_GROUPS), default=_group, key=f"result_group_{_group}",
+                                   label_visibility="collapsed")
+    if _picked and _picked != _group:
+        st.session_state["result_tab"] = _TAB_GROUPS[_picked][0]
+        st.rerun()
+    _GROUP_NOTES = {
+        "Results": "What the run found: the summary, the research gaps, and the proposals that follow from them.",
+        "Evidence": "What the findings rest on: the quotes, the cited references, the knowledge graph and the wiki pages.",
+        "Audit": "For review and handover: model comparison, the stage trace, and the report and file exports.",
+    }
+    st.markdown(f'<div class="nav-note">{esc(_GROUP_NOTES[_group])}</div><div class="nav-rule"></div>',
+                unsafe_allow_html=True)
+    # result_tab is plain session state (buttons and tests set it directly), not a widget's key: a keyed
+    # widget is reset whenever its options change, and these options change with the group. The pill row's
+    # key follows the section on screen, so a jump always starts a fresh row showing that section.
+    _current = st.session_state["result_tab"]
+    _chosen = st.pills("Section", _TAB_GROUPS[_group], default=_current, key=f"result_pill_{_current}",
+                       label_visibility="collapsed")
+    if _chosen and _chosen != _current:
+        st.session_state["result_tab"] = _chosen
+        st.rerun()
+    _tab = st.session_state["result_tab"]
 
     # Only the section on screen is built: the other nine cost nothing until opened.
     if _tab == "Overview":
@@ -2493,7 +3103,7 @@ if st.session_state.results:
 
     # ── Tab 3: Knowledge Graph ─────────────────────────────────────────────────
     if _tab == "Graph":
-        st.markdown("### Knowledge Graph (LazyGraphRAG)")
+        st.markdown("### Knowledge graph")
         stats = graph.get("stats",{})
         graph_diag = graph.get("diagnostics", {})
         if graph_diag.get("used_fallback"):
@@ -2545,19 +3155,32 @@ if st.session_state.results:
                             unsafe_allow_html=True)
         st.markdown("")
 
-        _render_relations(res, graph)
-
         # Network diagram
         network_data = graph.get("network_data",{})
         nodes = network_data.get("nodes",[])
         edges = network_data.get("edges",[])
+        # Imported here, outside the plotly try below, so a real import problem is not reported as "no plotly".
+        from pipeline.graph_builder import layout_positions, type_color_map
+        _gx_entities = graph.get("entities", [])
+        _type_colors = type_color_map([e.get("type") for e in _gx_entities] + [nd.get("type") for nd in nodes])
+        _label_color = {str(t).replace("_", " "): c for t, c in _type_colors.items()}    # keyed by the label people see
+        import importlib.util
+        _has_plotly = importlib.util.find_spec("plotly") is not None
+
+        st.markdown(
+            '<div class="gx-guide"><div class="gx-guide-title">How to read this graph</div><div class="gx-guide-grid">'
+            '<div><b>Dots</b>Concepts the papers talk about: a drug, a method, a measure.</div>'
+            '<div><b>Colour</b>The kind of concept. The legend under the diagram lists them.</div>'
+            '<div><b>Size</b>Larger dots mattered more in the papers.</div>'
+            '<div><b>Lines</b>The papers link these two concepts. Hover a line for the quoted text.</div>'
+            '<div><b>Outer ring</b>Concepts with no link yet. They can point to unexplored areas.</div>'
+            '</div></div>', unsafe_allow_html=True)
         if nodes:
             try:
                 import plotly.graph_objects as go, math, textwrap
-                from pipeline.graph_builder import layout_positions, node_color
                 n = len(nodes)
-                for nd in nodes:                                   # also recolours runs saved with grey nodes
-                    nd["color"] = node_color(nd.get("type"))
+                for nd in nodes:                                   # also recolours older runs; no two types share a colour
+                    nd["color"] = _type_colors[str(nd.get("type") or "concept")]
                 if all("x" in nd for nd in nodes):                 # laid out by the pipeline
                     px = [nd["x"] for nd in nodes]; py = [nd["y"] for nd in nodes]
                 else:                                              # runs saved before layouts existed
@@ -2596,44 +3219,94 @@ if st.session_state.results:
                     yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-1.6, 1.6]),
                     height=620, margin=dict(l=10, r=10, t=40, b=10),
                     legend=dict(orientation="h", y=-0.02, x=0),
-                    title="Knowledge Graph — Entity Network")
+                    title="Knowledge graph: entity network")
                 plotly_full_width(fig)
-                st.caption("Hover a line to see how two entities are related, and the supporting text.")
+                st.caption("Hover a dot for the concept and its papers. Hover the middle of a line to see how two "
+                           "concepts are related and the text that supports it.")
             except ImportError:
                 show_info("The network diagram needs the plotly package, which is not installed here.")
 
-        for comm in graph.get("communities",[]):
-            with st.expander(f"🏘️ {comm.get('theme','Community')}"):
-                st.markdown(f'<div class="stage-body">{esc(comm.get("summary",""))}</div>',
-                            unsafe_allow_html=True)
-                if comm.get("gap_signal"):
-                    st.markdown(
-                        f'<div style="background:#fff7e6;border:1px solid #f0c36a;border-radius:4px;'
-                        f'padding:0.5rem 0.8rem;margin-top:0.5rem;font-size:0.82rem;color:#8a5a00;">'
-                        f'⚠️ {esc(comm["gap_signal"])}</div>', unsafe_allow_html=True)
+        # ── The graph at a glance: three small charts, each with its one-line takeaway ──
+        _types, _hubs, _rels = type_counts(graph), top_connected(graph), relation_counts(graph)
+        if _types and _has_plotly:          # without plotly the diagram above already says so
+            st.markdown('<div class="ov-h gx-gap">The graph at a glance</div>', unsafe_allow_html=True)
+            _c1, _c2, _c3 = st.columns(3)
+            with _c1, st.container(border=True):
+                st.markdown('<div class="gx-card-title">Concepts by type</div>', unsafe_allow_html=True)
+                plotly_full_width(_gx_bar([t for t, _ in _types], [c for _, c in _types],
+                                          [_label_color.get(t, "#8fa6bd") for t, _ in _types]),
+                                  config={"displayModeBar": False})
+                st.caption(f"“{_types[0][0]}” is the largest group: {_types[0][1]} of {sum(c for _, c in _types)} concepts.")
+            with _c2, st.container(border=True):
+                st.markdown('<div class="gx-card-title">Most connected concepts</div>', unsafe_allow_html=True)
+                if _hubs:
+                    plotly_full_width(_gx_bar([h["name"] for h in _hubs], [h["connections"] for h in _hubs],
+                                              [_label_color.get(h["type"], "#8fa6bd") for h in _hubs]),
+                                      config={"displayModeBar": False})
+                    st.caption(f"{_hubs[0]['name']} is the hub, with {_hubs[0]['connections']} links to other concepts.")
+                else:
+                    st.caption("No concept is linked to another yet.")
+            with _c3, st.container(border=True):
+                st.markdown('<div class="gx-card-title">How concepts relate</div>', unsafe_allow_html=True)
+                if _rels:
+                    plotly_full_width(_gx_bar([k for k, _ in _rels], [c for _, c in _rels], ["#6fb1f0"] * len(_rels)),
+                                      config={"displayModeBar": False})
+                    st.caption(f"“{_rels[0][0]}” is the most common link: {_rels[0][1]} of "
+                               f"{len(graph.get('relationships') or [])} relations.")
+                else:
+                    st.caption("No relations were found.")
 
-        entities = graph.get("entities",[])
-        if entities:
-            with st.expander(f"📋 All {len(entities)} entities"):
-                import pandas as pd
-                table_full_width(pd.DataFrame([{
-                    "Name":e.get("name",""),"Type":e.get("type",""),
-                    "Importance":e.get("importance",""),
-                    "Papers":", ".join(e.get("papers",[]))[:60],
-                } for e in entities]), height=260)
-
-        orphans = graph.get("orphan_concepts",[])
-        if orphans:
-            st.markdown("#### Orphan Concepts")
-            for o in orphans[:8]:
-                ent = o.get("entity",{})
+        # ── Communities: the topic groups the model found, and the gap each one hints at ──
+        _comms = graph.get("communities", [])
+        if _comms:
+            st.markdown('<div class="ov-h gx-gap">Communities</div>', unsafe_allow_html=True)
+            st.caption("Groups of closely related concepts. Each group can point to something the papers do not yet cover.")
+            for _i, comm in enumerate(_comms, 1):
+                _gap = (f'<div class="info-chip gx-gapnote"><span>⚠️</span><span><b>Possible gap.</b> '
+                        f'{esc(comm["gap_signal"])}</span></div>' if comm.get("gap_signal") else "")
                 st.markdown(
-                    f'<div class="stage-card" style="padding:0.6rem 1rem;margin-bottom:0.3rem;">'
-                    f'<span style="font-family:\'DM Mono\',monospace;color:#004b93;">{esc(ent.get("name",""))}</span>'
-                    f'<span style="font-family:\'DM Mono\',monospace;color:#4a6580;font-size:0.7rem;'
-                    f'margin-left:0.6rem;">[{esc(ent.get("type",""))}]</span>'
-                    f'<div style="font-size:0.78rem;color:#4a6580;">{esc(o.get("signal",""))}</div></div>',
+                    f'<div class="gx-comm"><span class="ov-rank">{_i}</span><div>'
+                    f'<div class="ov-title">{esc(comm.get("theme", "Community"))}</div>'
+                    f'<div class="gx-comm-body">{esc(comm.get("summary", ""))}</div>{_gap}</div></div>',
                     unsafe_allow_html=True)
+
+        _render_relations(res, graph)
+
+        # ── All concepts, as one readable table ──
+        _ents = entity_rows(graph)
+        if _ents:
+            with st.expander(f"All {len(_ents)} concepts"):
+                _rows = "".join(
+                    f'<tr><td class="cv-paper">{esc(r["name"])}</td>'
+                    f'<td><span class="gx-dot" style="background:{_label_color.get(r["type"], "#8fa6bd")}"></span>{esc(r["type"])}</td>'
+                    f'<td>{esc(str(r["importance"]).capitalize())}</td><td class="cv-num">{r["connections"]}</td>'
+                    f'<td>{esc("; ".join(r["papers"])[:90])}</td></tr>' for r in _ents)
+                _gx_table(["Concept", "Type", "Importance", "Links", "Papers"], _rows, scroll=True)
+
+        # ── Concepts seen in only one paper, explained once instead of once per row ──
+        _orph = orphan_rows(graph)
+        if _orph:
+            st.markdown('<div class="ov-h gx-gap">Concepts seen in one paper only</div>', unsafe_allow_html=True)
+            st.caption("These concepts appear in a single paper and have few links to the rest. They are not errors. "
+                       "They may point to areas that have not been explored yet.")
+            _gx_table(["Concept", "Type", "Found in"], "".join(
+                f'<tr><td class="cv-paper">{esc(r["name"])}</td><td>{esc(r["type"])}</td>'
+                f'<td>{esc("; ".join(r["papers"])[:90])}</td></tr>' for r in _orph))
+
+        # ── Possible links between papers ──
+        _bridges = bridge_rows(graph)
+        if _bridges:
+            st.markdown('<div class="ov-h gx-gap">Possible links between papers</div>', unsafe_allow_html=True)
+            st.caption("A limitation in one paper that a method in another paper might address.")
+            def _bridge_cell(text: str, paper: str, label: str) -> str:
+                return (f'<td class="br-cell"><div>{esc(text)}</div>'
+                        f'<div class="br-paper">{esc(label)} {esc(paper)}</div></td>')
+            _gx_table(["Limitation found", "Could be addressed by"], "".join(
+                '<tr>' + (_bridge_cell(b["limitation"], b["from_paper"], "In:")
+                          + _bridge_cell(b["solution"], b["to_paper"], "From:")
+                          if b["limitation"] and b["solution"] else
+                          f'<td class="br-cell" colspan="2">{esc(b["description"])}</td>') + '</tr>'
+                for b in _bridges))
 
     # ── Tab 4: Research Gaps ───────────────────────────────────────────────────
     if _tab == "Gaps":
@@ -3099,12 +3772,12 @@ if st.session_state.results:
                 st.download_button("Download HTML Report",
                                    data=bundle["html"].encode("utf-8"),
                                    file_name="research_gap_final_report.html",
-                                   mime="text/html")
+                                   mime="text/html", **_audit_export("html"))
             with dl2:
                 st.download_button("Download PDF Report",
                                    data=bundle["pdf"],
                                    file_name="research_gap_final_report.pdf",
-                                   mime="application/pdf")
+                                   mime="application/pdf", **_audit_export("pdf"))
             if bundle.get("saved"):
                 st.success("Saved to the project. Find it any time under Project view → Files.")
             with st.expander("Preview the report", expanded=False):
@@ -3121,7 +3794,8 @@ if st.session_state.results:
             try:
                 st.download_button("Download Quick PDF",
                                    data=to_pdf_report(res, context),
-                                   file_name="research_gap_report.pdf", mime="application/pdf")
+                                   file_name="research_gap_report.pdf", mime="application/pdf",
+                                   **_audit_export("quick_pdf"))
             except Exception as e:
                 show_error("PDF report generation failed", exc=e)
         with ex2:
@@ -3130,7 +3804,8 @@ if st.session_state.results:
                         unsafe_allow_html=True)
             st.download_button("Download Markdown",
                                data=to_markdown_report(res, context),
-                               file_name="research_gap_report.md", mime="text/markdown")
+                               file_name="research_gap_report.md", mime="text/markdown",
+                               **_audit_export("markdown"))
         with ex3:
             st.markdown('<div class="stage-card"><div class="stage-title">JSON Export</div>'
                         '<div class="stage-body">Complete structured data.</div></div>',
@@ -3138,6 +3813,6 @@ if st.session_state.results:
             st.download_button("Download JSON",
                                data=to_json(res),
                                file_name="research_gap_analysis.json",
-                               mime="application/json")
+                               mime="application/json", **_audit_export("json"))
         with st.expander("Raw JSON"):
             st.json(res)

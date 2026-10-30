@@ -36,6 +36,7 @@ def test_every_schema_accepts_a_realistic_item_and_rejects_an_empty_one():
         "proposal_review": {"index": 0, "specificity": 4, "novelty": 3, "feasibility": 4, "impact": 4, "verdict": "accept"},
         "parameter": {"name": "orr", "value": 12.5, "ci_lower": None, "unit": "percent", "evidence_kind": "measured"},
         "council_consensus": {"consensus": "agreed", "key_points": ["a"]},
+        "reference": {"title": "A study of things", "authors": ["Smith J"], "year": 2020, "doi": None},
         "council_model_choice": {"selected_model": "monte_carlo", "rationale": "r"},
         "council_insights": {"novel_finding": {"title": "t", "claim": "c"}, "clinical_insights": ["a"]},
     }

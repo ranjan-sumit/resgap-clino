@@ -402,6 +402,8 @@ def find_missing_bridges(graph_data: dict, wiki: dict) -> list:
                 f"could be addressed by {b.get('solution')} "
                 f"from {b.get('potential_solution_in')}"
             ),
+            "limitation": b.get("limitation"),
+            "solution": b.get("solution"),
             "source_paper": b.get("limitation_in"),
             "target_paper": b.get("potential_solution_in"),
         })
@@ -470,6 +472,21 @@ _EXTRA_PALETTE = ["#e0678f", "#2aa7a1", "#8e6bd1", "#c2873a", "#4f7fd6", "#7fa83
                   "#c94f7c", "#38a36a", "#6a63c9", "#a8744f"]
 
 
+# Light, clearly different hues for the entity-network legend (one per type, no repeats).
+_DISTINCT_PALETTE = ["#6fb1f0", "#f5a65b", "#7fd1a0", "#f27d96", "#a99be0", "#f0d264",
+                     "#5fcfd1", "#dc8fd3", "#b6d96a", "#c9a27a", "#8fa6bd", "#f09a7c"]
+
+
+def type_color_map(entity_types) -> dict:
+    """One colour per entity type, never shared between two types of the same graph (hashing the
+    type name could collide). Types are assigned in alphabetical order so the same graph always
+    gets the same colours; beyond the palette's length the older palettes fill in."""
+    types = sorted({str(t or "concept") for t in entity_types})
+    spare = [c for c in list(_TYPE_COLORS.values()) + _EXTRA_PALETTE if c not in _DISTINCT_PALETTE]
+    palette = _DISTINCT_PALETTE + spare
+    return {t: palette[i % len(palette)] for i, t in enumerate(types)}
+
+
 def node_color(entity_type) -> str:
     """Models invent types ("disease", "biomarker"); give each a stable colour
     of its own rather than one shared grey."""
@@ -486,7 +503,8 @@ def prepare_network_diagram_data(graph_data: dict) -> dict:
     """
     entities = graph_data.get("entities", [])
     relationships = graph_data.get("relationships", [])
-    _color = node_color
+    _colors = type_color_map(e.get("type", "concept") for e in entities)
+    _color = lambda t: _colors[str(t or "concept")]
 
     # Build id/name → index map. LLMs sometimes use entity names in relationships.
     id_to_idx = {e.get("id", e.get("name", f"e{i}")): i for i, e in enumerate(entities)}

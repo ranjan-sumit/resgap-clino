@@ -65,7 +65,15 @@ class DiagramDataTests(unittest.TestCase):
         nodes = {n["name"]: n for n in prepare_network_diagram_data(self._graph())["nodes"]}
         self.assertNotEqual(nodes["A"]["color"], "#8b949e")
         self.assertNotEqual(nodes["B"]["color"], "#8b949e")
-        self.assertEqual(nodes["C"]["color"], "#3fb950")           # known type keeps its colour
+        # no two types in one graph share a colour (hashing the type name used to collide)
+        self.assertEqual(len({nodes[k]["color"] for k in "ABC"}), 3)
+
+    def test_many_types_never_share_a_colour(self):
+        from pipeline.graph_builder import type_color_map
+        types = ["disease", "target", "intervention", "biomarker", "method", "dataset or cohort",
+                 "model system", "outcome measure", "organism", "cell model"]
+        colours = type_color_map(types)
+        self.assertEqual(len(set(colours.values())), len(types))
 
     def test_same_invented_type_always_gets_the_same_colour(self):
         a = prepare_network_diagram_data(self._graph())["nodes"][0]["color"]

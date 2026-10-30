@@ -23,7 +23,8 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 import time
 
-import requests
+import requests  # noqa: F401  (tests patch requests.get through this module)
+from utils import egress
 
 from pipeline import academic_search as acad
 from utils.azure_client import LLMCallError, unwrap
@@ -70,7 +71,7 @@ def _search_s2(query: str, api_key: str) -> tuple[list, bool]:
 def _search_europepmc(query: str, limit: int = 6) -> tuple[list, bool]:
     """Europe PMC: PubMed-indexed biomedical literature plus preprints; abstracts included."""
     try:
-        resp = requests.get(EUROPE_PMC_BASE, params={"query": query, "format": "json", "resultType": "core",
+        resp = egress.get(EUROPE_PMC_BASE, params={"query": query, "format": "json", "resultType": "core",
                                                      "pageSize": limit}, timeout=20)
         resp.raise_for_status()
         results = (resp.json().get("resultList") or {}).get("result") or []

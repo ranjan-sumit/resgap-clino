@@ -42,6 +42,44 @@ def test_orphan_explanation_for_grounded_and_older_graphs():
     assert gv.orphan_explanation({"stats": {}, "diagnostics": {}}) == ""
 
 
+_SMALL = {
+    "entities": [{"id": "a", "name": "CF", "type": "disease", "importance": "high", "papers": ["P1", "P2"]},
+                 {"id": "b", "name": "Drug X", "type": "intervention", "importance": "medium", "papers": ["P1"]},
+                 {"id": "c", "name": "FEV1", "type": "outcome_measure", "importance": "low", "papers": ["P2"]},
+                 {"id": "d", "name": "Lonely", "type": "intervention", "importance": "medium", "papers": ["P1"]}],
+    "relationships": [{"source": "a", "target": "b", "relation": "treated_by"},
+                      {"source": "CF", "target": "c", "relation": "measured_by"},   # named, not id'd
+                      {"source": "b", "target": "c", "relation": "measured_by"}],
+    "orphan_concepts": [{"entity": {"name": "Lonely", "type": "intervention", "importance": "medium",
+                                    "papers": ["P1"]}, "connections": 0}],
+    "missing_bridges": [{"description": "x could fix y", "source_paper": "P1", "target_paper": "P2"}],
+}
+
+
+def test_graph_overview_helpers_count_types_links_and_relations():
+    assert gv.connection_counts(_SMALL) == {"a": 2, "b": 2, "c": 2}          # a name reference counts like an id
+    assert gv.type_counts(_SMALL) == [("intervention", 2), ("disease", 1), ("outcome measure", 1)]
+    assert gv.relation_counts(_SMALL) == [("measured by", 2), ("treated by", 1)]
+    hubs = gv.top_connected(_SMALL)
+    assert [h["name"] for h in hubs] == ["CF", "Drug X", "FEV1"] and "Lonely" not in [h["name"] for h in hubs]
+
+
+def test_entity_orphan_and_bridge_rows():
+    ents = gv.entity_rows(_SMALL)
+    assert [e["name"] for e in ents][0] == "CF" and ents[-1]["name"] == "FEV1"        # most important first
+    assert gv.orphan_rows(_SMALL)[0]["name"] == "Lonely"
+    assert gv.bridge_rows(_SMALL) == [{"limitation": "", "solution": "", "from_paper": "P1", "to_paper": "P2",
+                                       "description": "x could fix y"}]            # unparseable text is kept whole
+    old = {"missing_bridges": [{"description": "'Small sample.' in P1 could be addressed by Larger cohort from P2",
+                                "source_paper": "P1", "target_paper": "P2"}]}
+    row = gv.bridge_rows(old)[0]                                                    # a run saved before the parts existed
+    assert (row["limitation"], row["solution"]) == ("Small sample.", "Larger cohort")
+    new = {"missing_bridges": [{"description": "joined", "limitation": "L", "solution": "S",
+                                "source_paper": "P1", "target_paper": "P2"}]}
+    assert (gv.bridge_rows(new)[0]["limitation"], gv.bridge_rows(new)[0]["solution"]) == ("L", "S")
+    assert gv.type_counts({}) == [] and gv.top_connected({}) == [] and gv.bridge_rows({}) == []
+
+
 def _texts(at):
     return " ".join(str(getattr(e, "value", "")) for e in (*at.markdown, *at.caption, *at.info, *at.warning))
 

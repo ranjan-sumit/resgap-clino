@@ -251,12 +251,21 @@ def run_full_pipeline(
         budget.check()                  # between stages: a passed cap stops the run here, cleanly
         progress(msg, pct)
 
+    from utils import audit_log, egress
+    project_id = options.project_id or DEFAULT_PROJECT_ID
+    audit_log.record("run.started", "project", project_id, {
+        "papers": len(papers), "provider": options.provider_key, "model": options.model,
+        "egress": egress.mode(), "erase_on_delete": os.getenv("RESGAP_ERASE_ON_DELETE", "") or "off",
+        "allowed_providers": os.getenv("RESGAP_ALLOWED_PROVIDERS", "") or "all"})
     try:
-        return _run_full_pipeline(papers, context, client, options, name, progress=_progress,
-                                  trace=trace, warn=_warn, token_meter=token_meter, _audit=audit)
+        outcome = _run_full_pipeline(papers, context, client, options, name, progress=_progress,
+                                     trace=trace, warn=_warn, token_meter=token_meter, _audit=audit)
     except BaseException as e:
         _dump_failed_run_log(options, call_log, e)
+        audit_log.record("run.failed", "project", project_id, {"error": type(e).__name__})
         raise
+    audit_log.record("run.finished", "run", outcome.run_id, {"project": project_id, "papers": len(papers)})
+    return outcome
 
 
 def _repeatability_vs_previous(results: dict, project_id: str, look_back: int = 8) -> dict | None:

@@ -16,3 +16,5 @@ toolbarMode = "minimal"
 headless = true
 # Matches the per-file limit in pipeline/pdf_limits.py (RESGAP_MAX_PDF_MB); a bigger upload is refused by the browser.
 maxUploadSize = 50
+# Serves ./static (the self-hosted fonts) at /app/static/, so the page loads nothing from a font service.
+enableStaticServing = true

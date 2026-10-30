@@ -31,6 +31,7 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from utils import audit_log
 from utils import database as db
 
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{4,64}$")
@@ -100,6 +101,7 @@ def create_project(name: str, description: str = "", domain: str = "", interest:
     except Exception:
         shutil.rmtree(folder, ignore_errors=True)   # never leave a folder with no project behind
         raise
+    audit_log.record("project.created", "project", project_id, {"domain": domain})
     return {**project, "path": str(folder)}
 
 

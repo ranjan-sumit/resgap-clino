@@ -19,7 +19,8 @@ import threading
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 import difflib
-import requests
+import requests  # noqa: F401  (tests patch requests.get through this module)
+from utils import egress
 import urllib.parse
 from typing import Optional
 from utils.azure_client import unwrap
@@ -215,7 +216,7 @@ def _crossref_citation_search(citation: str) -> Optional[dict]:
     """Search Crossref with a whole citation string (what its bibliographic query is made for) and keep a hit only if
     its title is found in that citation."""
     try:
-        r = requests.get("https://api.crossref.org/works",
+        r = egress.get("https://api.crossref.org/works",
                          params={"query.bibliographic": citation[:300], "rows": 3,
                                  "select": "DOI,title,author,container-title,published,abstract,URL,is-referenced-by-count"},
                          headers=_HEADERS, timeout=_TIMEOUT)
@@ -447,11 +448,11 @@ def _provider_get(provider: str, url: str, **kwargs):
     is_s2 = provider.startswith("semantic_scholar")
     if is_s2:
         _s2_pace()
-    r = requests.get(url, **kwargs)
+    r = egress.get(url, **kwargs)
     if r.status_code == 429 and is_s2 and _SS_KEY["value"]:
         time.sleep(3)                                   # a keyed 429 is a brief burst limit: one more try
         _s2_pace()
-        r = requests.get(url, **kwargs)
+        r = egress.get(url, **kwargs)
     if r.status_code == 429:
         text = r.text if isinstance(getattr(r, "text", None), str) else ""
         if provider == "openalex" and "budget" in text.lower():
@@ -527,7 +528,7 @@ def _ss_by_arxiv(arxiv_id: str) -> Optional[dict]:
 
 def _crossref_by_doi(doi: str) -> Optional[dict]:
     try:
-        r = requests.get(
+        r = egress.get(
             CROSSREF.format(doi=urllib.parse.quote(doi, safe="")),
             headers=_HEADERS, timeout=_TIMEOUT,
         )
@@ -578,7 +579,7 @@ def _crossref_search(title: str) -> Optional[dict]:
             "rows": 3,
             "select": "DOI,title,author,container-title,published,abstract,URL,is-referenced-by-count",
         }
-        r = requests.get("https://api.crossref.org/works",
+        r = egress.get("https://api.crossref.org/works",
                          params=params, headers=_HEADERS, timeout=_TIMEOUT)
         if r.status_code == 200:
             items = r.json().get("message", {}).get("items", [])
@@ -617,7 +618,7 @@ def _unpaywall_by_doi(doi: str) -> Optional[str]:
         return None                      # Unpaywall rejects made-up addresses; no contact address, no open-access link
     try:
         url = UNPAYWALL.format(doi=urllib.parse.quote(doi, safe=""))
-        r = requests.get(url, params={"email": email}, headers=_HEADERS, timeout=_TIMEOUT)
+        r = egress.get(url, params={"email": email}, headers=_HEADERS, timeout=_TIMEOUT)
         if r.status_code == 200:
             data = r.json()
             if data.get("is_oa"):
@@ -634,7 +635,7 @@ def _pubmed_search(doi: str = "", title: str = "") -> Optional[dict]:
         term = f"{doi}[doi]" if doi else f'"{title[:180]}"[Title]'
         if not term:
             return None
-        r = requests.get(
+        r = egress.get(
             f"{base}/esearch.fcgi",
             params={"db": "pubmed", "term": term, "retmax": 1, "retmode": "json"},
             headers=_HEADERS, timeout=_TIMEOUT,
@@ -645,7 +646,7 @@ def _pubmed_search(doi: str = "", title: str = "") -> Optional[dict]:
         if not ids:
             return None
         pmid = ids[0]
-        r2 = requests.get(
+        r2 = egress.get(
             f"{base}/esummary.fcgi",
             params={"db": "pubmed", "id": pmid, "retmode": "json"},
             headers=_HEADERS, timeout=_TIMEOUT,

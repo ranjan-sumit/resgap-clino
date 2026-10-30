@@ -16,6 +16,7 @@ import stat
 from datetime import datetime
 from pathlib import Path
 
+from utils import audit_log
 from utils import database as db
 from utils import project_store
 
@@ -72,6 +73,7 @@ def delete_run(project_id: str, run_id: str, remove_files: bool = False) -> None
     db.delete_run(run_id)
     if erase:
         db.purge_derived_caches()
+    audit_log.record("run.deleted", "run", run_id, {"project": project_id, "files_removed": remove_files, "erase_policy": erase})
 
 
 def _drop_file_row(project_id: str, file_id: int) -> None:
@@ -134,6 +136,7 @@ def merge_runs(keep_id: str, drop_ids: list[str]) -> dict:
         conn.commit()
     finally:
         conn.close()
+    audit_log.record("run.archived", "run", keep_id, {"reason": "merged duplicates", "archived": moved["archived"]})
     return moved
 
 
@@ -183,6 +186,7 @@ def empty_deleted_folder() -> int:
     n = deleted_folder_footprint()["projects"]
     if deleted_folder().is_dir():
         _rmtree(deleted_folder())
+    audit_log.record("project.erased", "projects_root", "_deleted", {"project_folders": n})
     return n
 
 
@@ -205,11 +209,14 @@ def delete_project(project_id: str, erase: bool | None = None) -> Path | None:
             for old in trash.glob(f"{project['folder']}-*"):
                 _rmtree(old)
         db.purge_derived_caches()
+        audit_log.record("project.deleted", "project", project_id, {"erased": True})
         return None
     if not folder.exists():
+        audit_log.record("project.deleted", "project", project_id, {"erased": False, "folder_found": False})
         return None
     target_dir = project_store.projects_root() / "_deleted"
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / f"{project['folder']}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     shutil.move(str(folder), str(target))
+    audit_log.record("project.deleted", "project", project_id, {"erased": False, "moved_to": "_deleted"})
     return target

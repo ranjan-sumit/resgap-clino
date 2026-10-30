@@ -21,6 +21,7 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from utils import audit_log
 from utils import database as db
 
 BACKUP_FORMAT = 1
@@ -104,6 +105,7 @@ def create_backup(dest_dir: str | Path | None = None, keep: int | None = 7) -> P
             partial.unlink(missing_ok=True)
     if keep:
         _prune(dest, keep)
+    audit_log.record("backup.created", "backup", out.name, {"project_files": manifest["project_files"], "kept": keep or "all"})
     return out
 
 
@@ -187,6 +189,7 @@ def restore_backup(zip_path: str | Path, db_path: str | Path | None = None,
             with zf.open(info) as src, open(target, "wb") as out:
                 shutil.copyfileobj(src, out)
             n_files += 1
+    audit_log.record("backup.restored", "backup", Path(zip_path).name, {"project_files": n_files, "overwrote": bool(moved)})
     return {"database": str(db_target), "projects": str(proj_target), "project_files": n_files,
             "moved_aside": [str(m) for m in moved]}
 

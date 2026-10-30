@@ -53,6 +53,91 @@ def grounding_summary(graph: dict) -> dict:
             "share": round(grounded / len(rels), 3) if rels else None}
 
 
+def _label(value) -> str:
+    return str(value or "concept").replace("_", " ")
+
+
+def connection_counts(graph: dict) -> dict:
+    """{entity key: number of relationships touching it}. Relationships may name an entity by id or by name."""
+    entities = graph.get("entities") or []
+    keys = {e.get("id") or e.get("name") for e in entities}
+    by_name = {str(e.get("name", "")).strip().lower(): (e.get("id") or e.get("name")) for e in entities}
+    counts: dict = {}
+    for r in graph.get("relationships") or []:
+        for ref in (r.get("source"), r.get("target")):
+            key = ref if ref in keys else by_name.get(str(ref or "").strip().lower())
+            if key is not None:
+                counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def type_counts(graph: dict) -> list[tuple[str, int]]:
+    """[(entity type, how many)], largest first."""
+    counts: dict = {}
+    for e in graph.get("entities") or []:
+        t = _label(e.get("type"))
+        counts[t] = counts.get(t, 0) + 1
+    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+def relation_counts(graph: dict, limit: int = 8) -> list[tuple[str, int]]:
+    """[(relationship kind, how many)], most common first."""
+    counts: dict = {}
+    for r in graph.get("relationships") or []:
+        k = _label(r.get("relation"))
+        counts[k] = counts.get(k, 0) + 1
+    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
+
+
+def top_connected(graph: dict, limit: int = 8) -> list[dict]:
+    """The best-connected entities: [{"name", "type", "connections"}], most links first."""
+    counts = connection_counts(graph)
+    rows = [{"name": e.get("name", ""), "type": _label(e.get("type")),
+             "connections": counts.get(e.get("id") or e.get("name"), 0)} for e in graph.get("entities") or []]
+    rows = [r for r in rows if r["connections"] > 0]
+    return sorted(rows, key=lambda r: (-r["connections"], r["name"]))[:limit]
+
+
+_IMPORTANCE_ORDER = {"high": 0, "medium": 1, "low": 2}
+
+
+def entity_rows(graph: dict) -> list[dict]:
+    """Every entity with its type, importance, link count and papers; most important first."""
+    counts = connection_counts(graph)
+    rows = [{"name": e.get("name", ""), "type": _label(e.get("type")), "importance": e.get("importance", ""),
+             "connections": counts.get(e.get("id") or e.get("name"), 0), "papers": list(e.get("papers") or [])}
+            for e in graph.get("entities") or []]
+    return sorted(rows, key=lambda r: (_IMPORTANCE_ORDER.get(r["importance"], 3), -r["connections"], r["name"]))
+
+
+def orphan_rows(graph: dict) -> list[dict]:
+    """Concepts that appear in a single paper with few links: name, type, importance, papers."""
+    rows = []
+    for o in graph.get("orphan_concepts") or []:
+        ent = o.get("entity") or {}
+        rows.append({"name": ent.get("name", ""), "type": _label(ent.get("type")),
+                     "importance": ent.get("importance", ""), "papers": list(ent.get("papers") or []),
+                     "connections": o.get("connections", 0)})
+    return rows
+
+
+def bridge_rows(graph: dict) -> list[dict]:
+    """Possible links between papers: a limitation in one that another paper may answer, split into its parts.
+    Runs saved before the parts were stored carry only the joined sentence, so it is taken apart again."""
+    rows = []
+    for b in graph.get("missing_bridges") or []:
+        src, dst, text = b.get("source_paper") or "", b.get("target_paper") or "", b.get("description") or ""
+        limitation, solution = b.get("limitation") or "", b.get("solution") or ""
+        if not (limitation and solution):
+            head, mid, tail = f"'", f"' in {src} could be addressed by ", f" from {dst}"
+            if text.startswith(head) and mid in text and text.endswith(tail):
+                body = text[len(head):-len(tail)]
+                limitation, _, solution = body.partition(mid)
+        rows.append({"limitation": limitation.strip().strip("'"), "solution": solution.strip(),
+                     "from_paper": src, "to_paper": dst, "description": text})
+    return rows
+
+
 def orphan_explanation(graph: dict) -> str:
     """Plain-language note on entities that connect to nothing (or one paper only)."""
     diag = graph.get("diagnostics") or {}

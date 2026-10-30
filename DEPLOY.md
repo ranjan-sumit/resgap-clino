@@ -115,6 +115,25 @@ After changing `requirements.txt`, regenerate both locks:
 `uv pip compile requirements.txt --generate-hashes -o requirements-runtime.lock --python-version 3.11`
 (and the same for `requirements.lock` with `requirements-dev.txt`).
 
+## Controlled environments
+
+Set these in `.env` (see `.env.example`). The Settings, Audit log tab shows what is in effect.
+
+| Setting | Effect |
+|---|---|
+| `RESGAP_EGRESS=models` | Only model providers are reachable. Reference matching (Crossref, OpenAlex, Semantic Scholar, PubMed / Europe PMC, Unpaywall) and the literature check (arXiv) are switched off; references stay unresolved and the run says so. |
+| `RESGAP_EGRESS=none` | Nothing leaves the network. The only model route is the custom endpoint, on this computer or on a host listed in `RESGAP_ALLOWED_HOSTS`. Any value other than `open`, `models` or `none` counts as `none`. |
+| `RESGAP_ALLOWED_PROVIDERS`, `RESGAP_ALLOWED_HOSTS` | Which providers and custom-endpoint hosts may be used. |
+| `RESGAP_ERASE_ON_DELETE=1` | Deletes are permanent. |
+| `RESGAP_ACTOR` | The name written to the audit log. The app has no sign-in; a sign-in layer or reverse proxy in front of it should set this per user. |
+
+Pages load no fonts or scripts from other sites: the fonts are served from `static/fonts` (SIL Open Font License, see `static/fonts/LICENSES.md`).
+
+**Audit log.** Every run start and finish, delete, archive, backup, restore, export, project creation and model-assignment change is recorded
+in the database with the time, the actor and the item, never with paper text, model output or keys. Entries cannot be edited or removed
+through the app (the database refuses), each is chained to the one before by a hash, and the Audit log tab checks the whole chain. Someone
+with direct file access can still replace the whole database, so ship the log (the CSV download) to a place they cannot reach if that matters.
+
 ## Streamlit Community Cloud
 
 1. Push the repo to GitHub; create the app pointing at `app.py`. Cloud

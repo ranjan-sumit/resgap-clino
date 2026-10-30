@@ -2,7 +2,8 @@
 Search helpers for Semantic Scholar and arXiv: query building, retries and status-aware search calls.
 The literature check itself lives in pipeline/literature_scout.py.
 """
-import requests
+import requests  # noqa: F401  (tests patch requests.get through this module)
+from utils import egress
 import time
 import re
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter, retry_if_exception
@@ -33,7 +34,7 @@ def _is_retryable_search_error(exc: BaseException) -> bool:
     reraise=True,
 )
 def _fetch_semantic_scholar(query: str, limit: int, headers: dict) -> dict:
-    resp = requests.get(
+    resp = egress.get(
         SEMANTIC_SCHOLAR_BASE,
         params={"query": query, "limit": limit, "fields": FIELDS},
         headers=headers, timeout=10,
@@ -102,7 +103,7 @@ def _search_semantic_scholar_with_status(query: str, limit: int = 5, api_key: st
     reraise=True,
 )
 def _fetch_arxiv(params: dict) -> str:
-    resp = requests.get(ARXIV_BASE, params=params, timeout=10)
+    resp = egress.get(ARXIV_BASE, params=params, timeout=10)
     resp.raise_for_status()
     return resp.text
 

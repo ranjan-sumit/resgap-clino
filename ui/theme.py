@@ -1,11 +1,11 @@
 """The app's stylesheet, moved out of app.py unchanged. `apply_theme()` injects it."""
 
+from pathlib import Path
+
 import streamlit as st
 
 CSS_BASE = """
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap');
-
   /* ── Base ── */
   html, body, [class*="css"] {
     font-family: 'DM Sans', sans-serif;
@@ -495,6 +495,14 @@ CSS_A11Y = """
 """
 
 
+def font_css() -> str:
+    """The @font-face rules for the self-hosted fonts in static/fonts (served by Streamlit at /app/static/). Empty if missing."""
+    try:
+        return "<style>\n" + (Path(__file__).resolve().parent.parent / "static" / "fonts" / "fonts.css").read_text(encoding="utf-8") + "</style>"
+    except OSError:
+        return ""
+
+
 def apply_theme() -> None:
-    for css in (CSS_BASE, CSS_ENTERPRISE, CSS_EXTRA, CSS_A11Y):
+    for css in (font_css(), CSS_BASE, CSS_ENTERPRISE, CSS_EXTRA, CSS_A11Y):
         st.markdown(css, unsafe_allow_html=True)

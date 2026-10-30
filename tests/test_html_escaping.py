@@ -46,7 +46,16 @@ SAFE = {
 SAFE_IN = {   # reviewed per file: HTML pieces built from other linted f-strings, numbers and constants
     # _rm_name and chip_html come from ui/viewmodels.run_header, which escapes them (tested in test_ui_viewmodels)
     "app.py": {"_CHECK", "_rm_name", "chip_html", "gq['quality_score']", "gq['extraction_coverage']", "gq['evidence_coverage']",
-               "gq['duplicate_rate']", "gq['unresolved_entity_rate']"},
+               "gq['duplicate_rate']", "gq['unresolved_entity_rate']",
+               # Reviewed 2026-10-23 (Run planner, graph screen, run bar, tables). Each is HTML assembled from esc()'d
+               # pieces, a number, or a constant (class names, colours, column titles), never raw paper or model text:
+               "_HERO_ART",                                                    # constant SVG
+               "_last_run", "_meta", "_status_cls", "_status",                 # project header and run bar (esc'd; chips come from run_header)
+               "rows_html", "_rows", "_cov_rows", "_gap", "_i", "_title", "c",   # table bodies and headings built from esc()'d cells
+               "badges", "money", "sub", "saving", "main_rows", "council_rows", "includes",   # the planner card's parts
+               "_model(r)",                                                    # returns esc(model name)
+               "_RP_COLORS[r]", "(cost['by_role'].get(r) or 0) / mid * 100",   # slate colours; a percentage
+               "_label_color.get(r['type'], '#8fa6bd')", "r['connections']"},  # type colour from the palette; a count
     "utils/export.py": {"title", "param_rows", "hyp", "headline", "drivers", "now", "paper_rows", "ref_rows", "gap_cards", "proposal_cards",
                         "entity_rows", "rel_rows", "trace_rows", "evidence_rows", "evidence_count",
                         "graph_stats.get('entity_count', 0)", "graph_stats.get('relationship_count', 0)",

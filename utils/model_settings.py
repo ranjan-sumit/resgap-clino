@@ -150,6 +150,11 @@ def save_config(config: ModelConfig) -> None:
     path = settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(config.to_dict(), indent=2), encoding="utf-8")
+    from utils import audit_log                      # local import: audit_log needs the database, this module is loaded earlier
+    from urllib.parse import urlparse
+    audit_log.record("settings.provider", "model_settings", "", {
+        "roles": ", ".join(f"{r}={s.provider}{'@' + (urlparse(s.base_url).hostname or '') if s.base_url else ''}/{s.model}"
+                           for r, s in config.roles.items())})
 
 
 def load_config(available: set) -> ModelConfig:
