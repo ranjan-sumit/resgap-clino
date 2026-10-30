@@ -1710,7 +1710,7 @@ def _render_project_view(project: dict, runs: list[dict]) -> None:
                 st.rerun()
 
     # The zip is built when the download is requested, not kept in the session (it can be hundreds of megabytes).
-    st.download_button("Download project (.zip)", data=lambda: (audit_log.record("export.project_zip", "project", pid), project_store.build_project_zip(pid))[1],
+    st.download_button("Download project (.zip)", data=lambda: project_store.build_project_zip(pid), on_click=audit_log.record, args=("export.project_zip", "project", pid),
                        file_name=f"{project_store.safe_filename(project['name'])}.zip",
                        mime="application/zip", key=f"dl_zip_{pid}")
     st.caption("The zip holds the papers, every run's results and reports, a database export with the project's runs "
@@ -1922,7 +1922,7 @@ def _render_audit_tab() -> None:
     if _check["ok"]:
         st.success(f"Intact: {_check['count']} entries, none changed or removed.")
     else:
-        st.error(f"The audit log has been altered. {_check['problem']}")
+        show_error(f"The audit log has been altered. {_check['problem']}")
     _labels = {audit_log.describe(a): a for a in audit_log.ACTIONS}
     _pick = st.selectbox("Show", ["All activity", *sorted(_labels)], key="audit_filter")
     _events = audit_log.list_events(limit=500, action=_labels.get(_pick))
@@ -1931,7 +1931,7 @@ def _render_audit_tab() -> None:
         return
     st.dataframe([{"When (UTC)": e["at"][:19].replace("T", " "), "Who": e["actor"], "What": audit_log.describe(e["action"]),
                    "On": f"{e['target_type']} {e['target_id']}".strip(), "Details": e["detail"]} for e in _events],
-                 use_container_width=True, hide_index=True)
+                 width="stretch", hide_index=True)
     st.download_button("Download as CSV", data=audit_log.to_csv(_events), file_name="audit_log.csv", mime="text/csv",
                        key="audit_csv", on_click=audit_log.record, args=("audit.exported", "audit_log", "", {"rows": len(_events)}))
 

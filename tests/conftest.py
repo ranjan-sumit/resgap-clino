@@ -16,6 +16,7 @@ def _no_provider_pacing(monkeypatch):
     """Lookups to Semantic Scholar wait for their turn in real runs (1-3.5 s apiece); tests mock the network and must not."""
     import pipeline.reference_extractor as rx
     monkeypatch.setattr(rx, "_s2_pace", lambda: None)
+    monkeypatch.setitem(rx._SS_KEY, "value", "")             # a run sets this key and never clears it; no test may inherit it
     yield
 
 

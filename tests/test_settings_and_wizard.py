@@ -59,10 +59,10 @@ def test_hide_paths_reads_the_environment(monkeypatch):
 
 
 # ── Settings page ───────────────────────────────────────────────────────────────────────────
-def test_settings_page_has_five_tabs_and_a_back_button(app_test, isolated_env):
+def test_settings_page_has_six_tabs_and_a_back_button(app_test, isolated_env):
     at = open_settings(app_test(timeout=90))
     assert not at.exception
-    assert [t.label for t in at.tabs] == ["API keys", "Models", "Analysis defaults", "Saved results", "Backup"]
+    assert [t.label for t in at.tabs] == ["API keys", "Models", "Analysis defaults", "Saved results", "Backup", "Audit log"]
     click(at, "settings_back")
     assert at.session_state["view"] == "main"
 

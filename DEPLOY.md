@@ -40,7 +40,7 @@ choice is saved (`data/model_settings.json`), never a key.
 these recommendations?" in the panel). Key findings: gemini-3.5-flash-lite is
 fast and has request headroom, so it runs the call-heavy jobs; gemini-3.6-flash
 is richer but its free tier allows only 5 requests/minute, so it suits the
-council; gemini-3.7-flash is ~20x slower and is not recommended. Each run
+council; gemini-3.7-flash was ~20x slower and is no longer offered. Each run
 records which model did what, and every call the fallback had to take over, in
 its manifest.
 
