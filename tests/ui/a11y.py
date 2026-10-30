@@ -28,6 +28,30 @@ def inject_axe(page) -> None:
         page.add_script_tag(url=AXE_URL)
 
 
+# The results screen has ten sections in three groups (app.py, _TAB_GROUPS): pick the group, then the section.
+SECTION_GROUPS = {
+    "Results": ["Overview", "Gaps", "Proposals"],
+    "Evidence": ["Evidence", "References", "Graph", "Wiki"],
+    "Audit": ["Lab", "Trace", "Export"],
+}
+
+
+def open_section(page, name: str) -> None:
+    """Open a results section. A group is only clicked when it is not already open: clicking the open group again
+    de-selects it (that is how Streamlit's segmented control works) and hides its sections."""
+    group = next(g for g, sections in SECTION_GROUPS.items() if name in sections)
+    sections = SECTION_GROUPS[group]
+    probe = [x for x in sections if x not in SECTION_GROUPS]                 # a section whose name is not also a group name
+    if any(page.get_by_text(x, exact=True).count() for x in probe):          # the group is already open
+        page.get_by_text(name, exact=True).nth(1 if name in SECTION_GROUPS else 0).click()
+        return
+    page.get_by_text(group, exact=True).first.click()
+    page.get_by_text(probe[0], exact=True).first.wait_for(timeout=30000)     # the group's sections have been drawn
+    settled(page)
+    if name != sections[0]:                                                  # a group opens on its first section
+        page.get_by_text(name, exact=True).first.click()
+
+
 def settled(page) -> None:
     """Wait until the previous screen has finished fading out (Streamlit keeps it, half transparent, marked
     data-stale, until the new one is drawn); scanning mid-fade reports contrast on text that is leaving."""

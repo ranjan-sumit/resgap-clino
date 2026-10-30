@@ -31,8 +31,13 @@ def test_background_run_survives_a_page_refresh_and_opens_results(tmp_path, monk
         page = browser.new_page(viewport={"width": 1440, "height": 900})
         page.goto(url)
         page.wait_for_selector("text=New analysis", timeout=45000)
+        page.get_by_role("button", name="New analysis").first.click()          # the four-step wizard
         for label in ("p0.pdf", "p1.pdf"):
-            page.get_by_text(label, exact=False).first.click()
+            page.locator("[data-testid=stCheckbox]").filter(has_text=label).first.locator("label").click()
+        page.wait_for_selector("text=2 paper(s) selected", timeout=15000)
+        for waits_for in ("text=Research interest", "text=Include cited references", "text=Papers (2)"):
+            page.get_by_role("button", name="Next").first.click()               # Papers > Research setup > Options > Review
+            page.wait_for_selector(waits_for, timeout=30000)
         page.get_by_role("button", name="Run analysis").click()
         page.wait_for_selector("text=running in the background", timeout=30000)
         page.wait_for_selector("text=Summarise each paper", timeout=15000)

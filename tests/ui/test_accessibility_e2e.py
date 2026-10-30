@@ -45,7 +45,7 @@ def test_no_serious_accessibility_violations_and_no_horizontal_scroll(app_url, w
 
         for name in SECTIONS:
             a11y.close_sidebar(page)
-            page.get_by_text(name, exact=True).first.click()
+            a11y.open_section(page, name)
             page.wait_for_timeout(1500)
             check(name)
         for name in PAGES:
