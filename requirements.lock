@@ -41,8 +41,6 @@ defusedxml==0.7.1
     # via py-serializable
 filelock==4.2.4
     # via cachecontrol
-flatbuffers==25.12.19
-    # via onnxruntime
 greenlet==3.5.6
     # via playwright
 h11==0.16.0
@@ -86,19 +84,13 @@ narwhals==2.27.1
     # via
     #   altair
     #   plotly
-networkx==3.6.1
-    # via pymupdf
 numpy==2.4.6
     # via
     #   -r requirements.txt
-    #   onnxruntime
     #   pandas
     #   pydeck
-    #   pymupdf
     #   scipy
     #   streamlit
-onnxruntime==1.31.0
-    # via pymupdf
 openai==3.36.1
     # via -r requirements.txt
 packageurl-python==0.17.6
@@ -106,7 +98,6 @@ packageurl-python==0.17.6
 packaging==26.3
     # via
     #   altair
-    #   onnxruntime
     #   pip-audit
     #   pip-requirements-parser
     #   plotly
@@ -140,13 +131,9 @@ plotly==7.1.0
 pluggy==1.7.0
     # via pytest
 protobuf==7.36.2
-    # via
-    #   onnxruntime
-    #   streamlit
+    # via streamlit
 psutil==7.2.2
-    # via
-    #   -r requirements-dev.txt
-    #   pymupdf
+    # via -r requirements-dev.txt
 py-serializable==2.1.0
     # via cyclonedx-python-lib
 pyarrow==26.0.0
@@ -165,12 +152,8 @@ pygments==2.21.0
     # via
     #   pytest
     #   rich
-pymupdf==2.0
+pymupdf==1.28.2
     # via -r requirements.txt
-pymupdf-layout==2.0
-    # via pymupdf
-pymupdf4llm==2.0
-    # via pymupdf
 pyparsing==3.3.3
     # via pip-requirements-parser
 pypdfium2==5.14.0
@@ -181,8 +164,6 @@ python-dateutil==3.0.0
     # via pandas
 python-multipart==0.0.32
     # via streamlit
-pyyaml==6.0.3
-    # via pymupdf
 referencing==0.37.0
     # via
     #   jsonschema
@@ -213,8 +194,6 @@ starlette==1.9.0
     # via streamlit
 streamlit==1.66.1
     # via -r requirements.txt
-tabulate==0.10.0
-    # via pymupdf
 tenacity==9.2.1
     # via -r requirements.txt
 tomli==2.5.0

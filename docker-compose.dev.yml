@@ -1,0 +1,12 @@
+# Development override:  docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+# Mounts the source tree so code changes show up after a restart, and lets the container write (the mounted tree is the
+# user's own). Not for a shared or regulated deployment: it exposes .env and data from the host folder inside the container.
+
+services:
+  app:
+    volumes:
+      - .:/app
+      - data:/data
+    read_only: false
+    environment:
+      RESGAP_DB_PATH: /data/run_history.db

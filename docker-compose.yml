@@ -1,29 +1,36 @@
-name: clinova
-
-# Streamlit-only local stack. Usage:  docker compose up -d --build
+# The app, hardened. Usage:  cp .env.example .env   (fill in the keys)   then   docker compose up -d --build
 #
-# No database service: run history and graph snapshots live in one SQLite
-# file (data/run_history.db, utils/database.py), persisted by the ./data bind
-# mount below. Postgres and ArcadeDB were removed 2026-10-09; the Next.js/
-# FastAPI services were archived earlier under _archive/react-fastapi-stack/.
+# * Data (run history, projects, backups) is in the named volume `data`; nothing is bind-mounted from the source tree.
+# * The port is published on this machine only. Put a reverse proxy with TLS and sign-in in front of it before anyone else
+#   connects; the app has no sign-in of its own.
+# * The container is read-only, runs without privileges and without capabilities, with memory and process limits.
+# * Cross-site request protection and CORS are left on (the previous file switched them off).
+# * Settings that matter in a controlled deployment can be set in .env: RESGAP_ALLOWED_PROVIDERS, RESGAP_ALLOWED_HOSTS,
+#   RESGAP_ERASE_ON_DELETE (see DEPLOY.md).
+# For development with the code mounted and auto-reload, add:  -f docker-compose.dev.yml
 
 services:
-  streamlit:
-    image: clinova-python:latest
+  app:
+    image: clinova:local
     build:
       context: .
-      dockerfile: Dockerfile.api
-    command: streamlit run app.py --server.address=0.0.0.0 --server.port=8501 --server.enableCORS false --server.enableXsrfProtection false
-    working_dir: /app
+      dockerfile: Dockerfile
     env_file: .env
-    volumes:
-      - .:/app
     ports:
-      - "8501:8501"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8501/healthz',timeout=3)"]
-      interval: 15s
-      timeout: 5s
-      retries: 6
-      start_period: 30s
+      - "127.0.0.1:8501:8501"
+    volumes:
+      - data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /home/app
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 3g
+    pids_limit: 256
     restart: unless-stopped
+
+volumes:
+  data:

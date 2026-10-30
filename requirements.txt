@@ -1,7 +1,7 @@
 streamlit>=1.40.0
 openai>=1.30.0
 pdfplumber>=0.11.0
-PyMuPDF>=1.24.0
+PyMuPDF>=1.24.0,<2     # 2.x pulls in an ONNX runtime and extra packages and has not been tested with this app
 requests>=2.31.0
 reportlab>=4.2.0
 numpy>=1.26.0

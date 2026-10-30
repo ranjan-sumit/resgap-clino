@@ -92,14 +92,28 @@ not wired into any prompt yet.
 ```bash
 bash scripts/make_dotenv.sh        # or: powershell -File scripts/make_dotenv.ps1
 # edit .env: add your key
-docker compose up -d --build       # Streamlit on http://localhost:8501
-docker compose logs -f streamlit
-docker compose down
+docker compose up -d --build       # app on http://127.0.0.1:8501 (this machine only)
+docker compose logs -f app
+docker compose down                # keeps the data volume; add -v to delete it
 ```
 
-The repo is bind-mounted, so `data/run_history.db` persists on the host.
-Streamlit has no auto-reload in this setup: `docker compose restart streamlit`
-after Python edits.
+The image installs from the hashed `requirements-runtime.lock`, runs as a non-root
+user (uid 10001) on a read-only filesystem with no capabilities, and keeps the run
+history, projects and backups in the named volume `data` (mounted at `/data`).
+The source tree is not mounted. The port is published on loopback only: put a
+reverse proxy with TLS and sign-in in front of it before anyone else connects,
+because the app has no sign-in of its own.
+
+Settings for a controlled deployment go in `.env`: `RESGAP_ALLOWED_PROVIDERS`,
+`RESGAP_ALLOWED_HOSTS`, `RESGAP_ERASE_ON_DELETE`, `RESGAP_CONTACT_EMAIL`.
+Back up the volume with the Settings, Backup tab or `scripts/backup.py`.
+
+For development with the code mounted: `docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build`
+(restart the service after Python edits). Not for shared use.
+
+After changing `requirements.txt`, regenerate both locks:
+`uv pip compile requirements.txt --generate-hashes -o requirements-runtime.lock --python-version 3.11`
+(and the same for `requirements.lock` with `requirements-dev.txt`).
 
 ## Streamlit Community Cloud
 

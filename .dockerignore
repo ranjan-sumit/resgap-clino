@@ -1,18 +1,35 @@
-# VCS / agent infra
-.git
-.claude
-.pytest_cache
-**/__pycache__
-**/*.pyc
-
-
-# Never bake secrets into images (.env is mounted at runtime / read by compose env_file)
+# Never bake secrets or data into an image (.env is read by compose at run time)
 .env
 .env.*
 !*.example
-
-# Local data / archives
 data
-*.zip
-_bmad-output
 storage
+*.zip
+*.db
+*.db-wal
+*.db-shm
+
+# Version control and agent folders
+.git
+.gitignore
+.github
+.claude
+.claude-ctx
+_bmad
+_bmad-output
+.devcontainer
+
+# Not needed to run the app
+tests
+docs
+evals
+.venv
+.pytest_cache
+**/__pycache__
+**/*.pyc
+requirements-dev.txt
+requirements.lock
+Dockerfile
+docker-compose*.yml
+*.md
+!README.md
