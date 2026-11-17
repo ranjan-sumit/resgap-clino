@@ -32,6 +32,7 @@ REQUIRED_PAIRS = [
     ("good", GOOD, SURFACE), ("good badge", GOOD, GOOD_TINT),
     ("warning", WARN, SURFACE), ("warning badge", WARN, WARN_TINT), ("warning on page", WARN, PAGE),
     ("bad", BAD, SURFACE), ("bad badge", BAD, BAD_TINT),
+    ("planner: a check that is switched off", "#5f7389", SURFACE),     # was #9aa5b1 (2.5:1); axe flagged it on Settings > Models
 ]
 
 

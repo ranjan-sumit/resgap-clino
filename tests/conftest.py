@@ -12,6 +12,21 @@ if str(ROOT) not in sys.path:
 
 
 @pytest.fixture(autouse=True)
+def _never_touch_real_data(tmp_path_factory, monkeypatch):
+    """Every test starts on a throwaway database and projects folder. Before this, a test that did not ask for
+    `isolated_env` (three pipeline tests) wrote run.started / run.finished events into the real, tamper-evident
+    audit log in data/run_history.db. A test that needs its own location still sets it, and `isolated_env` replaces
+    this one."""
+    import utils.database as db
+    base = tmp_path_factory.mktemp("guard")
+    monkeypatch.setenv("RESGAP_DB_PATH", str(base / "guard.db"))
+    monkeypatch.setenv("RESGAP_PROJECTS_DIR", str(base / "projects"))
+    db._INITIALIZED.clear()
+    yield
+    db._INITIALIZED.clear()
+
+
+@pytest.fixture(autouse=True)
 def _no_provider_pacing(monkeypatch):
     """Lookups to Semantic Scholar wait for their turn in real runs (1-3.5 s apiece); tests mock the network and must not."""
     import pipeline.reference_extractor as rx

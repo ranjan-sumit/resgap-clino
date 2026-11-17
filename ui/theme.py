@@ -472,6 +472,49 @@ CSS_EXTRA = """
   .ref-card.tier-3-card { border-left-color:#4a6580; }
   .ref-title { font-size:0.85rem; color:#0b1f3a; }
   .ref-meta  { font-family:'DM Mono',monospace; font-size:0.68rem; color:#4a6580; margin-top:0.2rem; }
+
+  /* ── UI-02: one button system, one field style, a smaller heading scale ──────────────────────
+     Primary = solid blue, for the one action a screen is about. Everything else is outlined.
+     Destructive actions are outlined in red until the user confirms. */
+  [data-testid="stMainBlockContainer"] { padding-top: 2.5rem !important; }
+
+  .stButton > button[kind="secondary"], .stButton > button[kind="secondaryFormSubmit"],
+  .stDownloadButton > button:not([kind="primary"]) {
+    background: var(--surface) !important; color: #243b53 !important;
+    border: 1px solid #9fb3c8 !important; font-weight: 500 !important;
+  }
+  .stButton > button[kind="secondary"]:hover:not(:disabled), .stButton > button[kind="secondaryFormSubmit"]:hover:not(:disabled),
+  .stDownloadButton > button:not([kind="primary"]):hover:not(:disabled) {
+    background: #f1f6fc !important; border-color: #243b53 !important; color: #0b1f3a !important;
+  }
+  .stButton > button[kind="primary"], .stButton > button[kind="primaryFormSubmit"], .stDownloadButton > button[kind="primary"] {
+    background: var(--accent) !important; color: #ffffff !important; border: 1px solid var(--accent) !important; font-weight: 600 !important;
+  }
+  .stButton > button[kind="primary"]:hover:not(:disabled), .stButton > button[kind="primaryFormSubmit"]:hover:not(:disabled),
+  .stDownloadButton > button[kind="primary"]:hover:not(:disabled) { background: var(--accent-strong) !important; }
+  .stButton > button:disabled, .stDownloadButton > button:disabled {
+    background: transparent !important; color: #8aa0b8 !important; border: 1px solid #d3e0ee !important; cursor: not-allowed;
+  }
+  [class*="st-key-clear_"] .stButton > button[kind="secondary"], [class*="st-key-delete_"] .stButton > button[kind="secondary"],
+  .st-key-empty_deleted .stButton > button[kind="secondary"] { color: #9b1c1c !important; border-color: #e3a8a8 !important; }
+  [class*="st-key-clear_"] .stButton > button[kind="secondary"]:hover:not(:disabled),
+  [class*="st-key-delete_"] .stButton > button[kind="secondary"]:hover:not(:disabled),
+  .st-key-empty_deleted .stButton > button[kind="secondary"]:hover:not(:disabled) {
+    background: #fff1f1 !important; border-color: #c81e1e !important; color: #9b1c1c !important;
+  }
+
+  /* text, text-area and number fields share one white field with one border (Streamlit tints the outer
+     element with the theme's secondary background, which left a blue ring and blue number boxes) */
+  [data-testid="stTextInputRootElement"], [data-testid="stTextAreaRootElement"], [data-testid="stNumberInputContainer"] {
+    background-color: var(--surface) !important;
+  }
+  [data-testid="stTextAreaRootElement"], [data-testid="stNumberInputContainer"] { border: 1px solid var(--border) !important; border-radius: 6px !important; }
+
+  /* headings: Streamlit's defaults (2.5rem for a page title) are far larger than the rest of the screen */
+  [data-testid="stMainBlockContainer"] h1 { font-size: 1.9rem !important; letter-spacing: -0.02em; }
+  [data-testid="stMainBlockContainer"] h2 { font-size: 1.55rem !important; font-weight: 700 !important; letter-spacing: -0.015em; }
+  [data-testid="stMainBlockContainer"] h3 { font-size: 1.2rem !important; font-weight: 600 !important; letter-spacing: -0.01em; }
+  [data-testid="stMainBlockContainer"] h4 { font-size: 1.02rem !important; font-weight: 600 !important; }
 </style>
 """
 

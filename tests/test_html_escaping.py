@@ -64,7 +64,8 @@ SAFE_IN = {   # reviewed per file: HTML pieces built from other linted f-strings
                         "block('Research insights', s['research'])", "block('Suggested next steps', s['next_steps'])",
                         "block('Limitations of the Lab analysis', s['limitations'])"},
     # the badge/card/label helpers take HTML by design; their callers are what this test checks
-    "ui/components.py": {"text", "title", "t", "role", "hint_html", "hint", "bg", "border", "body", "w"},
+    "ui/components.py": {"text", "title", "t", "role", "hint_html", "hint", "bg", "border", "body", "w",
+                         "state", "aria"},      # stepper_html: a fixed class name and a fixed attribute
 }
 
 

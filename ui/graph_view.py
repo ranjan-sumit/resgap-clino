@@ -29,6 +29,21 @@ def relation_rows(graph: dict, evidence_by_id: dict | None = None) -> list[dict]
     return rows
 
 
+def relation_table_rows(rows: list[dict], limit: int = 300, quote_limit: int = 140, paper_limit: int = 40) -> list[dict]:
+    """The relations as table rows. Every cell is text: a column that mixes numbers and text (a page number
+    or a dash) cannot be converted for the table and makes Streamlit log an error on every rerun."""
+    out = []
+    for r in rows[:limit]:
+        quote = r.get("quote") or ""
+        out.append({
+            "From": r["source"], "Relation": r["relation"], "To": r["target"],
+            "Paper": (r.get("paper") or "")[:paper_limit],
+            "Page": str(r["page"]) if r.get("page") is not None else "n/a",
+            "Quote": quote[:quote_limit] + ("…" if len(quote) > quote_limit else ""),
+        })
+    return out
+
+
 def filter_relations(rows: list[dict], *, relations=(), paper: str | None = None, entity: str = "",
                      grounded_only: bool = False) -> list[dict]:
     e = (entity or "").strip().lower()

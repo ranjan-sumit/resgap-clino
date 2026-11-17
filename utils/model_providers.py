@@ -97,7 +97,10 @@ PROVIDER_REGISTRY = {
         key="openai", label="OpenAI",
         base_url="https://api.openai.com/v1", api_key_env="OPENAI_API_KEY",
         default_model="gpt-5.6-luna", fallback_model="gpt-5.6-terra",
-        known_models=("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"),
+        # The last four come from the 2026-10-23 research notes (the Run planner's tiers use them). Not checked
+        # with a live key: use Test models. gpt-rosalind needs approved access, so it is never picked automatically.
+        known_models=("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+                      "gpt-6-luna", "gpt-6.1-sol", "gpt-rosalind", "gpt-6-astra"),
         verified_live=False,
     ),
     "gemini": ProviderConfig(
@@ -110,7 +113,9 @@ PROVIDER_REGISTRY = {
         default_model="gemini-3.5-flash-lite", fallback_model="gemini-3.6-flash",
         # gemini-3.7-flash is left out of the suggested list: it timed out at 125 s and 182 s on a one-word request (2026-10-23).
         # It is still offered when "Refresh model list" shows it for your key.
-        known_models=("gemini-3.5-flash-lite", "gemini-3.6-flash"),
+        # gemini-3.8-flash and gemini-4-argon come from the 2026-10-23 research notes and are not checked with a
+        # live key yet (use Test models). Both have promotional prices that end soon (see utils/run_planner.py).
+        known_models=("gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-3.8-flash", "gemini-4-argon"),
         # Live-checked 2026-10-19 with a real key: /models lists all three IDs,
         # each answered a chat call, a full 2-paper pipeline run completed on
         # gemini-3.5-flash-lite, and image input (vision_model below) described

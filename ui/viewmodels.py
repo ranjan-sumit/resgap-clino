@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import html
 
+from ui.copy import plain_stage
 from utils.run_storage import to_local_display
 
 
@@ -94,7 +95,7 @@ def overview(res: dict) -> list[tuple]:
 
 def trace_rows(trace: list[dict] | None) -> list[dict]:
     """Numbered stage rows for the Pipeline Trace tab."""
-    return [{"n": i, "status": e.get("status", "✅"), "stage": e["stage"],
+    return [{"n": i, "status": e.get("status", "✅"), "stage": plain_stage(e["stage"]),
              "inputs": e["inputs"], "outputs": e["outputs"]}
             for i, e in enumerate(trace or [], 1)]
 

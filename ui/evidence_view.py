@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 
 from pipeline.coverage import paper_coverage
+from ui.copy import plain_stage
 
 _WORD = re.compile(r"[a-z0-9]+")
 _MATCH_THRESHOLD = 0.3
@@ -134,9 +135,9 @@ def warnings_summary(results: dict) -> list[str]:
         out.append("The quality gate failed, so gap analysis was skipped.")
     for row in results.get("pipeline_trace") or []:
         if row.get("status") == "❌":
-            out.append(f"{row.get('stage', 'A step')} failed: {row.get('outputs', '')}".strip())
+            out.append(f"{plain_stage(row.get('stage', 'A step'))} failed: {row.get('outputs', '')}".strip())
         elif row.get("status") == "⚠️":
-            out.append(f"{row.get('stage', 'A step')}: {row.get('outputs', '')}".strip())
+            out.append(f"{plain_stage(row.get('stage', 'A step'))}: {row.get('outputs', '')}".strip())
     for r in paper_coverage(results):
         if r["status"] != "ok":
             out.append(f"{r['title'][:50]}: " + "; ".join(r["problems"]) + ".")

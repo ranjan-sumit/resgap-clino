@@ -6,19 +6,19 @@ from utils.run_storage import to_local_display
 
 def _minutes(seconds) -> str:
     if not isinstance(seconds, (int, float)) or seconds <= 0:
-        return "—"
+        return "n/a"
     return f"{int(seconds // 60)} min {int(seconds % 60):02d} s" if seconds >= 60 else f"{int(seconds)} s"
 
 
 def _tokens(usage) -> str:
     total = (usage or {}).get("total") if isinstance(usage, dict) else None
-    return f"{total:,}" if isinstance(total, int) else "—"
+    return f"{total:,}" if isinstance(total, int) else "n/a"
 
 
 def _model(manifest: dict) -> str:
     bundle = str((manifest or {}).get("model_bundle_version") or "")
     # "provider:model" or a role summary: show the model part, shortened
-    return bundle.split(":")[-1][:34] if bundle else "—"
+    return bundle.split(":")[-1][:34] if bundle else "n/a"
 
 
 def status_chip(run: dict, manifest: dict | None, gate_blocked: bool = False) -> str:

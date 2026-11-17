@@ -175,7 +175,7 @@ def test_board_rows_show_status_model_duration_tokens_and_lab_without_ids():
     a, b = rows
     assert a["Status"] == "Completed · 1 warning(s)" and a["Duration"] == "6 min 29 s" and a["Tokens"] == "170,682"
     assert a["Model"] == "gemini-3.5-flash-lite" and a["Lab"] == "✓" and a["Feedback"] == 2 and a["Created"] == "2026-10-22 09:30"
-    assert b["Status"] == "Archived" and b["Duration"] == "—" and b["Tokens"] == "—" and b["Model"] == "—"
+    assert b["Status"] == "Archived" and b["Duration"] == "n/a" and b["Tokens"] == "n/a" and b["Model"] == "n/a"
     assert "ID" not in a and not any("abcdef" in str(v) for v in a.values())
 
 

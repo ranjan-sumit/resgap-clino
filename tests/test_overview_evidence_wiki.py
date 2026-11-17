@@ -68,7 +68,7 @@ def test_warnings_summary_lists_trace_warnings_coverage_and_flags():
     r["model_fallbacks"] = [{"stage": "s"}]
     r["run_quality"] = {"quote_rate": 0.5}
     text = " | ".join(ev.warnings_summary(r))
-    assert "Stage 2 — LLM Wiki" in text                       # the ⚠️ trace row
+    assert "Stage 2 - LLM Wiki" in text                       # the ⚠️ trace row
     assert "empty wiki page" in text                          # coverage problem
     assert "numbers not found" in text and "fallback model" in text and "50%" in text
     assert ev.warnings_summary({"gaps": [], "papers": [], "pipeline_trace": []}) == []
@@ -164,8 +164,8 @@ def test_only_the_open_section_is_built(app_test, isolated_env):
     at = app_test(timeout=90)
     t = _texts(at)
     assert "Top gaps" in t                                  # Overview is built
-    assert "Compiled Wiki Pages" not in t and "Reference Corpus" not in t     # others are not
-    assert "Export Results" not in t
+    assert "Compiled wiki pages" not in t and "Reference corpus" not in t     # others are not
+    assert "Export results" not in t
 
 
 def test_overview_renders_a_big_run_quickly(app_test, isolated_env):

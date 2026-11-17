@@ -94,7 +94,7 @@ _COMPARE_TEXT = [("Problem", "problem_statement"), ("Methodology", "methodology"
 
 def compare_proposals(a: dict, b: dict) -> list[dict]:
     """Side-by-side rows [{field, a, b}] for two proposal rows (from proposal_rows)."""
-    out = [{"field": label, "a": str(a.get(k) or "—"), "b": str(b.get(k) or "—")} for label, k in _COMPARE_FIELDS]
+    out = [{"field": label, "a": str(a.get(k) or "n/a"), "b": str(b.get(k) or "n/a")} for label, k in _COMPARE_FIELDS]
     for label, k in _COMPARE_TEXT:
-        out.append({"field": label, "a": str(a["proposal"].get(k) or "—"), "b": str(b["proposal"].get(k) or "—")})
+        out.append({"field": label, "a": str(a["proposal"].get(k) or "n/a"), "b": str(b["proposal"].get(k) or "n/a")})
     return out

@@ -64,7 +64,7 @@ def test_compare_proposals_lists_each_field_side_by_side():
     table = {r["field"]: r for r in gv.compare_proposals(a, b)}
     assert table["Confidence"] == {"field": "Confidence", "a": "high", "b": "medium"}
     assert table["Methodology"]["b"] == "Enrol three sites."
-    assert table["Review verdict"]["b"] == "—"
+    assert table["Review verdict"]["b"] == "n/a"
 
 
 # ── Gaps screen ─────────────────────────────────────────────────────────────────────────────

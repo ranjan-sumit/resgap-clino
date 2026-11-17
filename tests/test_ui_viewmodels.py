@@ -51,5 +51,5 @@ def test_theme_has_three_stylesheets_and_nothing_else_inline():
 
 def test_components_render_the_same_markup_as_before():
     assert components.badge("x").startswith('<span style="display:inline-block;padding:0.15rem 0.5rem;')
-    assert "T1 " in components.tier_badge(1)
+    assert "Uploaded PDF" in components.tier_badge(1)
     assert components.card("T", "B").startswith('<div class="stage-card"><div class="stage-title"')

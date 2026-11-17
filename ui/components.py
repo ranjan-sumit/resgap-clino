@@ -38,6 +38,30 @@ def badge(text, color="#0066cc", bg="#e5f2ff", border="#7ab8f5", title=""):
             f'margin-right:0.3rem;">{text}</span>')
 
 
+def shorten(text, limit: int = 28) -> str:
+    """Text cut at a word boundary with an ellipsis, never in the middle of a word. Put the full text in a
+    title attribute where it matters. Short text comes back unchanged."""
+    s = " ".join(str(text or "").split())
+    if len(s) <= limit:
+        return s
+    cut = s[:limit - 1]
+    if " " in cut and not s[limit - 1].isspace():          # the cut fell inside a word: drop the partial word
+        cut = cut[:cut.rfind(" ")]
+    return cut.rstrip(" ,;:.-") + "…"
+
+
+def stepper_html(steps, current: int) -> str:
+    """The step indicator for a multi-step form: done, current and coming steps, as an ordered list. Steps are
+    1-based. Built as HTML so a step label can never be read as a markdown list item."""
+    items = []
+    for i, label in enumerate(steps, 1):
+        state = "done" if i < current else "current" if i == current else "todo"
+        aria = ' aria-current="step"' if state == "current" else ""
+        items.append(f'<li class="wz-step {state}"{aria}><span class="wz-num">{i}</span>'
+                     f'<span class="wz-label">{html.escape(str(label))}</span></li>')
+    return f'<ol class="wz-steps" aria-label="Progress">{"".join(items)}</ol>'
+
+
 def esc(value) -> str:
     """Text for putting inside HTML: every character that could start markup is escaped. Use it for anything that
     came from a paper, a model or a user (titles, claims, names, error text); tests refuse unescaped values."""
@@ -61,7 +85,7 @@ def tier_badge(tier: int) -> str:
     label, color, _ = TIER_LABELS.get(tier, ("Unknown", "#4a6580", ""))
     bgs = {1: "#e5f2ff", 2: "#e7f8f1", 3: "#f2f5f8"}
     borders = {1: "#7ab8f5", 2: "#83d7b1", 3: "#c9dff5"}
-    return badge(f"T{tier} {label}", color, bgs.get(tier, "#f2f5f8"), borders.get(tier, "#c9dff5"))
+    return badge(label, color, bgs.get(tier, "#f2f5f8"), borders.get(tier, "#c9dff5"))
 
 
 def card(title, body, color="#0066cc"):

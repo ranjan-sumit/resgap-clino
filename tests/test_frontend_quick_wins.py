@@ -62,7 +62,9 @@ def test_trace_tab_shows_the_stored_trace_for_a_saved_run(app_test, isolated_env
     seed_run(golden_results())
     at = _open_section(app_test(timeout=90), "Trace")
     text = _texts(at)
-    assert "STAGE 1" in text and "PDF Parse" in text
+    assert "1. " in text and "PDF Parse" in text
+    assert "STAGE 1 —" not in text                     # the row number used to be glued to the stage's own name
+    assert "council_chair" not in text and "council_a" not in text   # roles are shown by their labels
     assert "Run the main analysis to see the pipeline trace" not in text
 
 
