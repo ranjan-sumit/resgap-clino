@@ -209,7 +209,11 @@ def build_spec_client(spec: ModelSpec, api_key: str, token_meter=None) -> AzureO
         check_endpoint(spec.base_url)                     # https, no credentials in the address, no metadata service
         return AzureOpenAIClient(api_key=api_key, base_url=spec.base_url, model=spec.model,
                                  fallback_model=None, token_meter=token_meter, vision_model=None)
-    cfg = PROVIDER_REGISTRY[spec.provider]
+    # get_provider(), not PROVIDER_REGISTRY[...]: raises a clear ValueError
+    # naming the bad key if spec.provider is stale (e.g. from a saved
+    # model_settings.json predating a provider rename/removal), instead of
+    # a raw KeyError crashing the whole run.
+    cfg = get_provider(spec.provider)
     return AzureOpenAIClient(
         api_key=api_key, base_url=cfg.base_url, model=spec.model, fallback_model=None,
         top_p=_MODEL_TOP_P_OVERRIDES.get(spec.model, 1.0), token_meter=token_meter,

@@ -341,7 +341,12 @@ _MODEL_ROWS = list(ALL_ROLES) + ["fallback"]
 
 
 def _provider_name(pk: str) -> str:
-    return "Custom endpoint" if pk == CUSTOM_PROVIDER else PROVIDER_REGISTRY[pk].label.split(" (")[0]
+    # .get(), not [pk]: see _model_choices()'s comment -- pk can come from a
+    # ModelSpec built from session_state and may not be a live registry key.
+    if pk == CUSTOM_PROVIDER:
+        return "Custom endpoint"
+    reg = PROVIDER_REGISTRY.get(pk)
+    return reg.label.split(" (")[0] if reg else pk
 
 
 def _provider_options(role: str) -> list:
@@ -358,13 +363,24 @@ def _provider_label(pk: str) -> str:
 def _model_choices(pk: str) -> list:
     if pk == _NO_FALLBACK:
         return []
-    known = [] if pk == CUSTOM_PROVIDER else list(PROVIDER_REGISTRY[pk].known_models)
+    # .get(), not [pk]: pk comes from session_state (st.session_state[f"mp_{role}"]),
+    # which can hold a provider key from a previous render/config that is no longer
+    # in PROVIDER_REGISTRY (e.g. a saved model_settings.json from before a provider
+    # was renamed/removed, or a stale widget value mid-rerun). A provider this
+    # function doesn't recognize has no known models -- same as "custom" -- rather
+    # than crashing the whole Settings page with a KeyError.
+    reg = PROVIDER_REGISTRY.get(pk)
+    known = [] if pk == CUSTOM_PROVIDER or reg is None else list(reg.known_models)
     live = st.session_state.get("_fetched_models", {}).get(pk, [])
     return known + [m for m in live if m not in known]
 
 
 def _default_model(pk: str) -> str:
-    return "" if pk == CUSTOM_PROVIDER else PROVIDER_REGISTRY[pk].default_model
+    # See _model_choices()'s comment: pk may not be a live registry key.
+    if pk == CUSTOM_PROVIDER:
+        return ""
+    reg = PROVIDER_REGISTRY.get(pk)
+    return reg.default_model if reg else ""
 
 
 def _set_widget_state(cfg: ModelConfig) -> None:
