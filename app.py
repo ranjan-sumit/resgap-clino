@@ -3363,7 +3363,9 @@ if st.session_state.results:
                 _lab_results = (with_sections(st.session_state.current_run_id, res)
                                 if st.session_state.current_run_id else res)    # runs load without section text
                 st.session_state.comp_results = run_computational_lab(
-                    _lab_results, context, client, domain_config=domain_cfg, n_council_runs=n_council_runs,
+                    _lab_results, context, client,
+                    domain_config=get_domain_config(context.get("domain", "General AI/ML")),
+                    n_council_runs=n_council_runs,
                     progress=cupd, trace=_add_trace)
                 comp_prog.progress(100)
                 # The Lab output belongs to the run it was computed from: attach it
